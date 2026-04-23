@@ -1,0 +1,52 @@
+global:
+  log_level: info
+  data_dir: /var/lib/illuminator
+  plugin_dirs:
+    - /etc/illuminator/plugins
+    - ./plugins
+
+server:
+  http:
+    enabled: true
+    listen: "0.0.0.0:9527"
+  websocket:
+    enabled: true
+
+pipelines:
+  cpu_profiling:
+    source:
+      type: ebpf_cpu_sampler
+      config:
+        frequency_hz: 49
+        stack_depth: 128
+    processors:
+      - type: symbolizer
+        config:
+          demangle: true
+      - type: filter
+        config:
+          exclude_kernel: false
+    aggregator:
+      type: stack_merge
+      config:
+        flush_interval_sec: 10
+    sinks:
+      - type: console_output
+        config:
+          format: text
+
+  system_metrics:
+    source:
+      type: proc_stat_reader
+      config:
+        interval_ms: 1000
+        collect:
+          - cpu
+          - memory
+          - disk
+          - network
+    processors: []
+    sinks:
+      - type: console_output
+        config:
+          format: json

@@ -1,0 +1,23 @@
+build --cxxopt=-std=c++2a
+build --host_cxxopt=-std=c++2a
+build --copt=-Wall
+build --copt=-Wextra
+build --copt=-Wno-unused-parameter
+
+build:opt --compilation_mode=opt
+build:opt --copt=-O2
+
+build:dbg --compilation_mode=dbg
+build:dbg --copt=-g
+build:dbg --strip=never
+
+build:asan --strip=never
+build:asan --copt=-fsanitize=address
+build:asan --copt=-fno-omit-frame-pointer
+build:asan --linkopt=-fsanitize=address
+
+build:tsan --strip=never
+build:tsan --copt=-fsanitize=thread
+build:tsan --linkopt=-fsanitize=thread
+
+test --test_output=errors

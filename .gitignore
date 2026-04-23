@@ -1,0 +1,53 @@
+# Bazel
+/bazel-*
+.bazelci/
+
+# Build artifacts
+/build/
+*.bpf.o
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+compile_commands.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Web frontend
+web/node_modules/
+web/dist/
+
+# npm
+*.tgz
+.npm/
+
+# Python
+__pycache__/
+*.pyc
+
+# Temp & logs
+*.log
+*.tmp
+/tmp/
+
+# Data & database
+*.db
+*.db-wal
+*.db-shm
+/data/
+
+# BPF compiled objects (generated, not tracked)
+*.bpf.o
+
+# Plan files (personal dev notes)
+*.plan.md
+
+# MODULE.bazel.lock is large but should be tracked for reproducibility
+# Uncomment the next line if you don't want to track it:
+# MODULE.bazel.lock
