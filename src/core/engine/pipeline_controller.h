@@ -34,6 +34,18 @@ public:
         source_ = std::move(source);
     }
 
+    SourcePlugin* GetSource() { return source_.get(); }
+
+    StatusOr<DataBatchPtr> RunProcessors(DataBatchPtr batch) {
+        for (auto& proc : processors_) {
+            auto result = proc->Process(std::move(batch));
+            if (!result.ok())
+                return result.status();
+            batch = std::move(*result);
+        }
+        return batch;
+    }
+
     void AddProcessor(std::unique_ptr<ProcessorPlugin> proc) {
         processors_.push_back(std::move(proc));
     }

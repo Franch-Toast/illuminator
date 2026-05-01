@@ -1,19 +1,8 @@
 global:
   log_level: info
-  data_dir: /var/lib/illuminator
-  plugin_dirs:
-    - /etc/illuminator/plugins
-    - ./plugins
-
-server:
-  http:
-    enabled: true
-    listen: "0.0.0.0:9527"
-  websocket:
-    enabled: true
+  data_dir: /tmp/illuminator_data
 
 pipelines:
-  # System CPU utilization - /proc/stat based, very low overhead
   cpu_utilization:
     source:
       type: cpu_utilization
@@ -28,9 +17,7 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_utilization
-      - type: websocket_sink
 
-  # Per-process/thread CPU monitoring
   cpu_processes:
     source:
       type: process_cpu
@@ -38,17 +25,13 @@ pipelines:
         interval_ms: 2000
         top_n: 50
         thread_detail_threshold_pct: 3.0
-        # include_comm_regex: "planning|perception|map_engine"
-        # exclude_comm_regex: ""
     sinks:
       - type: local_storage
         config:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_processes
-      - type: websocket_sink
 
-  # On-CPU profiling with stack traces and flame graph support
   cpu_profile:
     source:
       type: cpu_profiler
@@ -58,9 +41,7 @@ pipelines:
         stack_depth: 128
         user_stacks: true
         kernel_stacks: true
-        # target_pids: "1234,5678"
-        # target_comms: "planning,perception"
-        bpf_object: build/bpf/cpu_profiler.bpf.o
+        bpf_object: /sandbox/illuminator/build/bpf/cpu_profiler.bpf.o
     processors:
       - type: stack_symbolizer
         config:
@@ -81,11 +62,7 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_profile
-      - type: pprof_export
-        config:
-          path: /tmp/illuminator.folded
 
-  # Scheduler analysis - context switches, wakeup latency, CPU migrations
   sched_analysis:
     source:
       type: sched_analyzer
@@ -93,36 +70,10 @@ pipelines:
         detailed_mode: false
         aggregate_interval_ms: 5000
         track_migrations: true
-        bpf_object: build/bpf/sched_analyzer.bpf.o
+        bpf_object: /sandbox/illuminator/build/bpf/sched_analyzer.bpf.o
     sinks:
       - type: local_storage
         config:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: sched_analysis
-      - type: websocket_sink
-
-  # Off-CPU profiling (optional, higher overhead)
-  # Uncomment to enable off-CPU analysis
-  # offcpu_profile:
-  #   source:
-  #     type: offcpu_profiler
-  #     config:
-  #       min_duration_us: 100
-  #       user_stacks: true
-  #       kernel_stacks: true
-  #       target_comms: "planning,perception"
-  #       bpf_object: build/bpf/offcpu_profiler.bpf.o
-  #   processors:
-  #     - type: stack_symbolizer
-  #       config:
-  #         demangle: true
-  #     - type: stack_merger
-  #       config:
-  #         group_by: comm
-  #   sinks:
-  #     - type: local_storage
-  #       config:
-  #         backend: sqlite
-  #         path: /tmp/illuminator_data
-  #         pipeline: offcpu_profile

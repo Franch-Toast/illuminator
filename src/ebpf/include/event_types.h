@@ -23,7 +23,7 @@ typedef int32_t  il_s32;
 #endif
 #endif
 
-#define MAX_STACK_DEPTH 128
+#define MAX_STACK_DEPTH 127
 #define TASK_COMM_LEN 16
 
 struct il_stack_key {
@@ -92,6 +92,25 @@ struct il_sched_event {
     char prev_comm[TASK_COMM_LEN];
     char next_comm[TASK_COMM_LEN];
     __u8 event_type;
+};
+
+struct il_offcpu_event {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 tid;
+    __u32 cpu;
+    __u64 duration_ns;
+    __s32 kernel_stack_id;
+    __s32 user_stack_id;
+    char comm[TASK_COMM_LEN];
+};
+
+struct il_sched_stats {
+    __u64 switch_count;
+    __u64 total_runqueue_latency_ns;
+    __u64 max_runqueue_latency_ns;
+    __u64 migrate_count;
+    char comm[TASK_COMM_LEN];
 };
 
 #endif /* __ILLUMINATOR_EVENT_TYPES_H */

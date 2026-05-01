@@ -3,12 +3,14 @@
 #include <cstring>
 #include <atomic>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <chrono>
 
 #include "core/common/logging.h"
 #include "core/common/config.h"
+#include "core/config/yaml_config_loader.h"
 #include "core/engine/pipeline_controller.h"
 #include "plugin/builtin/builtin_plugins.h"
 #include "plugin/manager/plugin_manager.h"
@@ -52,24 +54,197 @@ static void SetLogLevel(const std::string& level) {
     else if (level == "error") illuminator::Logger::Instance().SetLevel(LogLevel::kError);
 }
 
+namespace illuminator {
+
+static std::string EscapeJson(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\t': out += "\\t"; break;
+            default:   out += c; break;
+        }
+    }
+    return out;
+}
+
+static std::string FieldValueToJson(const FieldValue& fv) {
+    if (auto* b = std::get_if<bool>(&fv)) return *b ? "true" : "false";
+    if (auto* i = std::get_if<int64_t>(&fv)) return std::to_string(*i);
+    if (auto* u = std::get_if<uint64_t>(&fv)) return std::to_string(*u);
+    if (auto* d = std::get_if<double>(&fv)) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%.4f", *d);
+        return buf;
+    }
+    if (auto* sv = std::get_if<std::string_view>(&fv))
+        return "\"" + EscapeJson(*sv) + "\"";
+    return "null";
+}
+
+std::string StackFramesToJson(const std::vector<StackFrame>& frames) {
+    std::ostringstream ss;
+    ss << "[";
+    bool first = true;
+    for (auto& f : frames) {
+        if (!first) ss << ",";
+        first = false;
+        ss << "{\"address\":" << f.address;
+        if (!f.function_name.empty())
+            ss << ",\"function_name\":\"" << EscapeJson(f.function_name) << "\"";
+        if (!f.module_name.empty())
+            ss << ",\"module_name\":\"" << EscapeJson(f.module_name) << "\"";
+        ss << "}";
+    }
+    ss << "]";
+    return ss.str();
+}
+
+std::string BatchToJson(const DataBatch& batch, const std::string& pipeline) {
+    std::ostringstream ss;
+    ss << "{\"pipeline\":\"" << EscapeJson(pipeline) << "\",\"records\":[";
+    bool first = true;
+    for (auto& rec : batch.records()) {
+        if (!first) ss << ",";
+        first = false;
+        ss << "{\"labels\":{";
+        bool lf = true;
+        for (auto& l : rec.labels) {
+            if (!lf) ss << ",";
+            lf = false;
+            ss << "\"" << EscapeJson(l.key) << "\":\"" << EscapeJson(l.value) << "\"";
+        }
+        ss << "},\"fields\":{";
+        bool ff = true;
+        for (auto& [k, v] : rec.fields) {
+            if (!ff) ss << ",";
+            ff = false;
+            ss << "\"" << EscapeJson(k) << "\":" << FieldValueToJson(v);
+        }
+        ss << "}}";
+    }
+    ss << "]";
+
+    auto& samples = batch.stack_samples();
+    if (!samples.empty()) {
+        ss << ",\"stack_samples\":[";
+        bool sf = true;
+        for (auto& s : samples) {
+            if (!sf) ss << ",";
+            sf = false;
+            ss << "{\"pid\":" << s.pid
+               << ",\"tid\":" << s.tid
+               << ",\"cpu\":" << s.cpu
+               << ",\"count\":" << s.count
+               << ",\"comm\":\"" << EscapeJson(s.comm) << "\""
+               << ",\"type\":" << static_cast<int>(s.sample_type)
+               << ",\"kernel_stack\":" << StackFramesToJson(s.kernel_stack)
+               << ",\"user_stack\":" << StackFramesToJson(s.user_stack)
+               << "}";
+        }
+        ss << "]";
+    }
+
+    ss << "}";
+    return ss.str();
+}
+
+}  // namespace illuminator
+
 static illuminator::GlobalConfig BuildDemoConfig() {
     illuminator::GlobalConfig config;
     config.log_level = "info";
 
-    // System metrics pipeline -> console + storage
-    illuminator::PipelineConfig pc;
-    pc.name = "system_metrics";
-    pc.source.type = "proc_stat_reader";
-    pc.source.config["interval_ms"] = int64_t{2000};
-    pc.sinks.push_back({"console_output", illuminator::ConfigValue()});
+    // Pipeline 1: System CPU utilization (new unified source)
+    {
+        illuminator::PipelineConfig pc;
+        pc.name = "cpu_utilization";
+        pc.source.type = "cpu_utilization";
+        pc.source.config["interval_ms"] = int64_t{1000};
+        pc.source.config["collect_per_core"] = "true";
+        pc.source.config["collect_frequency"] = "true";
+        pc.source.config["ema_alpha"] = "0.3";
 
-    illuminator::ConfigValue storage_cfg;
-    storage_cfg["backend"] = "sqlite";
-    storage_cfg["path"] = "/tmp/illuminator_data";
-    storage_cfg["pipeline"] = "system_metrics";
-    pc.sinks.push_back({"local_storage", storage_cfg});
+        illuminator::ConfigValue storage_cfg;
+        storage_cfg["backend"] = "sqlite";
+        storage_cfg["path"] = "/tmp/illuminator_data";
+        storage_cfg["pipeline"] = "cpu_utilization";
+        pc.sinks.push_back({"local_storage", storage_cfg});
 
-    config.pipelines.push_back(std::move(pc));
+        config.pipelines.push_back(std::move(pc));
+    }
+
+    // Pipeline 2: Process CPU monitoring (new source with top-N and filtering)
+    {
+        illuminator::PipelineConfig pc;
+        pc.name = "cpu_processes";
+        pc.source.type = "process_cpu";
+        pc.source.config["interval_ms"] = int64_t{2000};
+        pc.source.config["top_n"] = int64_t{50};
+        pc.source.config["thread_detail_threshold_pct"] = "3.0";
+
+        illuminator::ConfigValue storage_cfg;
+        storage_cfg["backend"] = "sqlite";
+        storage_cfg["path"] = "/tmp/illuminator_data";
+        storage_cfg["pipeline"] = "cpu_processes";
+        pc.sinks.push_back({"local_storage", storage_cfg});
+
+        config.pipelines.push_back(std::move(pc));
+    }
+
+    // Pipeline 3: CPU profiling (eBPF sampler -> symbolizer -> merger)
+    {
+        illuminator::PipelineConfig pc;
+        pc.name = "cpu_profile";
+        pc.source.type = "cpu_profiler";
+        pc.source.config["frequency_hz"] = int64_t{49};
+        pc.source.config["mode"] = "aggregated";
+        pc.source.config["user_stacks"] = "true";
+        pc.source.config["kernel_stacks"] = "true";
+
+        illuminator::PipelineConfig::StageConfig sym_cfg;
+        sym_cfg.type = "stack_symbolizer";
+        sym_cfg.config["demangle"] = "true";
+        sym_cfg.config["kernel_symbols"] = "true";
+        pc.processors.push_back(sym_cfg);
+
+        illuminator::PipelineConfig::StageConfig merge_cfg;
+        merge_cfg.type = "stack_merger";
+        merge_cfg.config["group_by"] = "comm";
+        merge_cfg.config["include_kernel"] = "true";
+        pc.processors.push_back(merge_cfg);
+
+        illuminator::ConfigValue storage_cfg;
+        storage_cfg["backend"] = "sqlite";
+        storage_cfg["path"] = "/tmp/illuminator_data";
+        storage_cfg["pipeline"] = "cpu_profile";
+        pc.sinks.push_back({"local_storage", storage_cfg});
+        pc.sinks.push_back({"pprof_export", illuminator::ConfigValue()});
+
+        config.pipelines.push_back(std::move(pc));
+    }
+
+    // Pipeline 4: Scheduler analysis
+    {
+        illuminator::PipelineConfig pc;
+        pc.name = "sched_analysis";
+        pc.source.type = "sched_analyzer";
+        pc.source.config["detailed_mode"] = "false";
+        pc.source.config["aggregate_interval_ms"] = int64_t{5000};
+        pc.source.config["track_migrations"] = "true";
+
+        illuminator::ConfigValue storage_cfg;
+        storage_cfg["backend"] = "sqlite";
+        storage_cfg["path"] = "/tmp/illuminator_data";
+        storage_cfg["pipeline"] = "sched_analysis";
+        pc.sinks.push_back({"local_storage", storage_cfg});
+
+        config.pipelines.push_back(std::move(pc));
+    }
+
     return config;
 }
 
@@ -80,7 +255,20 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     illuminator::RegisterBuiltinPlugins();
     illuminator::PluginManager::Instance().PrintRegisteredPlugins();
 
-    auto config = BuildDemoConfig();
+    illuminator::GlobalConfig config;
+    if (!config_path.empty()) {
+        IL_INFO("Loading configuration from: %s", config_path.c_str());
+        auto result = illuminator::YamlConfigLoader::LoadFromFile(config_path);
+        if (!result.ok()) {
+            IL_ERROR("Failed to load config: %s", result.status().message().c_str());
+            return 1;
+        }
+        config = result.value();
+        if (!config.log_level.empty()) SetLogLevel(config.log_level);
+    } else {
+        IL_INFO("No config file specified, using built-in demo configuration");
+        config = BuildDemoConfig();
+    }
 
     illuminator::PipelineController controller;
     auto status = controller.BuildFromConfig(config);
@@ -116,6 +304,56 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         result += "]}\n";
         return result;
     });
+    // CPU utilization endpoint (new unified source)
+    http_server.RegisterHandler("/api/v1/cpu/utilization",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("cpu_utilization");
+        if (!pipe) return std::string("{\"error\":\"cpu_utilization pipeline not found\"}\n");
+        auto* source = pipe->GetSource();
+        if (!source) return std::string("{\"error\":\"no source\"}\n");
+        auto result = source->Collect();
+        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
+        return illuminator::BatchToJson(*result.value(), "cpu_utilization") + "\n";
+    });
+
+    // Process CPU metrics endpoint (new source)
+    http_server.RegisterHandler("/api/v1/cpu/processes",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("cpu_processes");
+        if (!pipe) return std::string("{\"error\":\"cpu_processes pipeline not found\"}\n");
+        auto* source = pipe->GetSource();
+        if (!source) return std::string("{\"error\":\"no source\"}\n");
+        auto result = source->Collect();
+        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
+        return illuminator::BatchToJson(*result.value(), "cpu_processes") + "\n";
+    });
+
+    // CPU profile / flamegraph endpoint
+    http_server.RegisterHandler("/api/v1/cpu/profile/flamegraph",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("cpu_profile");
+        if (!pipe) return std::string("{\"error\":\"cpu_profile pipeline not found\"}\n");
+        auto* source = pipe->GetSource();
+        if (!source) return std::string("{\"error\":\"no source\"}\n");
+        auto result = source->Collect();
+        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
+        auto processed = pipe->RunProcessors(std::move(*result));
+        if (!processed.ok()) return std::string("{\"error\":\"symbolization failed\"}\n");
+        return illuminator::BatchToJson(**processed, "cpu_profile") + "\n";
+    });
+
+    // Scheduler summary endpoint
+    http_server.RegisterHandler("/api/v1/cpu/sched/summary",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("sched_analysis");
+        if (!pipe) return std::string("{\"error\":\"sched_analysis pipeline not found\"}\n");
+        auto* source = pipe->GetSource();
+        if (!source) return std::string("{\"error\":\"no source\"}\n");
+        auto result = source->Collect();
+        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
+        return illuminator::BatchToJson(*result.value(), "sched_analysis") + "\n";
+    });
+
     // Self-observability endpoints
     http_server.RegisterHandler("/metrics", [](const std::string&) {
         return illuminator::InternalMetrics::Instance().ExportPrometheus();

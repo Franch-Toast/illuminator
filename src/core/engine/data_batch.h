@@ -60,6 +60,11 @@ struct StackFrame {
     std::string_view module_name;
 };
 
+enum class SampleType : uint8_t {
+    kOnCpu = 0,
+    kOffCpu = 1,
+};
+
 // Stack sample for profiling
 struct StackSample {
     Timestamp timestamp;
@@ -69,6 +74,12 @@ struct StackSample {
     std::vector<StackFrame> kernel_stack;
     std::vector<StackFrame> user_stack;
     uint64_t count = 1;
+
+    uint32_t cpu = 0;
+    SampleType sample_type = SampleType::kOnCpu;
+    uint64_t duration_ns = 0;
+    int32_t kernel_stack_id = -1;
+    int32_t user_stack_id = -1;
 };
 
 // Batch of data records flowing through the pipeline.

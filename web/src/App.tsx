@@ -1,13 +1,15 @@
 import React from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
-import Dashboard from './pages/Dashboard'
+import CpuOverview from './pages/CpuOverview'
+import ProcessExplorer from './pages/ProcessExplorer'
 import FlameGraph from './pages/FlameGraph'
 import Timeline from './pages/Timeline'
 import DiffView from './pages/DiffView'
 import QueryConsole from './pages/QueryConsole'
 
 const navItems = [
-  { path: '/', label: 'Dashboard', icon: '📊' },
+  { path: '/', label: 'CPU Overview', icon: '📊' },
+  { path: '/processes', label: 'Processes', icon: '📋' },
   { path: '/flamegraph', label: 'Flame Graph', icon: '🔥' },
   { path: '/timeline', label: 'Timeline', icon: '📈' },
   { path: '/diff', label: 'Diff View', icon: '🔀' },
@@ -57,7 +59,8 @@ export default function App() {
 
       <main style={{ flex: 1, background: '#0f1117', color: '#e0e0e0', overflow: 'auto' }}>
         <Routes>
-          <Route path="/" element={<Dashboard />} />
+          <Route path="/" element={<CpuOverview />} />
+          <Route path="/processes" element={<ProcessExplorer />} />
           <Route path="/flamegraph" element={<FlameGraph />} />
           <Route path="/timeline" element={<Timeline />} />
           <Route path="/diff" element={<DiffView />} />

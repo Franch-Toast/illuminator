@@ -145,7 +145,9 @@ private:
         if (pos == std::string::npos) return "/";
         auto end = request.find(' ', pos + 1);
         if (end == std::string::npos) return "/";
-        return request.substr(pos + 1, end - pos - 1);
+        auto full = request.substr(pos + 1, end - pos - 1);
+        auto qmark = full.find('?');
+        return (qmark != std::string::npos) ? full.substr(0, qmark) : full;
     }
 
     static std::string GuessContentType(const std::string& path) {

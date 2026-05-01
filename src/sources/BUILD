@@ -74,3 +74,103 @@ cc_library(
         "//src/plugin:manager",
     ],
 )
+
+cc_library(
+    name = "cpu_sys_monitor",
+    hdrs = ["cpu_sys_monitor/cpu_sys_monitor.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "process_cpu_monitor",
+    hdrs = ["process_cpu_monitor/process_cpu_monitor.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "cpu_utilization",
+    hdrs = ["cpu_utilization/cpu_utilization.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "process_cpu",
+    hdrs = ["process_cpu/process_cpu.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "cpu_profiler",
+    hdrs = ["cpu_profiler/cpu_profiler.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/core:common",
+        "//src/ebpf:common_bpf_types",
+        "//src/ebpf:loader",
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "sched_analyzer",
+    hdrs = ["sched_analyzer/sched_analyzer.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/core:common",
+        "//src/ebpf:common_bpf_types",
+        "//src/ebpf:loader",
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "offcpu_profiler",
+    hdrs = ["offcpu_profiler/offcpu_profiler.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/core:common",
+        "//src/ebpf:common_bpf_types",
+        "//src/ebpf:loader",
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
