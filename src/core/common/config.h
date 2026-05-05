@@ -1,3 +1,19 @@
+// ============================================================================
+// Illuminator 配置系统
+// ============================================================================
+//
+// 本文件定义了三层配置结构：
+// 1. ConfigValue — 扁平的键值对配置容器，支持嵌套 key 的点号表示法
+//    设计目标：避免递归类型问题，简化跨语言边界的配置传递
+// 2. PipelineConfig — 单条数据处理管道的配置结构
+//    （Source → Processors → Aggregator → Sinks）
+// 3. GlobalConfig — 全局配置，包含日志、服务器和多条管道配置
+//
+// 设计理念：
+// - ConfigValue 使用扁平化存储（string->string map），嵌套通过 "parent.child" 键名实现
+// - 不引入复杂类型层级，方便序列化和反序列化（无论来源是 YAML/JSON/命令行）
+// ============================================================================
+
 #pragma once
 
 #include <string>
@@ -11,40 +27,57 @@
 
 namespace illuminator {
 
-// Flat key-value configuration. Nested config is flattened with dot-notation.
-// This avoids recursive type issues with older compilers.
+// ---- ConfigValue: 扁平化键值配置容器 ----
+//
+// 核心设计：所有配置最终展开为 string → string 的映射表。
+// 嵌套配置通过点号（.）连接键名：
+//   server.http.listen → {"server.http.listen": "0.0.0.0:9527"}
+//
+// 支持方便的读写操作：
+// - config["key"] = value;                  写入标量值
+// - auto sub = config["parent"];             读取子值（带点号前缀解析）
+// - config["key"].AsInt(default);           读取并转换类型
 class ConfigValue {
 public:
     ConfigValue() = default;
+
+    // 从整数值构造（存储为 "" → "123"）
     ConfigValue(int64_t v) { values_[""] = std::to_string(v); }
+    // 从字符串构造
     ConfigValue(const char* v) { values_[""] = v; }
     ConfigValue(std::string v) { values_[""] = std::move(v); }
 
+    // 设置指定键的值
     void Set(const std::string& key, const std::string& value) {
         values_[key] = value;
     }
 
+    // ---- 下标运算符：读取子配置 ----
+    // 返回一个新的 ConfigValue，包含以 key 或 "key." 为前缀的所有子值
     ConfigValue operator[](const std::string& key) const {
         ConfigValue child;
         auto it = values_.find(key);
         if (it != values_.end()) {
-            child.values_[""] = it->second;
+            child.values_[""] = it->second;  // 精确匹配的值
         }
-        // Also propagate nested keys
+        // 处理嵌套子键：查找所有 "key.xxx" 形式的入口
         std::string prefix = key + ".";
         for (auto& [k, v] : values_) {
             if (k.substr(0, prefix.size()) == prefix) {
-                child.values_[k.substr(prefix.size())] = v;
+                child.values_[k.substr(prefix.size())] = v;  // 去掉前缀后存入
             }
         }
         return child;
     }
 
+    // ---- 下标运算符：写入配置 ----
+    // 返回引用以支持链式赋值：config["key"] = value;
     ConfigValue& operator[](const std::string& key) {
-        // Return self for mutation; key stored as ""
-        current_key_ = key;
+        current_key_ = key;  // 记录键名，供后续赋值运算符使用
         return *this;
     }
+
+    // ---- 赋值运算符（覆盖式写入） ----
 
     ConfigValue& operator=(int64_t v) {
         values_[current_key_] = std::to_string(v);
@@ -61,8 +94,12 @@ public:
         return *this;
     }
 
+    // ---- 值查询方法 ----
+
+    // 判断配置是否为空（无任何键值对）
     bool IsNull() const { return values_.empty(); }
 
+    // 读取为 64 位整数（失败时返回默认值）
     int64_t AsInt(int64_t def = 0) const {
         auto it = values_.find("");
         if (it == values_.end()) return def;
@@ -70,6 +107,7 @@ public:
         catch (...) { return def; }
     }
 
+    // 读取为双精度浮点数
     double AsDouble(double def = 0.0) const {
         auto it = values_.find("");
         if (it == values_.end()) return def;
@@ -77,47 +115,65 @@ public:
         catch (...) { return def; }
     }
 
+    // 读取为字符串
     std::string AsString(const std::string& def = "") const {
         auto it = values_.find("");
         return it != values_.end() ? it->second : def;
     }
 
+    // 读取为布尔值（"true" 或 "1" 视作 true）
     bool AsBool(bool def = false) const {
         auto it = values_.find("");
         if (it == values_.end()) return def;
         return it->second == "true" || it->second == "1";
     }
 
+    // 获取原始映射表（用于遍历）
     const std::unordered_map<std::string, std::string>& Raw() const {
         return values_;
     }
 
 private:
     std::unordered_map<std::string, std::string> values_;
-    std::string current_key_;
+    std::string current_key_;  // 当前正在写入的键名（配合 operator= 使用）
 };
 
+// ---- PipelineConfig: 单条管道配置 ----
+//
+// 每条管道 = 一个 Source + 可选的多个 Processor + 可选的 Aggregator + 多个 Sink
+// 数据流向：Source → Processor1 → Processor2 → ... → Aggregator → Sink1, Sink2, ...
 struct PipelineConfig {
-    std::string name;
+    std::string name;  // 管道唯一名称
+
+    // 阶段配置：类型名 + 配置参数
     struct StageConfig {
-        std::string type;
-        ConfigValue config;
+        std::string type;      // 插件类型名（如 "cpu_utilization"、"filter"）
+        ConfigValue config;    // 该阶段的配置参数
     };
-    StageConfig source;
-    std::vector<StageConfig> processors;
-    std::optional<StageConfig> aggregator;
-    std::vector<StageConfig> sinks;
+
+    StageConfig source;                         // 数据源（必需）
+    std::vector<StageConfig> processors;        // 处理器链（可选，按顺序执行）
+    std::optional<StageConfig> aggregator;      // 聚合器（可选，用于时间窗口聚合）
+    std::vector<StageConfig> sinks;             // 数据出口（至少一个）
 };
 
+// ---- GlobalConfig: 全局配置结构 ----
+//
+// 根级配置，包含整个 Illuminator 实例的配置信息
 struct GlobalConfig {
-    std::string log_level = "info";
-    std::string data_dir = "/var/lib/illuminator";
-    std::vector<std::string> plugin_dirs;
+    // 全局设置
+    std::string log_level = "info";                     // 默认日志级别
+    std::string data_dir = "/var/lib/illuminator";      // 默认数据目录
+    std::vector<std::string> plugin_dirs;                // SO 插件搜索路径列表
+
+    // 服务器配置
     struct ServerConfig {
-        bool http_enabled = true;
-        std::string http_listen = "0.0.0.0:9527";
-        bool ws_enabled = true;
+        bool http_enabled = true;                       // 是否启用 HTTP 服务
+        std::string http_listen = "0.0.0.0:9527";      // HTTP 监听地址
+        bool ws_enabled = true;                         // 是否启用 WebSocket
     } server;
+
+    // 关联的管道配置列表
     std::vector<PipelineConfig> pipelines;
 };
 

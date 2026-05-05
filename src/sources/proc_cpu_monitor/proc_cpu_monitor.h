@@ -1,3 +1,14 @@
+// ============================================================================
+// ProcCpuMonitor — 按进程/线程的 CPU 利用率数据源（精简版，Pull 模式）
+// ============================================================================
+//
+// 功能类似 process_cpu_monitor，但更轻量化：
+//   - 线程详情阈值默认为 10%（更保守，减少线程展开的数据量）
+//   - 不收集 voluntary/nonvoluntary_ctxt_switches
+//   - 函数签名略有不同（CollectThreads 多传入 num_cpus 参数）
+//   - 默认采集间隔 2000ms
+// ============================================================================
+
 #pragma once
 
 #include <algorithm>
@@ -48,20 +59,17 @@ public:
         ReadTotalCpuJiffies(cur_total_jiffies);
         uint64_t delta_total = cur_total_jiffies - prev_total_jiffies_;
         if (delta_total == 0) delta_total = 1;
-
         int num_cpus = CountOnlineCpus();
         if (num_cpus < 1) num_cpus = 1;
 
         std::vector<ProcessSnapshot> processes;
         ScanProcesses(processes);
-
         std::vector<ProcessWithCpu> ranked;
         ranked.reserve(processes.size());
 
         for (auto& proc : processes) {
             ProcessWithCpu pw;
             pw.snap = proc;
-
             auto it = prev_snapshots_.find(proc.pid);
             if (it != prev_snapshots_.end()) {
                 auto& prev = it->second;
@@ -77,14 +85,11 @@ public:
             ranked.push_back(pw);
         }
 
-        // Sort by total CPU descending, keep top N
         std::sort(ranked.begin(), ranked.end(),
                   [](const ProcessWithCpu& a, const ProcessWithCpu& b) {
                       return a.cpu_total_pct > b.cpu_total_pct;
                   });
-        if (ranked.size() > max_processes_) {
-            ranked.resize(max_processes_);
-        }
+        if (ranked.size() > max_processes_) ranked.resize(max_processes_);
 
         for (auto& pw : ranked) {
             if (!pw.has_prev) continue;
@@ -109,28 +114,17 @@ public:
                          static_cast<uint64_t>(proc.num_threads));
             rec.SetField(batch->InternString("rss_kb"),
                          static_cast<uint64_t>(proc.rss_pages * 4));
-            rec.SetField(batch->InternString("vsize_kb"),
-                         proc.vsize / 1024);
-            rec.SetField(batch->InternString("voluntary_ctxt_switches"),
-                         proc.voluntary_ctxt_switches);
-            rec.SetField(batch->InternString("nonvoluntary_ctxt_switches"),
-                         proc.nonvoluntary_ctxt_switches);
+            rec.SetField(batch->InternString("vsize_kb"), proc.vsize / 1024);
 
             bool expand_threads =
                 thread_detail_pids_.count(proc.pid) > 0 ||
                 pw.cpu_total_pct >= thread_detail_threshold_pct_;
-            if (expand_threads) {
-                CollectThreads(batch, proc.pid, delta_total, num_cpus);
-            }
+            if (expand_threads) CollectThreads(batch, proc.pid, delta_total, num_cpus);
         }
 
-        // Update prev state
         prev_snapshots_.clear();
-        for (auto& proc : processes) {
-            prev_snapshots_[proc.pid] = proc;
-        }
+        for (auto& proc : processes) prev_snapshots_[proc.pid] = proc;
         prev_total_jiffies_ = cur_total_jiffies;
-
         return batch;
     }
 
@@ -139,29 +133,22 @@ private:
         uint32_t pid = 0;
         std::string comm;
         char state = '?';
-        uint64_t utime = 0;
-        uint64_t stime = 0;
-        uint64_t starttime = 0;
+        uint64_t utime = 0, stime = 0, starttime = 0;
         uint32_t num_threads = 0;
         uint64_t vsize = 0;
         int64_t rss_pages = 0;
-        uint64_t voluntary_ctxt_switches = 0;
-        uint64_t nonvoluntary_ctxt_switches = 0;
     };
 
     struct ProcessWithCpu {
         ProcessSnapshot snap;
-        double cpu_user_pct = 0;
-        double cpu_sys_pct = 0;
-        double cpu_total_pct = 0;
+        double cpu_user_pct = 0, cpu_sys_pct = 0, cpu_total_pct = 0;
         bool has_prev = false;
     };
 
     struct ThreadSnapshot {
         uint32_t tid = 0;
         std::string comm;
-        uint64_t utime = 0;
-        uint64_t stime = 0;
+        uint64_t utime = 0, stime = 0;
         char state = '?';
     };
 
@@ -171,10 +158,8 @@ private:
         std::string line;
         if (!std::getline(file, line)) return;
         if (line.compare(0, 4, "cpu ") != 0) return;
-
         std::istringstream iss(line);
-        std::string tag;
-        iss >> tag;
+        std::string tag; iss >> tag;
         total = 0;
         uint64_t v;
         while (iss >> v) total += v;
@@ -187,9 +172,7 @@ private:
         std::string line;
         while (std::getline(file, line)) {
             if (line.compare(0, 3, "cpu") == 0 && line.size() > 3 &&
-                line[3] >= '0' && line[3] <= '9') {
-                ++count;
-            }
+                line[3] >= '0' && line[3] <= '9') ++count;
         }
         return count > 0 ? count : 1;
     }
@@ -199,68 +182,38 @@ private:
         if (!file.is_open()) return false;
         std::string content((std::istreambuf_iterator<char>(file)),
                             std::istreambuf_iterator<char>());
-
-        // comm is in parentheses; find the last ')' to handle names with parens
         auto open = content.find('(');
         auto close = content.rfind(')');
         if (open == std::string::npos || close == std::string::npos) return false;
-
         out.comm = content.substr(open + 1, close - open - 1);
-
         std::istringstream iss(content.substr(close + 2));
-        // Fields after comm: state(3) ppid(4) pgrp(5) session(6) tty_nr(7) tpgid(8)
-        // flags(9) minflt(10) cminflt(11) majflt(12) cmajflt(13)
-        // utime(14) stime(15) cutime(16) cstime(17) priority(18) nice(19)
-        // num_threads(20) itrealvalue(21) starttime(22) vsize(23) rss(24)
         std::string state_str;
         int64_t ppid, pgrp, session, tty_nr, tpgid;
         uint64_t flags, minflt, cminflt, majflt, cmajflt;
         uint64_t cutime, cstime;
-        int64_t priority, nice_val;
-        int64_t itrealvalue;
-
+        int64_t priority, nice_val, itrealvalue;
         iss >> state_str >> ppid >> pgrp >> session >> tty_nr >> tpgid
             >> flags >> minflt >> cminflt >> majflt >> cmajflt
             >> out.utime >> out.stime >> cutime >> cstime
             >> priority >> nice_val >> out.num_threads >> itrealvalue
             >> out.starttime >> out.vsize >> out.rss_pages;
-
         if (!state_str.empty()) out.state = state_str[0];
         return true;
-    }
-
-    static void ReadCtxtSwitches(uint32_t pid, ProcessSnapshot& out) {
-        std::ifstream file("/proc/" + std::to_string(pid) + "/status");
-        if (!file.is_open()) return;
-        std::string line;
-        while (std::getline(file, line)) {
-            if (line.compare(0, 27, "voluntary_ctxt_switches:") == 0) {
-                std::istringstream iss(line.substr(24));
-                iss >> out.voluntary_ctxt_switches;
-            } else if (line.compare(0, 30, "nonvoluntary_ctxt_switches:") == 0) {
-                std::istringstream iss(line.substr(27));
-                iss >> out.nonvoluntary_ctxt_switches;
-            }
-        }
     }
 
     void ScanProcesses(std::vector<ProcessSnapshot>& out) {
         DIR* dir = opendir("/proc");
         if (!dir) return;
-
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             if (entry->d_type != DT_DIR) continue;
             char* endp;
             long pid = strtol(entry->d_name, &endp, 10);
             if (*endp != '\0' || pid <= 0) continue;
-
             ProcessSnapshot snap;
             snap.pid = static_cast<uint32_t>(pid);
             std::string stat_path = "/proc/" + std::string(entry->d_name) + "/stat";
             if (!ParseProcStat(stat_path, snap)) continue;
-
-            ReadCtxtSwitches(snap.pid, snap);
             out.push_back(std::move(snap));
         }
         closedir(dir);
@@ -271,19 +224,16 @@ private:
         std::string task_dir = "/proc/" + std::to_string(pid) + "/task";
         DIR* dir = opendir(task_dir.c_str());
         if (!dir) return;
-
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             if (entry->d_type != DT_DIR) continue;
             char* endp;
             long tid = strtol(entry->d_name, &endp, 10);
             if (*endp != '\0' || tid <= 0) continue;
-
             std::string stat_path = task_dir + "/" + entry->d_name + "/stat";
             ProcessSnapshot ts;
             ts.pid = static_cast<uint32_t>(tid);
             if (!ParseProcStat(stat_path, ts)) continue;
-
             double t_user_pct = 0, t_sys_pct = 0;
             auto key = MakeThreadKey(pid, static_cast<uint32_t>(tid));
             auto it = prev_thread_snapshots_.find(key);
@@ -298,9 +248,7 @@ private:
             prev_thread_snapshots_[key] = {
                 static_cast<uint32_t>(tid), ts.comm, ts.utime, ts.stime, ts.state
             };
-
             if (it == prev_thread_snapshots_.end()) continue;
-
             auto& rec = batch->AddRecord();
             rec.labels.push_back({batch->InternString("source"),
                                   batch->InternString("proc_cpu_monitor")});
@@ -312,7 +260,6 @@ private:
                                   batch->InternString(std::to_string(tid))});
             rec.labels.push_back({batch->InternString("comm"),
                                   batch->InternString(ts.comm)});
-
             rec.SetField(batch->InternString("cpu_user_pct"), t_user_pct);
             rec.SetField(batch->InternString("cpu_sys_pct"), t_sys_pct);
             rec.SetField(batch->InternString("cpu_total_pct"), t_user_pct + t_sys_pct);
