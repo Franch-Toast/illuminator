@@ -8,35 +8,14 @@
 // 如果没有这个文件，C++ 链接器可能会因为"没有代码显式引用这些符号"
 // 而丢弃插件定义所在的翻译单元，导致 PluginRegistry 在运行时找不到这些插件。
 //
-// 插件清单（共 26+ 个插件）：
-// ============================
-// Sources（数据源 12个）：
-//   proc_stat_reader, cpu_sys_monitor, process_cpu_monitor,
-//   ebpf_cpu_sampler, ebpf_net_tracer, ebpf_io_monitor, ebpf_sched_tracer,
-//   cpu_utilization, process_cpu, cpu_profiler,
-//   sched_analyzer, offcpu_profiler（+ cpu_sys_stats, proc_cpu_monitor）
-//
-// Processors（4个）：
-//   passthrough, filter, stack_symbolizer, stack_merger
-//
-// Aggregators（1个）：
-//   cpu_stats_aggregator
-//
-// Sinks（7个）：
-//   console_output, file_export, local_storage, pprof_export,
-//   prometheus_exposition, otlp_export, websocket_sink
-//
-// Storage（1个）：
-//   sqlite
-//
 // RegisterBuiltinPlugins() 函数体为空 — 所有注册工作在静态初始化阶段完成。
+// 实际插件清单以下面的 #include 指令为准。
 // ============================================================================
 
 #include "plugin/builtin/builtin_plugins.h"
 
 // ---- CPU 子系统 ----
 #include "sources/cpu/proc_stat_reader/proc_stat_reader.h"
-#include "sources/cpu/ebpf_cpu_sampler/ebpf_cpu_sampler.h"
 #include "sources/cpu/cpu_utilization/cpu_utilization.h"
 #include "sources/cpu/process_cpu/process_cpu.h"
 #include "sources/cpu/cpu_profiler/cpu_profiler.h"

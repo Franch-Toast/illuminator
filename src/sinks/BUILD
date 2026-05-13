@@ -8,6 +8,7 @@ cc_library(
     deps = [
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/serialization:json_serializer",
     ],
 )
 
@@ -21,6 +22,7 @@ cc_library(
     deps = [
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/serialization:json_serializer",
     ],
 )
 

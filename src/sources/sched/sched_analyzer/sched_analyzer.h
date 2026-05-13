@@ -58,7 +58,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <bpf/libbpf.h>
+#include "ebpf/include/bpf_compat.h"
 #include <nlohmann/json.hpp>
 
 #include "core/common/logging.h"

@@ -44,6 +44,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "core/common/logging.h"
 #include "core/common/proc_reader.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
@@ -64,11 +65,15 @@ public:
         auto exclude_re = config["exclude_comm_regex"].AsString("");
         if (!include_re.empty() && include_re != ".*") {
             try { include_regex_ = std::regex(include_re); has_include_regex_ = true; }
-            catch (...) {}
+            catch (const std::exception& e) {
+                IL_WARN("process_cpu: invalid include_comm_regex '{}': {}", include_re, e.what());
+            }
         }
         if (!exclude_re.empty()) {
             try { exclude_regex_ = std::regex(exclude_re); has_exclude_regex_ = true; }
-            catch (...) {}
+            catch (const std::exception& e) {
+                IL_WARN("process_cpu: invalid exclude_comm_regex '{}': {}", exclude_re, e.what());
+            }
         }
 
         auto pids_str = config["thread_detail_pids"].AsString("");

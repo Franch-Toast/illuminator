@@ -1,6 +1,6 @@
 #pragma once
 
-#include <bpf/libbpf.h>
+#include "ebpf/include/bpf_compat.h"
 #include <cstdint>
 #include <vector>
 

@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 
 export default function QueryConsole() {
+  const WIP = true
   const [query, setQuery] = useState('SELECT * FROM records ORDER BY timestamp_ns DESC LIMIT 20')
   const [results, setResults] = useState<any[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -28,6 +29,15 @@ export default function QueryConsole() {
   return (
     <div style={{ padding: 24 }}>
       <h2 style={{ margin: '0 0 16px', fontSize: 22 }}>Query Console</h2>
+      {WIP && (
+        <div style={{
+          background: '#332b00', border: '1px solid #665500',
+          borderRadius: 8, padding: 12, marginBottom: 16,
+          color: '#fbbf24', fontSize: 13,
+        }}>
+          Work in progress — backend /api/v1/query endpoint not yet implemented.
+        </div>
+      )}
 
       <div style={{
         background: '#1a1d23', border: '1px solid #2a2d35',

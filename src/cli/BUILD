@@ -10,9 +10,8 @@ cc_binary(
         "//src/plugin:manager",
         "//src/serialization:json_serializer",
         "//src/server:http_server",
-        "//third_party/cpp-httplib",
+        "//src/server:api_routes",
         "//src/server:websocket_manager",
-        "//src/sinks:prometheus_exposition",
         "//src/storage:storage",
     ],
 )

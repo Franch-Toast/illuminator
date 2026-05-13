@@ -59,6 +59,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,7 +69,6 @@
 #include "core/common/logging.h"
 #include "core/common/status.h"
 #include "core/engine/data_batch.h"
-#include "core/memory/lock_free_queue.h"
 #include "core/threading/thread_util.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/api/processor_plugin.h"
@@ -128,8 +128,6 @@ public:
                                  "Pipeline has no sinks: " + name_);
         }
 
-        running_.store(true, std::memory_order_release);
-
         // 按顺序启动各级插件
         auto status = source_->Start();
         if (!status.ok()) return status;
@@ -146,6 +144,9 @@ public:
             status = s->Start();
             if (!status.ok()) return status;
         }
+
+        // E4: all components started successfully → set running flag
+        running_.store(true, std::memory_order_release);
 
         // 根据 Source 的工作模式选择数据采集方式
         if (source_->IsPushMode()) {
@@ -260,6 +261,7 @@ private:
     void OnBatchReceived(DataBatchPtr batch) {
         if (!batch || batch->Empty()) return;
 
+        std::lock_guard<std::mutex> lock(process_mutex_);
         records_processed_.fetch_add(batch->Size(), std::memory_order_relaxed);
 
         // ---- Processor 链处理 ----
@@ -310,6 +312,7 @@ private:
 
     std::thread collect_thread_;   // Pull 模式采集线程
     std::thread flush_thread_;     // Aggregator 刷新线程
+    std::mutex process_mutex_;     // OnBatchReceived 并发保护
 
     // 统计计数器（原子类型，线程安全）
     std::atomic<uint64_t> batches_processed_{0};   // 已处理的批次数

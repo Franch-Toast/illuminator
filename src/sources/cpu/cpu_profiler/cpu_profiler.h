@@ -77,7 +77,7 @@
 #include <linux/perf_event.h>
 #include <unistd.h>
 
-#include <bpf/libbpf.h>
+#include "ebpf/include/bpf_compat.h"
 
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
@@ -106,14 +106,18 @@ inline std::vector<int> ParseOnlineCpuIds() {
     std::stringstream ss(line);
     std::string part;
     while (std::getline(ss, part, ',')) {
-        auto dash = part.find('-');
-        if (dash == std::string::npos) {
-            cpus.push_back(std::stoi(part));
-        } else {
-            int lo = std::stoi(part.substr(0, dash));
-            int hi = std::stoi(part.substr(dash + 1));
-            for (int c = lo; c <= hi; ++c)
-                cpus.push_back(c);
+        try {
+            auto dash = part.find('-');
+            if (dash == std::string::npos) {
+                cpus.push_back(std::stoi(part));
+            } else {
+                int lo = std::stoi(part.substr(0, dash));
+                int hi = std::stoi(part.substr(dash + 1));
+                for (int c = lo; c <= hi; ++c)
+                    cpus.push_back(c);
+            }
+        } catch (const std::exception& e) {
+            IL_WARN("ParseOnlineCpuIds: failed to parse '{}': {}", part, e.what());
         }
     }
     return cpus;

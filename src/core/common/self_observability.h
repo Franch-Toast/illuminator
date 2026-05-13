@@ -46,6 +46,8 @@
 #include <vector>
 #include <sstream>
 
+#include <nlohmann/json.hpp>
+
 namespace illuminator {
 
 // ============================================================================
@@ -146,37 +148,24 @@ public:
         return ss.str();
     }
 
-    // ---- 导出：JSON 格式 ----
-    // 用于前端仪表盘或其他非 Prometheus 消费者
     std::string ExportJson() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::ostringstream ss;
-        ss << "{\"counters\":{";
-        bool first = true;
-        for (auto& [name, val] : counters_) {
-            if (!first) ss << ",";
-            ss << "\"" << name << "\":" << val;
-            first = false;
-        }
-        ss << "},\"gauges\":{";
-        first = true;
-        for (auto& [name, val] : gauges_) {
-            if (!first) ss << ",";
-            ss << "\"" << name << "\":" << val;
-            first = false;
-        }
-        ss << "},\"histograms\":{";
-        first = true;
+        nlohmann::json j;
+        nlohmann::json c = nlohmann::json::object();
+        for (auto& [name, val] : counters_) c[name] = val;
+        j["counters"] = std::move(c);
+
+        nlohmann::json g = nlohmann::json::object();
+        for (auto& [name, val] : gauges_) g[name] = val;
+        j["gauges"] = std::move(g);
+
+        nlohmann::json h = nlohmann::json::object();
         for (auto& [name, hist] : histograms_) {
-            if (!first) ss << ",";
-            ss << "\"" << name << "\":{\"count\":" << hist.count
-               << ",\"sum\":" << hist.sum
-               << ",\"min\":" << hist.min
-               << ",\"max\":" << hist.max << "}";
-            first = false;
+            h[name] = {{"count", hist.count}, {"sum", hist.sum},
+                        {"min", hist.min}, {"max", hist.max}};
         }
-        ss << "}}";
-        return ss.str();
+        j["histograms"] = std::move(h);
+        return j.dump();
     }
 
 private:

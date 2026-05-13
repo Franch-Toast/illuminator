@@ -23,7 +23,6 @@ cc_library(
         "manager/plugin_registry.h",
         "manager/so_loader.h",
         "manager/plugin_manager.h",
-        "manager/wasm_runtime.h",
     ],
     strip_include_prefix = "",
     include_prefix = "plugin",
@@ -48,7 +47,6 @@ cc_library(
         ":manager",
         # CPU sources
         "//src/sources:proc_stat_reader",
-        "//src/sources:ebpf_cpu_sampler",
         "//src/sources:cpu_utilization",
         "//src/sources:process_cpu",
         "//src/sources:cpu_profiler",

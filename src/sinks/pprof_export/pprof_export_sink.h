@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "core/common/logging.h"
 #include "plugin/api/sink_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 

@@ -40,8 +40,8 @@
 // 2. 仅在 duration >= min_duration_us（默认 100μs）时才推送事件，
 //    避免大量快速调度的短等待事件淹没有效数据。
 //
-// 3. 纯 Push 模式（IsPushMode=true），通过 ring buffer 实时推送每条
-//    off-CPU 事件，无批量聚合（适合生成 Off-CPU 火焰图）。
+// 3. 当前为 Pull 模式（IsPushMode=false），通过 ring buffer 收集事件
+//    并在 Collect() 时返回（适合定期轮询场景）。
 //
 // 配置参数：
 // ==========
@@ -64,7 +64,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include <bpf/libbpf.h>
+#include "ebpf/include/bpf_compat.h"
 
 #include "core/common/logging.h"
 #include "core/common/string_util.h"

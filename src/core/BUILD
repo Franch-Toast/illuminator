@@ -13,6 +13,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "@spdlog",
+        "@nlohmann_json//:json",
     ],
 )
 
@@ -20,7 +21,6 @@ cc_library(
     name = "memory",
     hdrs = [
         "memory/arena.h",
-        "memory/lock_free_queue.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -30,7 +30,6 @@ cc_library(
 cc_library(
     name = "threading",
     hdrs = [
-        "threading/thread_pool.h",
         "threading/thread_util.h",
     ],
     strip_include_prefix = "",

@@ -32,6 +32,8 @@
 #include <sstream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
 #include "core/common/logging.h"
 #include "storage/storage_backend.h"
 
@@ -224,11 +226,10 @@ public:
 
         sqlite3_bind_text(stmt, 1, req.pipeline_name.c_str(), -1, SQLITE_TRANSIENT);
 
+        // TODO: implement column deserialization (labels_json, fields_json → Record)
+        // For now, count matching rows but return empty records.
         int rc = sqlite3_step(stmt);
         while (rc == SQLITE_ROW) {
-            Record rec;
-            // 基础反序列化（当前为简化实现）
-            result.records.push_back(std::move(rec));
             result.total_count++;
             rc = sqlite3_step(stmt);
         }
@@ -237,6 +238,8 @@ public:
         }
 
         sqlite3_finalize(stmt);
+        IL_WARN("SqliteBackend::Query: column deserialization not yet implemented; "
+                "returning {} row count only", result.total_count);
         return result;
     }
 
@@ -391,61 +394,44 @@ private:
                  sqlite3_errmsg(db_));
     }
 
-    // ---- 序列化标签为 JSON ----
     static std::string SerializeLabels(const std::vector<Label>& labels) {
-        std::ostringstream ss;
-        ss << "{";
-        bool first = true;
-        for (auto& l : labels) {
-            if (!first) ss << ",";
-            ss << "\"" << l.key << "\":\"" << l.value << "\"";
-            first = false;
-        }
-        ss << "}";
-        return ss.str();
+        nlohmann::json j = nlohmann::json::object();
+        for (auto& l : labels)
+            j[std::string(l.key)] = std::string(l.value);
+        return j.dump();
     }
 
-    // ---- 序列化字段值为 JSON ----
     static std::string SerializeFields(
         const std::unordered_map<std::string_view, FieldValue>& fields) {
-        std::ostringstream ss;
-        ss << "{";
-        bool first = true;
+        nlohmann::json j = nlohmann::json::object();
         for (auto& [k, v] : fields) {
-            if (!first) ss << ",";
-            ss << "\"" << k << "\":";
-            // std::visit 模式匹配处理所有 FieldValue 变体
+            std::string key(k);
             struct Vis {
-                std::ostringstream& s;
-                void operator()(std::monostate) const { s << "null"; }
-                void operator()(bool b) const { s << (b ? "true" : "false"); }
-                void operator()(int64_t i) const { s << i; }
-                void operator()(uint64_t u) const { s << u; }
-                void operator()(double d) const { s << d; }
-                void operator()(std::string_view sv) const { s << "\"" << sv << "\""; }
+                nlohmann::json& j;
+                const std::string& key;
+                void operator()(std::monostate) const { j[key] = nullptr; }
+                void operator()(bool b) const { j[key] = b; }
+                void operator()(int64_t i) const { j[key] = i; }
+                void operator()(uint64_t u) const { j[key] = u; }
+                void operator()(double d) const { j[key] = d; }
+                void operator()(std::string_view sv) const { j[key] = std::string(sv); }
             };
-            std::visit(Vis{ss}, v);
-            first = false;
+            std::visit(Vis{j, key}, v);
         }
-        ss << "}";
-        return ss.str();
+        return j.dump();
     }
 
-    // ---- 序列化堆栈为 JSON ----
     static std::string SerializeStack(const StackSample& s) {
-        std::ostringstream ss;
-        ss << "[";
-        bool first = true;
+        nlohmann::json arr = nlohmann::json::array();
         for (auto& f : s.user_stack) {
-            if (!first) ss << ",";
-            ss << "{\"addr\":" << f.address
-               << ",\"fn\":\"" << f.function_name << "\""
-               << ",\"file\":\"" << f.file_name << "\""
-               << ",\"line\":" << f.line_number << "}";
-            first = false;
+            arr.push_back({
+                {"addr", f.address},
+                {"fn", std::string(f.function_name)},
+                {"file", std::string(f.file_name)},
+                {"line", f.line_number},
+            });
         }
-        ss << "]";
-        return ss.str();
+        return arr.dump();
     }
 
     sqlite3* db_ = nullptr;        // SQLite 数据库连接句柄

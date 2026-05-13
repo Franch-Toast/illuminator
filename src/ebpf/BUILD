@@ -6,7 +6,10 @@ exports_files([
 
 cc_library(
     name = "common_bpf_types",
-    hdrs = ["include/event_types.h"],
+    hdrs = [
+        "include/event_types.h",
+        "include/bpf_compat.h",
+    ],
     strip_include_prefix = "",
     include_prefix = "ebpf",
     visibility = ["//visibility:public"],

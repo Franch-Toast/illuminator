@@ -18,23 +18,6 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "ebpf_cpu_sampler",
-    hdrs = ["cpu/ebpf_cpu_sampler/ebpf_cpu_sampler.h"],
-    strip_include_prefix = "",
-    include_prefix = "sources",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/core:common",
-        "//src/core:threading",
-        "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
-        "//src/plugin:api",
-        "//src/plugin:manager",
-    ],
-)
-
 
 cc_library(
     name = "cpu_utilization",

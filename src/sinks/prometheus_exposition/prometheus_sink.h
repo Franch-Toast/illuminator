@@ -119,6 +119,20 @@ private:
     //   labels - Record 的标签列表
     // 返回:
     //   格式化的标签字符串
+    static std::string EscapeLabelValue(std::string_view sv) {
+        std::string out;
+        out.reserve(sv.size());
+        for (char c : sv) {
+            switch (c) {
+                case '\\': out += "\\\\"; break;
+                case '"':  out += "\\\""; break;
+                case '\n': out += "\\n"; break;
+                default:   out += c;
+            }
+        }
+        return out;
+    }
+
     static std::string BuildLabelString(const std::vector<Label>& labels) {
         if (labels.empty()) return "";
         std::ostringstream ss;
@@ -126,7 +140,7 @@ private:
         bool first = true;
         for (auto& l : labels) {
             if (!first) ss << ",";
-            ss << l.key << "=\"" << l.value << "\"";
+            ss << l.key << "=\"" << EscapeLabelValue(l.value) << "\"";
             first = false;
         }
         ss << "}";

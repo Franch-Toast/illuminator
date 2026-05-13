@@ -7,6 +7,8 @@
 #include <type_traits>
 #include <vector>
 
+#include "core/common/logging.h"
+
 namespace illuminator {
 
 template <typename T>
@@ -35,7 +37,10 @@ inline std::vector<T> ParseCommaSeparated(std::string_view input) {
                 } else {
                     result.push_back(static_cast<T>(std::stoll(std::string(token))));
                 }
-            } catch (...) {}
+            } catch (...) {
+                IL_WARN("ParseCommaSeparated: failed to parse token '{}'",
+                        std::string(token));
+            }
         }
         pos = (end == input.size()) ? end : end + 1;
     }

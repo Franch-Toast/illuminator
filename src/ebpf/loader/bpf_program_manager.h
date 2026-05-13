@@ -41,12 +41,7 @@
 // 前向声明旧内核可能未定义的 BPF 链接类型枚举
 // 这确保了在旧内核头文件环境下编译不受影响
 #include <linux/bpf.h>
-#ifndef BPF_LINK_TYPE_UNSPEC
-// 如果内核头文件未定义 bpf_link_type，提供一个最小定义以避免编译错误
-enum bpf_link_type { BPF_LINK_TYPE_UNSPEC = 0 };
-#endif
-#include <bpf/libbpf.h>     // libbpf 主库：bpf_object, bpf_program, bpf_link
-#include <bpf/bpf.h>        // BPF 系统调用封装：bpf_map__fd 等
+#include "ebpf/include/bpf_compat.h"
 
 #include <cstring>
 #include <functional>

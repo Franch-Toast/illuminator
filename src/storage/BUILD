@@ -23,5 +23,6 @@ cc_library(
     deps = [
         ":storage",
         "//src/core:common",
+        "@nlohmann_json//:json",
     ],
 )

@@ -17,6 +17,3 @@ bpf_probe(name = "bio_latency", src = "io/bio_latency.bpf.c")
 
 # --- Network ---
 bpf_probe(name = "net_tracer", src = "net/net_tracer.bpf.c")
-
-# --- Memory ---
-bpf_probe(name = "mem_tracer", src = "memory/mem_tracer.bpf.c")

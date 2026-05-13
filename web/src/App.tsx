@@ -17,7 +17,7 @@
 // /query       → QueryConsole   — SQL 查询控制台（直查 SQLite 存储）
 // ============================================================================
 
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import CpuOverview from './pages/CpuOverview'
 import ProcessExplorer from './pages/ProcessExplorer'
@@ -25,6 +25,32 @@ import FlameGraph from './pages/FlameGraph'
 import Timeline from './pages/Timeline'
 import DiffView from './pages/DiffView'
 import QueryConsole from './pages/QueryConsole'
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, color: '#f87171' }}>
+          <h2>Something went wrong</h2>
+          <pre style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>
+            {this.state.error.message}
+          </pre>
+          <button onClick={() => this.setState({ error: null })}
+            style={{ marginTop: 12, padding: '8px 16px', background: '#2563eb',
+                     color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>
+            Retry
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
 
 // 导航项配置：路径、标签和图标
 const navItems = [
@@ -37,8 +63,14 @@ const navItems = [
 ]
 
 export default function App() {
+  const [version, setVersion] = useState('...')
+  useEffect(() => {
+    fetch('/healthz').then(r => r.json())
+      .then(d => setVersion(d.version ?? '?'))
+      .catch(() => setVersion('?'))
+  }, [])
+
   return (
-    // 根布局：左侧导航 + 右侧内容
     <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
 
       {/* ======== 左侧导航栏 ======== */}
@@ -81,20 +113,22 @@ export default function App() {
         {/* 底部版本信息 */}
         <div style={{ flex: 1 }} />
         <div style={{ padding: '12px 20px', fontSize: 11, color: '#666' }}>
-          v0.1.0 · C++ eBPF Engine
+          v{version} · C++ eBPF Engine
         </div>
       </nav>
 
       {/* ======== 右侧主内容区 ======== */}
       <main style={{ flex: 1, background: '#0f1117', color: '#e0e0e0', overflow: 'auto' }}>
-        <Routes>
-          <Route path="/" element={<CpuOverview />} />
-          <Route path="/processes" element={<ProcessExplorer />} />
-          <Route path="/flamegraph" element={<FlameGraph />} />
-          <Route path="/timeline" element={<Timeline />} />
-          <Route path="/diff" element={<DiffView />} />
-          <Route path="/query" element={<QueryConsole />} />
-        </Routes>
+        <ErrorBoundary>
+          <Routes>
+            <Route path="/" element={<CpuOverview />} />
+            <Route path="/processes" element={<ProcessExplorer />} />
+            <Route path="/flamegraph" element={<FlameGraph />} />
+            <Route path="/timeline" element={<Timeline />} />
+            <Route path="/diff" element={<DiffView />} />
+            <Route path="/query" element={<QueryConsole />} />
+          </Routes>
+        </ErrorBoundary>
       </main>
     </div>
   )
