@@ -59,6 +59,7 @@
 #include <vector>
 
 #include <bpf/libbpf.h>
+#include <nlohmann/json.hpp>
 
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
@@ -104,6 +105,7 @@ public:
     const char* Version() const override { return "0.2.0"; }
 
     bool IsPushMode() const override { return false; }
+    bool IsStub() const override { return stub_mode_; }
 
     uint32_t IntervalMs() const override { return aggregate_interval_ms_; }
 
@@ -135,8 +137,8 @@ public:
     // 4. 详细模式下创建 ring buffer 和后台轮询线程
     Status Start() override {
         if (bpf_obj_path_.empty()) {
-            IL_WARN(
-                "sched_analyzer: no bpf_object path specified; analyzer idle");
+            IL_WARN("sched_analyzer: no bpf_object path; idle mode");
+            stub_mode_ = true;
             running_.store(false);
             return Status::Ok();
         }
@@ -328,6 +330,79 @@ public:
         return {wakeups_.begin() + start, wakeups_.end()};
     }
 
+    StatusOr<std::string> QueryExtra(
+        const std::string& query, const QueryParams& params) override {
+        using json = nlohmann::json;
+
+        if (query == "history") {
+            auto pts = GetHistory();
+            json arr = json::array();
+            for (auto& p : pts) {
+                arr.push_back({
+                    {"timestamp_ms", p.timestamp_ms},
+                    {"total_switches", p.total_switches},
+                    {"avg_latency_us", p.avg_latency_us},
+                    {"max_latency_ns", p.max_latency_ns},
+                    {"total_migrations", p.total_migrations},
+                    {"process_count", p.process_count},
+                });
+            }
+            return json{{"history", std::move(arr)}}.dump();
+        }
+
+        if (query == "events") {
+            uint32_t pid = 0;
+            size_t limit = 200;
+            auto pit = params.find("pid");
+            if (pit != params.end()) pid = std::atoi(pit->second.c_str());
+            auto lit = params.find("limit");
+            if (lit != params.end()) limit = std::atoi(lit->second.c_str());
+
+            auto events = GetRecentEvents(pid, limit);
+            const char* types[] = {"switch", "wakeup", "migrate"};
+            json arr = json::array();
+            for (auto& e : events) {
+                unsigned ti = e.event_type < 3 ? e.event_type : 0;
+                arr.push_back({
+                    {"timestamp_ms", e.timestamp_ms},
+                    {"event_type", types[ti]},
+                    {"prev_pid", e.prev_pid},
+                    {"next_pid", e.next_pid},
+                    {"cpu", e.cpu},
+                    {"latency_ns", e.latency_ns},
+                    {"prev_comm", std::string(e.prev_comm,
+                        strnlen(e.prev_comm, TASK_COMM_LEN))},
+                    {"next_comm", std::string(e.next_comm,
+                        strnlen(e.next_comm, TASK_COMM_LEN))},
+                });
+            }
+            return json{{"events", std::move(arr)}}.dump();
+        }
+
+        if (query == "wakeups") {
+            size_t limit = 500;
+            auto lit = params.find("limit");
+            if (lit != params.end()) limit = std::atoi(lit->second.c_str());
+
+            auto wakeups = GetRecentWakeups(limit);
+            json arr = json::array();
+            for (auto& w : wakeups) {
+                arr.push_back({
+                    {"timestamp_ms", w.timestamp_ms},
+                    {"waker_pid", w.waker_pid},
+                    {"wakee_pid", w.wakee_pid},
+                    {"waker_comm", std::string(w.waker_comm,
+                        strnlen(w.waker_comm, TASK_COMM_LEN))},
+                    {"wakee_comm", std::string(w.wakee_comm,
+                        strnlen(w.wakee_comm, TASK_COMM_LEN))},
+                });
+            }
+            return json{{"wakeups", std::move(arr)}}.dump();
+        }
+
+        return Status::Error(StatusCode::kNotFound, "unknown query: " + query);
+    }
+
 private:
     // ========================================================================
     // AllowPid — 检查 PID 是否在白名单中
@@ -426,8 +501,8 @@ private:
         return 0;
     }
 
-    // ---- 配置参数 ----
-    bool detailed_mode_ = false;              // 是否启用详细事件推送
+    bool stub_mode_ = false;
+    bool detailed_mode_ = false;
     uint32_t aggregate_interval_ms_ = 5000;   // 聚合统计输出间隔（毫秒）
     bool track_migrations_ = true;            // 是否追踪 CPU 迁移事件
     std::string bpf_obj_path_;                // eBPF 目标文件路径

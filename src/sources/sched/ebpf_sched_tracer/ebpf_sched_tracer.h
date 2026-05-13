@@ -38,6 +38,7 @@ public:
     const char* Name() const override { return "ebpf_sched_tracer"; }
     const char* Version() const override { return "0.1.0"; }
     bool IsPushMode() const override { return true; }
+    bool IsStub() const override { return stub_mode_; }
 
     Status Init(const ConfigValue& config) override {
         bpf_obj_path_ = config["bpf_object"].AsString("");
@@ -47,6 +48,7 @@ public:
     Status Start() override {
         if (bpf_obj_path_.empty()) {
             IL_WARN("ebpf_sched_tracer: no BPF object, idle mode");
+            stub_mode_ = true;
             return Status::Ok();
         }
 
@@ -117,6 +119,7 @@ private:
 
     std::string bpf_obj_path_;
     bool running_ = false;
+    bool stub_mode_ = false;
     BpfProgramManager bpf_mgr_;
     struct ring_buffer* ring_buf_ = nullptr;
     std::thread poll_thread_;

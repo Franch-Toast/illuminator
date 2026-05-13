@@ -8,8 +8,6 @@ cc_binary(
         "//src/core:yaml_config",
         "//src/plugin:builtin",
         "//src/plugin:manager",
-        "//src/sources:sched_analyzer",
-        "//src/ebpf:loader",
         "//src/serialization:json_serializer",
         "//src/server:http_server",
         "//third_party/cpp-httplib",

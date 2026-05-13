@@ -36,14 +36,10 @@
 
 // ---- CPU 子系统 ----
 #include "sources/cpu/proc_stat_reader/proc_stat_reader.h"
-#include "sources/cpu/cpu_sys_monitor/cpu_sys_monitor.h"
-#include "sources/cpu/process_cpu_monitor/process_cpu_monitor.h"
 #include "sources/cpu/ebpf_cpu_sampler/ebpf_cpu_sampler.h"
 #include "sources/cpu/cpu_utilization/cpu_utilization.h"
 #include "sources/cpu/process_cpu/process_cpu.h"
 #include "sources/cpu/cpu_profiler/cpu_profiler.h"
-#include "sources/cpu/cpu_sys_stats/cpu_sys_stats.h"
-#include "sources/cpu/proc_cpu_monitor/proc_cpu_monitor.h"
 
 // ---- 调度子系统 ----
 #include "sources/sched/sched_analyzer/sched_analyzer.h"

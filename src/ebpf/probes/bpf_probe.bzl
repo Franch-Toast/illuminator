@@ -9,13 +9,16 @@ _BPF_HDRS = [
 ]
 
 def bpf_probe(name, src, arch = "x86"):
-    """Compile a single BPF probe .bpf.c → .bpf.o"""
+    """Compile a single BPF probe .bpf.c → .bpf.o
+
+    Uses $$BPF_CLANG from --action_env (default: clang).
+    """
     copts = "-g -O2 -target bpf -D__TARGET_ARCH_" + arch
     native.genrule(
         name = name,
         srcs = [src] + _BPF_HDRS,
         outs = [name + ".bpf.o"],
-        cmd = "clang {} {} -c $(location {}) -o $@".format(
+        cmd = "$${BPF_CLANG:-clang} {} {} -c $(location {}) -o $@".format(
             copts, _BPF_INCLUDES, src),
         visibility = ["//visibility:public"],
     )

@@ -204,12 +204,18 @@ private:
     }
 
     void BroadcastData() {
-        std::lock_guard<std::mutex> lk(mu_);
-        std::unordered_set<std::string> keys;
-        for (auto& [key, _] : subscriptions_)
-            if (!_.empty()) keys.insert(key);
+        // Phase 1 (locked): snapshot current subscriptions
+        std::unordered_map<std::string, std::vector<int>> snapshot;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            for (auto& [key, fds] : subscriptions_) {
+                if (!fds.empty())
+                    snapshot[key] = std::vector<int>(fds.begin(), fds.end());
+            }
+        }
 
-        for (auto& key : keys) {
+        // Phase 2 (lock-free): serialize + send
+        for (auto& [key, fds] : snapshot) {
             auto batch = WebSocketSinkStore::Instance().Latest(key);
             if (!batch) continue;
 
@@ -224,16 +230,18 @@ private:
 
             auto frame = WebSocketCodec::EncodeFrame(json);
 
-            auto sit = subscriptions_.find(key);
-            if (sit == subscriptions_.end()) continue;
-
             std::vector<int> dead;
-            for (int fd : sit->second) {
+            for (int fd : fds) {
                 ssize_t w = ::write(fd, frame.data(), frame.size());
                 if (w <= 0) dead.push_back(fd);
             }
-            for (int fd : dead)
-                RemoveConnectionLocked(fd);
+
+            // Phase 3 (locked): clean up dead connections
+            if (!dead.empty()) {
+                std::lock_guard<std::mutex> lk(mu_);
+                for (int fd : dead)
+                    RemoveConnectionLocked(fd);
+            }
         }
     }
 

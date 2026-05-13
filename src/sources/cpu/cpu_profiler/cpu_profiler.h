@@ -173,8 +173,8 @@ public:
     const char* Name() const override { return "cpu_profiler"; }
     const char* Version() const override { return "0.2.0"; }
 
-    // 流式模式下返回 true，表示主动推送而非被动轮询
     bool IsPushMode() const override { return stream_mode_; }
+    bool IsStub() const override { return stub_mode_; }
 
     // ========================================================================
     // Collect — 采集方法（聚合模式下的 Pull 入口）
@@ -233,11 +233,9 @@ public:
     // 3. 将 eBPF 程序挂载到 perf_event（PERF_EVENT_IOC_SET_BPF）
     // 4. 根据模式启动后台线程（stream → StreamPollLoop / aggregated → AggregatedPullLoop）
     Status Start() override {
-        // 没有指定 BPF 目标文件 → 闲置模式，不执行任何采样
         if (bpf_obj_path_.empty()) {
-            IL_WARN(
-                "cpu_profiler: no bpf_object path specified; profiler idle "
-                "(install probes and set bpf_object)");
+            IL_WARN("cpu_profiler: no bpf_object path; idle mode");
+            stub_mode_ = true;
             running_.store(false);
             return Status::Ok();
         }
@@ -578,7 +576,8 @@ private:
     int stack_depth_ = MAX_STACK_DEPTH;       // 最大堆栈深度
     bool user_stacks_ = true;                 // 是否采集用户态堆栈
     bool kernel_stacks_ = true;               // 是否采集内核态堆栈
-    bool stream_mode_ = false;                // 是否使用流式推送模式
+    bool stream_mode_ = false;
+    bool stub_mode_ = false;
 
     std::string bpf_obj_path_;                // eBPF 目标文件路径
     std::vector<uint32_t> target_pids_;       // 目标 PID 列表

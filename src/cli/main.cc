@@ -65,8 +65,6 @@
 #include "httplib.h"
 #include "server/http_server.h"
 #include "server/websocket_manager.h"
-#include "ebpf/loader/bpf_program_manager.h"
-#include "sources/sched/sched_analyzer/sched_analyzer.h"
 #include "sinks/prometheus_exposition/prometheus_sink.h"
 #include "storage/storage_backend.h"
 #include "core/common/self_observability.h"
@@ -122,105 +120,82 @@ static void SetLogLevel(const std::string& level) {
 
 // illuminator::BatchToJson and related serialization now in serialization/json_serializer.h
 
-// ========================================================================
-// BuildDemoConfig — 构建内置演示配置
-// ========================================================================
-// 当用户未指定配置文件时，自动创建 4 条默认 Pipeline 继续运行
+static constexpr const char* kDefaultConfigYaml = R"yaml(
+global:
+  log_level: info
+pipelines:
+  cpu_utilization:
+    source:
+      type: cpu_utilization
+      config:
+        interval_ms: 1000
+        collect_per_core: true
+        collect_frequency: true
+        ema_alpha: 0.3
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: cpu_utilization
+  cpu_processes:
+    source:
+      type: process_cpu
+      config:
+        interval_ms: 2000
+        top_n: 50
+        thread_detail_threshold_pct: 3.0
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: cpu_processes
+  cpu_profile:
+    source:
+      type: cpu_profiler
+      config:
+        frequency_hz: 49
+        mode: aggregated
+        user_stacks: true
+        kernel_stacks: true
+    processors:
+      - type: stack_symbolizer
+        config:
+          demangle: true
+          kernel_symbols: true
+      - type: stack_merger
+        config:
+          group_by: comm
+          include_kernel: true
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: cpu_profile
+      - type: pprof_export
+  sched_analysis:
+    source:
+      type: sched_analyzer
+      config:
+        detailed_mode: false
+        aggregate_interval_ms: 5000
+        track_migrations: true
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: sched_analysis
+)yaml";
+
 static illuminator::GlobalConfig BuildDemoConfig() {
-    illuminator::GlobalConfig config;
-    config.log_level = "info";
-
-    // Pipeline 1: 系统 CPU 利用率（新版统一源）
-    {
-        illuminator::PipelineConfig pc;
-        pc.name = "cpu_utilization";
-        pc.source.type = "cpu_utilization";
-        pc.source.config.Set("interval_ms", int64_t{1000});
-        pc.source.config.Set("collect_per_core", "true");
-        pc.source.config.Set("collect_frequency", "true");
-        pc.source.config.Set("ema_alpha", "0.3");
-
-        illuminator::ConfigValue storage_cfg;
-        storage_cfg.Set("backend", "sqlite");
-        storage_cfg.Set("path", "/tmp/illuminator_data");
-        storage_cfg.Set("pipeline", "cpu_utilization");
-        pc.sinks.push_back({"local_storage", storage_cfg});
-
-        config.pipelines.push_back(std::move(pc));
+    auto result = illuminator::YamlConfigLoader::LoadFromString(kDefaultConfigYaml);
+    if (!result.ok()) {
+        IL_FATAL("Failed to parse built-in config: {}", result.status().message());
     }
-
-    // Pipeline 2: 进程 CPU 监控（新版源，Top-N + 过滤）
-    {
-        illuminator::PipelineConfig pc;
-        pc.name = "cpu_processes";
-        pc.source.type = "process_cpu";
-        pc.source.config.Set("interval_ms", int64_t{2000});
-        pc.source.config.Set("top_n", int64_t{50});
-        pc.source.config.Set("thread_detail_threshold_pct", "3.0");
-
-        illuminator::ConfigValue storage_cfg;
-        storage_cfg.Set("backend", "sqlite");
-        storage_cfg.Set("path", "/tmp/illuminator_data");
-        storage_cfg.Set("pipeline", "cpu_processes");
-        pc.sinks.push_back({"local_storage", storage_cfg});
-
-        config.pipelines.push_back(std::move(pc));
-    }
-
-    // Pipeline 3: CPU 性能剖析（eBPF 采样 → 符号化 → 堆栈合并）
-    {
-        illuminator::PipelineConfig pc;
-        pc.name = "cpu_profile";
-        pc.source.type = "cpu_profiler";
-        pc.source.config.Set("frequency_hz", int64_t{49});
-        pc.source.config.Set("mode", "aggregated");
-        pc.source.config.Set("user_stacks", "true");
-        pc.source.config.Set("kernel_stacks", "true");
-
-        // Processor 1: 堆栈符号化（地址 → 函数名）
-        illuminator::PipelineConfig::StageConfig sym_cfg;
-        sym_cfg.type = "stack_symbolizer";
-        sym_cfg.config.Set("demangle", "true");
-        sym_cfg.config.Set("kernel_symbols", "true");
-        pc.processors.push_back(sym_cfg);
-
-        // Processor 2: 堆栈合并（相同调用栈计数累加）
-        illuminator::PipelineConfig::StageConfig merge_cfg;
-        merge_cfg.type = "stack_merger";
-        merge_cfg.config.Set("group_by", "comm");
-        merge_cfg.config.Set("include_kernel", "true");
-        pc.processors.push_back(merge_cfg);
-
-        // 双 Sink: 本地存储 + pprof 导出
-        illuminator::ConfigValue storage_cfg;
-        storage_cfg.Set("backend", "sqlite");
-        storage_cfg.Set("path", "/tmp/illuminator_data");
-        storage_cfg.Set("pipeline", "cpu_profile");
-        pc.sinks.push_back({"local_storage", storage_cfg});
-        pc.sinks.push_back({"pprof_export", illuminator::ConfigValue()});
-
-        config.pipelines.push_back(std::move(pc));
-    }
-
-    // Pipeline 4: 调度器分析
-    {
-        illuminator::PipelineConfig pc;
-        pc.name = "sched_analysis";
-        pc.source.type = "sched_analyzer";
-        pc.source.config.Set("detailed_mode", "false");
-        pc.source.config.Set("aggregate_interval_ms", int64_t{5000});
-        pc.source.config.Set("track_migrations", "true");
-
-        illuminator::ConfigValue storage_cfg;
-        storage_cfg.Set("backend", "sqlite");
-        storage_cfg.Set("path", "/tmp/illuminator_data");
-        storage_cfg.Set("pipeline", "sched_analysis");
-        pc.sinks.push_back({"local_storage", storage_cfg});
-
-        config.pipelines.push_back(std::move(pc));
-    }
-
-    return config;
+    return result.value();
 }
 
 static void RegisterApiRoutes(illuminator::HttpServer& http_server,
@@ -238,9 +213,11 @@ static void RegisterApiRoutes(illuminator::HttpServer& http_server,
             [&controller](const httplib::Request&, httplib::Response& res) {
                 illuminator::json arr = illuminator::json::array();
                 for (auto& p : controller.Pipelines()) {
+                    auto* src = p->GetSource();
                     arr.push_back({
                         {"name", p->name()},
                         {"running", p->IsRunning()},
+                        {"stub", src ? src->IsStub() : false},
                         {"batches", p->BatchesProcessed()},
                         {"records", p->RecordsProcessed()},
                         {"errors", p->ErrorCount()},
@@ -371,101 +348,33 @@ static void RegisterApiRoutes(illuminator::HttpServer& http_server,
                     "application/json");
             });
 
+    // Generic handler for plugin QueryExtra endpoints
+    auto query_handler = [&controller](const std::string& pipeline_name,
+                                        const std::string& query_name,
+                                        const httplib::Request& req,
+                                        httplib::Response& res) {
+        auto* pipe = controller.GetPipeline(pipeline_name);
+        if (!pipe) { JsonError(res, pipeline_name + " pipeline not found"); return; }
+        auto* source = pipe->GetSource();
+        if (!source) { JsonError(res, "source not available"); return; }
+        illuminator::QueryParams params;
+        for (auto& [k, v] : req.params) params[k] = v;
+        auto result = source->QueryExtra(query_name, params);
+        if (!result.ok()) { JsonError(res, result.status().message()); return; }
+        res.set_content(*result + "\n", "application/json");
+    };
+
     srv.Get("/api/v1/cpu/sched/history",
-            [&controller](const httplib::Request&, httplib::Response& res) {
-                auto* pipe = controller.GetPipeline("sched_analysis");
-                if (!pipe) {
-                    JsonError(res, "pipeline not found");
-                    return;
-                }
-                auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
-                if (!src) {
-                    JsonError(res, "source not available");
-                    return;
-                }
-                auto pts = src->GetHistory();
-                illuminator::json arr = illuminator::json::array();
-                for (auto& p : pts) {
-                    arr.push_back({
-                        {"timestamp_ms", p.timestamp_ms},
-                        {"total_switches", p.total_switches},
-                        {"avg_latency_us", p.avg_latency_us},
-                        {"max_latency_ns", p.max_latency_ns},
-                        {"total_migrations", p.total_migrations},
-                        {"process_count", p.process_count},
-                    });
-                }
-                res.set_content(illuminator::json{{"history", std::move(arr)}}.dump() + "\n",
-                                "application/json");
+            [query_handler](const httplib::Request& req, httplib::Response& res) {
+                query_handler("sched_analysis", "history", req, res);
             });
-
     srv.Get("/api/v1/cpu/sched/events",
-            [&controller](const httplib::Request& req, httplib::Response& res) {
-                auto* pipe = controller.GetPipeline("sched_analysis");
-                if (!pipe) {
-                    JsonError(res, "pipeline not found");
-                    return;
-                }
-                auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
-                if (!src) {
-                    JsonError(res, "source not available");
-                    return;
-                }
-
-                uint32_t pid = 0;
-                size_t limit = 200;
-                if (req.has_param("pid")) pid = std::atoi(req.get_param_value("pid").c_str());
-                if (req.has_param("limit")) limit = std::atoi(req.get_param_value("limit").c_str());
-
-                auto events = src->GetRecentEvents(pid, limit);
-                const char* types[] = {"switch", "wakeup", "migrate"};
-                illuminator::json arr = illuminator::json::array();
-                for (auto& e : events) {
-                    unsigned ti = e.event_type < 3 ? e.event_type : 0;
-                    arr.push_back({
-                        {"timestamp_ms", e.timestamp_ms},
-                        {"event_type", types[ti]},
-                        {"prev_pid", e.prev_pid},
-                        {"next_pid", e.next_pid},
-                        {"cpu", e.cpu},
-                        {"latency_ns", e.latency_ns},
-                        {"prev_comm",
-                         std::string(e.prev_comm, strnlen(e.prev_comm, TASK_COMM_LEN))},
-                        {"next_comm",
-                         std::string(e.next_comm, strnlen(e.next_comm, TASK_COMM_LEN))},
-                    });
-                }
-                res.set_content(illuminator::json{{"events", std::move(arr)}}.dump() + "\n",
-                                "application/json");
+            [query_handler](const httplib::Request& req, httplib::Response& res) {
+                query_handler("sched_analysis", "events", req, res);
             });
-
     srv.Get("/api/v1/cpu/sched/wakeups",
-            [&controller](const httplib::Request&, httplib::Response& res) {
-                auto* pipe = controller.GetPipeline("sched_analysis");
-                if (!pipe) {
-                    JsonError(res, "pipeline not found");
-                    return;
-                }
-                auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
-                if (!src) {
-                    JsonError(res, "source not available");
-                    return;
-                }
-                auto wakeups = src->GetRecentWakeups(500);
-                illuminator::json arr = illuminator::json::array();
-                for (auto& w : wakeups) {
-                    arr.push_back({
-                        {"timestamp_ms", w.timestamp_ms},
-                        {"waker_pid", w.waker_pid},
-                        {"wakee_pid", w.wakee_pid},
-                        {"waker_comm",
-                         std::string(w.waker_comm, strnlen(w.waker_comm, TASK_COMM_LEN))},
-                        {"wakee_comm",
-                         std::string(w.wakee_comm, strnlen(w.wakee_comm, TASK_COMM_LEN))},
-                    });
-                }
-                res.set_content(illuminator::json{{"wakeups", std::move(arr)}}.dump() + "\n",
-                                "application/json");
+            [query_handler](const httplib::Request& req, httplib::Response& res) {
+                query_handler("sched_analysis", "wakeups", req, res);
             });
 
     srv.Get("/metrics", [](const httplib::Request&, httplib::Response& res) {

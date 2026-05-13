@@ -37,17 +37,17 @@ public:
     const char* Name() const override { return "ebpf_net_tracer"; }
     const char* Version() const override { return "0.1.0"; }
     bool IsPushMode() const override { return true; }
+    bool IsStub() const override { return stub_mode_; }
 
-    // 初始化：读取 BPF 对象路径
     Status Init(const ConfigValue& config) override {
         bpf_obj_path_ = config["bpf_object"].AsString("");
         return Status::Ok();
     }
 
-    // 启动：加载 BPF 程序或进入 /proc/net/tcp fallback
     Status Start() override {
         if (bpf_obj_path_.empty()) {
-            IL_WARN("ebpf_net_tracer: no BPF object, using /proc/net/tcp fallback");
+            IL_WARN("ebpf_net_tracer: no BPF object, idle mode");
+            stub_mode_ = true;
             return StartProcFallback();
         }
 
@@ -134,6 +134,7 @@ private:
 
     std::string bpf_obj_path_;
     bool running_ = false;
+    bool stub_mode_ = false;
     BpfProgramManager bpf_mgr_;
     struct ring_buffer* ring_buf_ = nullptr;
     std::thread poll_thread_;

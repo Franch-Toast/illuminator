@@ -47,8 +47,8 @@ public:
     const char* Name() const override { return "ebpf_cpu_sampler"; }
     const char* Version() const override { return "0.1.0"; }
 
-    // Push 模式：BPF 事件驱动，通过回调推送数据
     bool IsPushMode() const override { return true; }
+    bool IsStub() const override { return fallback_mode_; }
 
     // 初始化：读取采样频率和 BPF 对象路径
     Status Init(const ConfigValue& config) override {

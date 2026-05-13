@@ -76,13 +76,12 @@ public:
     virtual PluginType Type() const = 0;
 
     // ---- 生命周期方法 ----
-
-    // 初始化 — 传入配置参数，完成插件内部状态设置
     virtual Status Init(const ConfigValue& config) { return Status::Ok(); }
-    // 启动 — 开始工作（如打开文件、启动线程、挂载 eBPF 探针）
     virtual Status Start() { return Status::Ok(); }
-    // 停止 — 停止工作并释放资源
     virtual Status Stop() { return Status::Ok(); }
+
+    // True when plugin started in idle/degraded mode (e.g. missing BPF object).
+    virtual bool IsStub() const { return false; }
 };
 
 }  // namespace illuminator

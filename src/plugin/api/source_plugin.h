@@ -27,39 +27,36 @@
 #pragma once
 
 #include <functional>
+#include <string>
+#include <unordered_map>
 #include "plugin/api/plugin_api.h"
 
 namespace illuminator {
 
-// 数据传递回调函数类型：接收一个 DataBatch shared_ptr
 using SourceCallback = std::function<void(DataBatchPtr)>;
+using QueryParams = std::unordered_map<std::string, std::string>;
 
 class SourcePlugin : public Plugin {
 public:
     PluginType Type() const override { return PluginType::kSource; }
 
-    // ---- Push 模式配置 ----
-    // 设置数据推送的回调函数（由 Pipeline 在初始化时调用）
     void SetCallback(SourceCallback cb) { callback_ = std::move(cb); }
 
-    // ---- Pull 模式采集 ----
-    // 收集一批数据。Pull 模式下由 Pipeline 的采集线程定期调用。
-    // 默认实现返回 Unimplemented 错误，提示子类需要覆写此方法。
     virtual StatusOr<DataBatchPtr> Collect() {
         return Status::Error(StatusCode::kUnimplemented, "Pull mode not implemented");
     }
 
-    // ---- 模式切换 ----
-    // 返回 true 表示此 Source 工作在 Push（流式）模式
-    // 返回 false 表示此 Source 工作在 Pull（拉取）模式
     virtual bool IsPushMode() const { return false; }
-
-    // ---- 采集间隔 ----
-    // Pull 模式下的采集间隔（毫秒），默认每秒一次
     virtual uint32_t IntervalMs() const { return 1000; }
 
+    // Plugin-specific query API — eliminates need for dynamic_cast in HTTP handlers.
+    // Subclasses override to expose custom data endpoints (e.g. history, events).
+    virtual StatusOr<std::string> QueryExtra(
+        const std::string& /*query*/, const QueryParams& /*params*/) {
+        return Status::Error(StatusCode::kUnimplemented, "no extra queries");
+    }
+
 protected:
-    // 回调函数：子类在 Push 模式下调用此函数将数据推送到流水线
     SourceCallback callback_;
 };
 

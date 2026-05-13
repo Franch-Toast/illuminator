@@ -86,6 +86,7 @@ public:
     const char* Version() const override { return "0.1.0"; }
 
     bool IsPushMode() const override { return false; }
+    bool IsStub() const override { return stub_mode_; }
 
     StatusOr<DataBatchPtr> Collect() override {
         std::lock_guard<std::mutex> lk(cache_mu_);
@@ -128,8 +129,8 @@ public:
     // 5. 启动后台轮询线程驱动 ring buffer 消费
     Status Start() override {
         if (bpf_obj_path_.empty()) {
-            IL_WARN(
-                "offcpu_profiler: no bpf_object path specified; profiler idle");
+            IL_WARN("offcpu_profiler: no bpf_object path; idle mode");
+            stub_mode_ = true;
             running_.store(false);
             return Status::Ok();
         }
@@ -259,8 +260,8 @@ private:
         return 0;
     }
 
-    // ---- 配置参数 ----
-    uint32_t min_duration_us_ = 100;    // 最小等待时长阈值（微秒）
+    bool stub_mode_ = false;
+    uint32_t min_duration_us_ = 100;
     bool user_stacks_ = true;           // 是否采集用户态堆栈
     bool kernel_stacks_ = true;         // 是否采集内核态堆栈
     std::string bpf_obj_path_;          // eBPF 目标文件路径

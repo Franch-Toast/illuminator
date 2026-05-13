@@ -12,6 +12,7 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        "//src/core:common",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],
@@ -34,57 +35,6 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "cpu_sys_monitor",
-    hdrs = ["cpu/cpu_sys_monitor/cpu_sys_monitor.h"],
-    strip_include_prefix = "",
-    include_prefix = "sources",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:manager",
-    ],
-)
-
-cc_library(
-    name = "process_cpu_monitor",
-    hdrs = ["cpu/process_cpu_monitor/process_cpu_monitor.h"],
-    strip_include_prefix = "",
-    include_prefix = "sources",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:manager",
-    ],
-)
-
-cc_library(
-    name = "cpu_sys_stats",
-    hdrs = ["cpu/cpu_sys_stats/cpu_sys_stats.h"],
-    strip_include_prefix = "",
-    include_prefix = "sources",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:manager",
-    ],
-)
-
-cc_library(
-    name = "proc_cpu_monitor",
-    hdrs = ["cpu/proc_cpu_monitor/proc_cpu_monitor.h"],
-    strip_include_prefix = "",
-    include_prefix = "sources",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:manager",
-    ],
-)
 
 cc_library(
     name = "cpu_utilization",
@@ -94,6 +44,7 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        "//src/core:common",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],
@@ -107,6 +58,7 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        "//src/core:common",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],
@@ -148,6 +100,7 @@ cc_library(
         "//src/ebpf:loader",
         "//src/plugin:api",
         "//src/plugin:manager",
+        "@nlohmann_json//:json",
     ],
 )
 

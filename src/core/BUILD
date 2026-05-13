@@ -6,6 +6,7 @@ cc_library(
         "common/config.h",
         "common/self_observability.h",
         "common/string_util.h",
+        "common/proc_reader.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
