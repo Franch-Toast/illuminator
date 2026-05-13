@@ -42,12 +42,9 @@
 //   /metrics                     — Prometheus 格式内部指标
 //   /api/v1/internal_metrics     — JSON 格式内部指标
 //
-// 辅助工具函数（在 illuminator 命名空间中）：
+// JSON 序列化：
 // ===========================================
-//   EscapeJson()       — JSON 字符串转义
-//   FieldValueToJson() — FieldValue 变体转 JSON 字符串
-//   StackFramesToJson()— 堆栈帧列表转 JSON 数组
-//   BatchToJson()      — 完整 DataBatch 转 JSON（labels + fields + stack_samples）
+//   见 serialization/json_serializer.h（基于 nlohmann/json）
 // ============================================================================
 
 #include <csignal>
@@ -55,7 +52,6 @@
 #include <cstring>
 #include <atomic>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -66,25 +62,27 @@
 #include "core/engine/pipeline_controller.h"
 #include "plugin/builtin/builtin_plugins.h"
 #include "plugin/manager/plugin_manager.h"
+#include "httplib.h"
 #include "server/http_server.h"
-#include "server/websocket_server.h"
 #include "server/websocket_manager.h"
 #include "ebpf/loader/bpf_program_manager.h"
-#include "sources/sched_analyzer/sched_analyzer.h"
+#include "sources/sched/sched_analyzer/sched_analyzer.h"
 #include "sinks/prometheus_exposition/prometheus_sink.h"
 #include "storage/storage_backend.h"
 #include "core/common/self_observability.h"
+#include "serialization/json_serializer.h"
 
-namespace illuminator {
-void HttpServer::HandleWebSocketUpgrade(int fd, const std::string& request) {
-    if (!WebSocketCodec::PerformHandshake(fd, request)) {
-        close(fd);
-        return;
-    }
-    auto path = WebSocketCodec::GetUpgradePath(request);
-    ws_manager_->AddConnection(fd, path);
+static constexpr const char* kIlluminatorVersion = "0.1.0";
+static constexpr int kHttpPort = 9527;
+static constexpr int kWsPort = 9528;
+
+static void JsonError(httplib::Response& res, const std::string& msg,
+                      int status = 200) {
+    res.set_content(illuminator::json{{"error", msg}}.dump() + "\n",
+                    "application/json");
 }
-}  // namespace illuminator
+
+// WebSocket upgrade handling moved to WebSocketManager::AcceptLoop()
 
 // 全局运行标志，受信号处理器控制
 static std::atomic<bool> g_running{true};
@@ -97,12 +95,11 @@ static void SignalHandler(int) {
 // 打印命令行使用帮助
 static void PrintUsage(const char* prog) {
     fprintf(stderr,
-        "Illuminator - Observability & Performance Analysis Platform v0.1.0\n\n"
+        "Illuminator - Observability & Performance Analysis Platform v%s\n\n"
         "Usage: %s <command> [options]\n\n"
         "Commands:\n"
         "  daemon     Start the Illuminator daemon\n"
         "  collect    One-shot data collection\n"
-        "  export     Export stored data to a format\n"
         "  top        Real-time system overview\n"
         "  version    Show version\n"
         "  plugins    List registered plugins\n"
@@ -110,131 +107,20 @@ static void PrintUsage(const char* prog) {
         "Options:\n"
         "  --config <path>       Configuration file path\n"
         "  --log-level <level>   Log level (trace/debug/info/warn/error)\n"
-        "  --duration <sec>      Collection duration (collect command)\n"
-        "  --output <path>       Output file path (export command)\n"
-        "  --format <fmt>        Export format (pprof/json/csv/folded)\n\n", prog);
+        "  --duration <sec>      Collection duration (collect command)\n\n",
+        kIlluminatorVersion, prog);
 }
 
-// 设置全局日志级别
 static void SetLogLevel(const std::string& level) {
     using illuminator::LogLevel;
-    if (level == "trace") illuminator::Logger::Instance().SetLevel(LogLevel::kTrace);
-    else if (level == "debug") illuminator::Logger::Instance().SetLevel(LogLevel::kDebug);
-    else if (level == "info")  illuminator::Logger::Instance().SetLevel(LogLevel::kInfo);
-    else if (level == "warn")  illuminator::Logger::Instance().SetLevel(LogLevel::kWarn);
-    else if (level == "error") illuminator::Logger::Instance().SetLevel(LogLevel::kError);
+    if (level == "trace") illuminator::SetLogLevel(LogLevel::kTrace);
+    else if (level == "debug") illuminator::SetLogLevel(LogLevel::kDebug);
+    else if (level == "info")  illuminator::SetLogLevel(LogLevel::kInfo);
+    else if (level == "warn")  illuminator::SetLogLevel(LogLevel::kWarn);
+    else if (level == "error") illuminator::SetLogLevel(LogLevel::kError);
 }
 
-namespace illuminator {
-
-// ---- JSON 序列化工具 ----
-
-// JSON 字符串转义：处理引号、反斜杠、换行、制表符等特殊字符
-static std::string EscapeJson(std::string_view s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) {
-        switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\t': out += "\\t"; break;
-            default:   out += c; break;
-        }
-    }
-    return out;
-}
-
-// FieldValue variant → JSON 字符串
-static std::string FieldValueToJson(const FieldValue& fv) {
-    if (auto* b = std::get_if<bool>(&fv)) return *b ? "true" : "false";
-    if (auto* i = std::get_if<int64_t>(&fv)) return std::to_string(*i);
-    if (auto* u = std::get_if<uint64_t>(&fv)) return std::to_string(*u);
-    if (auto* d = std::get_if<double>(&fv)) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%.4f", *d);
-        return buf;
-    }
-    if (auto* sv = std::get_if<std::string_view>(&fv))
-        return "\"" + EscapeJson(*sv) + "\"";
-    return "null";
-}
-
-// 堆栈帧列表 → JSON 数组字符串
-std::string StackFramesToJson(const std::vector<StackFrame>& frames) {
-    std::ostringstream ss;
-    ss << "[";
-    bool first = true;
-    for (auto& f : frames) {
-        if (!first) ss << ",";
-        first = false;
-        ss << "{\"address\":" << f.address;
-        if (!f.function_name.empty())
-            ss << ",\"function_name\":\"" << EscapeJson(f.function_name) << "\"";
-        if (!f.module_name.empty())
-            ss << ",\"module_name\":\"" << EscapeJson(f.module_name) << "\"";
-        ss << "}";
-    }
-    ss << "]";
-    return ss.str();
-}
-
-// 完整 DataBatch → JSON 字符串
-// 包括 pipeline 名称、records 数组（labels + fields）、
-// 以及可选的 stack_samples 数组（含 kernel_stack + user_stack）
-std::string BatchToJson(const DataBatch& batch, const std::string& pipeline) {
-    std::ostringstream ss;
-    ss << "{\"pipeline\":\"" << EscapeJson(pipeline) << "\",\"records\":[";
-    bool first = true;
-    for (auto& rec : batch.records()) {
-        if (!first) ss << ",";
-        first = false;
-        ss << "{\"labels\":{";
-        bool lf = true;
-        for (auto& l : rec.labels) {
-            if (!lf) ss << ",";
-            lf = false;
-            ss << "\"" << EscapeJson(l.key) << "\":\"" << EscapeJson(l.value) << "\"";
-        }
-        ss << "},\"fields\":{";
-        bool ff = true;
-        for (auto& [k, v] : rec.fields) {
-            if (!ff) ss << ",";
-            ff = false;
-            ss << "\"" << EscapeJson(k) << "\":" << FieldValueToJson(v);
-        }
-        ss << "}}";
-    }
-    ss << "]";
-
-    // 堆栈采样部分（如果存在）
-    auto& samples = batch.stack_samples();
-    if (!samples.empty()) {
-        ss << ",\"stack_samples\":[";
-        bool sf = true;
-        for (auto& s : samples) {
-            if (!sf) ss << ",";
-            sf = false;
-            ss << "{\"pid\":" << s.pid
-               << ",\"tid\":" << s.tid
-               << ",\"cpu\":" << s.cpu
-               << ",\"count\":" << s.count
-               << ",\"comm\":\"" << EscapeJson(s.comm) << "\""
-               << ",\"type\":" << static_cast<int>(s.sample_type);
-            if (s.duration_ns > 0)
-               ss << ",\"duration_ns\":" << s.duration_ns;
-            ss << ",\"kernel_stack\":" << StackFramesToJson(s.kernel_stack)
-               << ",\"user_stack\":" << StackFramesToJson(s.user_stack)
-               << "}";
-        }
-        ss << "]";
-    }
-
-    ss << "}";
-    return ss.str();
-}
-
-}  // namespace illuminator
+// illuminator::BatchToJson and related serialization now in serialization/json_serializer.h
 
 // ========================================================================
 // BuildDemoConfig — 构建内置演示配置
@@ -249,15 +135,15 @@ static illuminator::GlobalConfig BuildDemoConfig() {
         illuminator::PipelineConfig pc;
         pc.name = "cpu_utilization";
         pc.source.type = "cpu_utilization";
-        pc.source.config["interval_ms"] = int64_t{1000};
-        pc.source.config["collect_per_core"] = "true";
-        pc.source.config["collect_frequency"] = "true";
-        pc.source.config["ema_alpha"] = "0.3";
+        pc.source.config.Set("interval_ms", int64_t{1000});
+        pc.source.config.Set("collect_per_core", "true");
+        pc.source.config.Set("collect_frequency", "true");
+        pc.source.config.Set("ema_alpha", "0.3");
 
         illuminator::ConfigValue storage_cfg;
-        storage_cfg["backend"] = "sqlite";
-        storage_cfg["path"] = "/tmp/illuminator_data";
-        storage_cfg["pipeline"] = "cpu_utilization";
+        storage_cfg.Set("backend", "sqlite");
+        storage_cfg.Set("path", "/tmp/illuminator_data");
+        storage_cfg.Set("pipeline", "cpu_utilization");
         pc.sinks.push_back({"local_storage", storage_cfg});
 
         config.pipelines.push_back(std::move(pc));
@@ -268,14 +154,14 @@ static illuminator::GlobalConfig BuildDemoConfig() {
         illuminator::PipelineConfig pc;
         pc.name = "cpu_processes";
         pc.source.type = "process_cpu";
-        pc.source.config["interval_ms"] = int64_t{2000};
-        pc.source.config["top_n"] = int64_t{50};
-        pc.source.config["thread_detail_threshold_pct"] = "3.0";
+        pc.source.config.Set("interval_ms", int64_t{2000});
+        pc.source.config.Set("top_n", int64_t{50});
+        pc.source.config.Set("thread_detail_threshold_pct", "3.0");
 
         illuminator::ConfigValue storage_cfg;
-        storage_cfg["backend"] = "sqlite";
-        storage_cfg["path"] = "/tmp/illuminator_data";
-        storage_cfg["pipeline"] = "cpu_processes";
+        storage_cfg.Set("backend", "sqlite");
+        storage_cfg.Set("path", "/tmp/illuminator_data");
+        storage_cfg.Set("pipeline", "cpu_processes");
         pc.sinks.push_back({"local_storage", storage_cfg});
 
         config.pipelines.push_back(std::move(pc));
@@ -286,30 +172,30 @@ static illuminator::GlobalConfig BuildDemoConfig() {
         illuminator::PipelineConfig pc;
         pc.name = "cpu_profile";
         pc.source.type = "cpu_profiler";
-        pc.source.config["frequency_hz"] = int64_t{49};
-        pc.source.config["mode"] = "aggregated";
-        pc.source.config["user_stacks"] = "true";
-        pc.source.config["kernel_stacks"] = "true";
+        pc.source.config.Set("frequency_hz", int64_t{49});
+        pc.source.config.Set("mode", "aggregated");
+        pc.source.config.Set("user_stacks", "true");
+        pc.source.config.Set("kernel_stacks", "true");
 
         // Processor 1: 堆栈符号化（地址 → 函数名）
         illuminator::PipelineConfig::StageConfig sym_cfg;
         sym_cfg.type = "stack_symbolizer";
-        sym_cfg.config["demangle"] = "true";
-        sym_cfg.config["kernel_symbols"] = "true";
+        sym_cfg.config.Set("demangle", "true");
+        sym_cfg.config.Set("kernel_symbols", "true");
         pc.processors.push_back(sym_cfg);
 
         // Processor 2: 堆栈合并（相同调用栈计数累加）
         illuminator::PipelineConfig::StageConfig merge_cfg;
         merge_cfg.type = "stack_merger";
-        merge_cfg.config["group_by"] = "comm";
-        merge_cfg.config["include_kernel"] = "true";
+        merge_cfg.config.Set("group_by", "comm");
+        merge_cfg.config.Set("include_kernel", "true");
         pc.processors.push_back(merge_cfg);
 
         // 双 Sink: 本地存储 + pprof 导出
         illuminator::ConfigValue storage_cfg;
-        storage_cfg["backend"] = "sqlite";
-        storage_cfg["path"] = "/tmp/illuminator_data";
-        storage_cfg["pipeline"] = "cpu_profile";
+        storage_cfg.Set("backend", "sqlite");
+        storage_cfg.Set("path", "/tmp/illuminator_data");
+        storage_cfg.Set("pipeline", "cpu_profile");
         pc.sinks.push_back({"local_storage", storage_cfg});
         pc.sinks.push_back({"pprof_export", illuminator::ConfigValue()});
 
@@ -321,20 +207,275 @@ static illuminator::GlobalConfig BuildDemoConfig() {
         illuminator::PipelineConfig pc;
         pc.name = "sched_analysis";
         pc.source.type = "sched_analyzer";
-        pc.source.config["detailed_mode"] = "false";
-        pc.source.config["aggregate_interval_ms"] = int64_t{5000};
-        pc.source.config["track_migrations"] = "true";
+        pc.source.config.Set("detailed_mode", "false");
+        pc.source.config.Set("aggregate_interval_ms", int64_t{5000});
+        pc.source.config.Set("track_migrations", "true");
 
         illuminator::ConfigValue storage_cfg;
-        storage_cfg["backend"] = "sqlite";
-        storage_cfg["path"] = "/tmp/illuminator_data";
-        storage_cfg["pipeline"] = "sched_analysis";
+        storage_cfg.Set("backend", "sqlite");
+        storage_cfg.Set("path", "/tmp/illuminator_data");
+        storage_cfg.Set("pipeline", "sched_analysis");
         pc.sinks.push_back({"local_storage", storage_cfg});
 
         config.pipelines.push_back(std::move(pc));
     }
 
     return config;
+}
+
+static void RegisterApiRoutes(illuminator::HttpServer& http_server,
+                              illuminator::PipelineController& controller) {
+    auto& srv = http_server.server();
+
+    srv.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(
+            illuminator::json{{"status", "ok"}, {"version", kIlluminatorVersion}}.dump() +
+                "\n",
+            "application/json");
+    });
+
+    srv.Get("/api/v1/pipelines",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                illuminator::json arr = illuminator::json::array();
+                for (auto& p : controller.Pipelines()) {
+                    arr.push_back({
+                        {"name", p->name()},
+                        {"running", p->IsRunning()},
+                        {"batches", p->BatchesProcessed()},
+                        {"records", p->RecordsProcessed()},
+                        {"errors", p->ErrorCount()},
+                    });
+                }
+                res.set_content(
+                    illuminator::json{{"pipelines", std::move(arr)}}.dump() + "\n",
+                    "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/utilization",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("cpu_utilization");
+                if (!pipe) {
+                    JsonError(res, "cpu_utilization pipeline not found");
+                    return;
+                }
+                auto* source = pipe->GetSource();
+                if (!source) {
+                    JsonError(res, "no source");
+                    return;
+                }
+                auto result = source->Collect();
+                if (!result.ok()) {
+                    JsonError(res, "collect failed");
+                    return;
+                }
+                res.set_content(
+                    illuminator::BatchToJson(*result.value(), "cpu_utilization") + "\n",
+                    "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/processes",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("cpu_processes");
+                if (!pipe) {
+                    JsonError(res, "cpu_processes pipeline not found");
+                    return;
+                }
+                auto* source = pipe->GetSource();
+                if (!source) {
+                    JsonError(res, "no source");
+                    return;
+                }
+                auto result = source->Collect();
+                if (!result.ok()) {
+                    JsonError(res, "collect failed");
+                    return;
+                }
+                res.set_content(
+                    illuminator::BatchToJson(*result.value(), "cpu_processes") + "\n",
+                    "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/profile/flamegraph",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("cpu_profile");
+                if (!pipe) {
+                    JsonError(res, "cpu_profile pipeline not found");
+                    return;
+                }
+                auto* source = pipe->GetSource();
+                if (!source) {
+                    JsonError(res, "no source");
+                    return;
+                }
+                auto result = source->Collect();
+                if (!result.ok()) {
+                    JsonError(res, "collect failed");
+                    return;
+                }
+                auto processed = pipe->RunProcessors(std::move(*result));
+                if (!processed.ok()) {
+                    JsonError(res, "symbolization failed");
+                    return;
+                }
+                res.set_content(
+                    illuminator::BatchToJson(**processed, "cpu_profile") + "\n",
+                    "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/profile/offcpu",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("offcpu_analysis");
+                if (!pipe) {
+                    JsonError(res, "offcpu_analysis pipeline not found");
+                    return;
+                }
+                auto* source = pipe->GetSource();
+                if (!source) {
+                    JsonError(res, "no source");
+                    return;
+                }
+                auto result = source->Collect();
+                if (!result.ok()) {
+                    JsonError(res, "collect failed");
+                    return;
+                }
+                auto processed = pipe->RunProcessors(std::move(*result));
+                if (!processed.ok()) {
+                    JsonError(res, "symbolization failed");
+                    return;
+                }
+                res.set_content(
+                    illuminator::BatchToJson(**processed, "offcpu_analysis") + "\n",
+                    "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/sched/summary",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("sched_analysis");
+                if (!pipe) {
+                    JsonError(res, "sched_analysis pipeline not found");
+                    return;
+                }
+                auto* source = pipe->GetSource();
+                if (!source) {
+                    JsonError(res, "no source");
+                    return;
+                }
+                auto result = source->Collect();
+                if (!result.ok()) {
+                    JsonError(res, "collect failed");
+                    return;
+                }
+                res.set_content(
+                    illuminator::BatchToJson(*result.value(), "sched_analysis") + "\n",
+                    "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/sched/history",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("sched_analysis");
+                if (!pipe) {
+                    JsonError(res, "pipeline not found");
+                    return;
+                }
+                auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
+                if (!src) {
+                    JsonError(res, "source not available");
+                    return;
+                }
+                auto pts = src->GetHistory();
+                illuminator::json arr = illuminator::json::array();
+                for (auto& p : pts) {
+                    arr.push_back({
+                        {"timestamp_ms", p.timestamp_ms},
+                        {"total_switches", p.total_switches},
+                        {"avg_latency_us", p.avg_latency_us},
+                        {"max_latency_ns", p.max_latency_ns},
+                        {"total_migrations", p.total_migrations},
+                        {"process_count", p.process_count},
+                    });
+                }
+                res.set_content(illuminator::json{{"history", std::move(arr)}}.dump() + "\n",
+                                "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/sched/events",
+            [&controller](const httplib::Request& req, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("sched_analysis");
+                if (!pipe) {
+                    JsonError(res, "pipeline not found");
+                    return;
+                }
+                auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
+                if (!src) {
+                    JsonError(res, "source not available");
+                    return;
+                }
+
+                uint32_t pid = 0;
+                size_t limit = 200;
+                if (req.has_param("pid")) pid = std::atoi(req.get_param_value("pid").c_str());
+                if (req.has_param("limit")) limit = std::atoi(req.get_param_value("limit").c_str());
+
+                auto events = src->GetRecentEvents(pid, limit);
+                const char* types[] = {"switch", "wakeup", "migrate"};
+                illuminator::json arr = illuminator::json::array();
+                for (auto& e : events) {
+                    unsigned ti = e.event_type < 3 ? e.event_type : 0;
+                    arr.push_back({
+                        {"timestamp_ms", e.timestamp_ms},
+                        {"event_type", types[ti]},
+                        {"prev_pid", e.prev_pid},
+                        {"next_pid", e.next_pid},
+                        {"cpu", e.cpu},
+                        {"latency_ns", e.latency_ns},
+                        {"prev_comm",
+                         std::string(e.prev_comm, strnlen(e.prev_comm, TASK_COMM_LEN))},
+                        {"next_comm",
+                         std::string(e.next_comm, strnlen(e.next_comm, TASK_COMM_LEN))},
+                    });
+                }
+                res.set_content(illuminator::json{{"events", std::move(arr)}}.dump() + "\n",
+                                "application/json");
+            });
+
+    srv.Get("/api/v1/cpu/sched/wakeups",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                auto* pipe = controller.GetPipeline("sched_analysis");
+                if (!pipe) {
+                    JsonError(res, "pipeline not found");
+                    return;
+                }
+                auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
+                if (!src) {
+                    JsonError(res, "source not available");
+                    return;
+                }
+                auto wakeups = src->GetRecentWakeups(500);
+                illuminator::json arr = illuminator::json::array();
+                for (auto& w : wakeups) {
+                    arr.push_back({
+                        {"timestamp_ms", w.timestamp_ms},
+                        {"waker_pid", w.waker_pid},
+                        {"wakee_pid", w.wakee_pid},
+                        {"waker_comm",
+                         std::string(w.waker_comm, strnlen(w.waker_comm, TASK_COMM_LEN))},
+                        {"wakee_comm",
+                         std::string(w.wakee_comm, strnlen(w.wakee_comm, TASK_COMM_LEN))},
+                    });
+                }
+                res.set_content(illuminator::json{{"wakeups", std::move(arr)}}.dump() + "\n",
+                                "application/json");
+            });
+
+    srv.Get("/metrics", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(illuminator::InternalMetrics::Instance().ExportPrometheus(),
+                        "text/plain");
+    });
+    srv.Get("/api/v1/internal_metrics", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content(illuminator::InternalMetrics::Instance().ExportJson() + "\n",
+                        "application/json");
+    });
 }
 
 // ========================================================================
@@ -344,7 +485,7 @@ static illuminator::GlobalConfig BuildDemoConfig() {
 //   插件注册 → 配置加载 → 管道构建 → 管道启动 → HTTP 服务器启动 → 接收信号
 static int RunDaemon(const std::string& config_path, const std::string& log_level) {
     SetLogLevel(log_level);
-    IL_INFO("Illuminator v0.1.0 starting...");
+    IL_INFO("Illuminator v{} starting...", kIlluminatorVersion);
 
     // 强制链接所有内置插件 + 打印当前注册信息
     illuminator::RegisterBuiltinPlugins();
@@ -353,10 +494,10 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     // 加载配置
     illuminator::GlobalConfig config;
     if (!config_path.empty()) {
-        IL_INFO("Loading configuration from: %s", config_path.c_str());
+        IL_INFO("Loading configuration from: {}", config_path);
         auto result = illuminator::YamlConfigLoader::LoadFromFile(config_path);
         if (!result.ok()) {
-            IL_ERROR("Failed to load config: %s", result.status().message().c_str());
+            IL_ERROR("Failed to load config: {}", result.status().message());
             return 1;
         }
         config = result.value();
@@ -370,14 +511,14 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     illuminator::PipelineController controller;
     auto status = controller.BuildFromConfig(config);
     if (!status.ok()) {
-        IL_ERROR("Failed to build pipelines: %s", status.message().c_str());
+        IL_ERROR("Failed to build pipelines: {}", status.message());
         return 1;
     }
 
     // 启动所有管道（任一条失败则停止已启动的管道）
     status = controller.StartAll();
     if (!status.ok()) {
-        IL_ERROR("Failed to start pipelines: %s", status.message().c_str());
+        IL_ERROR("Failed to start pipelines: {}", status.message());
         return 1;
     }
 
@@ -388,209 +529,20 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                                 illuminator::DataBatchPtr batch) {
         return illuminator::BatchToJson(*batch, pipeline_key);
     });
+    ws_manager.Listen("0.0.0.0", kWsPort);
 
     // ---- 启动 HTTP 服务器（注册所有 API 端点） ----
 
     illuminator::HttpServer http_server;
-    http_server.SetWebSocketManager(&ws_manager);
-
-    // 健康检查端点
-    http_server.RegisterHandler("/healthz", [](const std::string&) {
-        return "{\"status\":\"ok\",\"version\":\"0.1.0\"}\n";
-    });
-
-    // 管道状态列表端点
-    http_server.RegisterHandler("/api/v1/pipelines",
-        [&controller](const std::string&) {
-        std::string result = "{\"pipelines\":[";
-        bool first = true;
-        for (auto& p : controller.Pipelines()) {
-            if (!first) result += ",";
-            result += "{\"name\":\"" + p->name() + "\""
-                   + ",\"running\":" + (p->IsRunning() ? "true" : "false")
-                   + ",\"batches\":" + std::to_string(p->BatchesProcessed())
-                   + ",\"records\":" + std::to_string(p->RecordsProcessed())
-                   + ",\"errors\":" + std::to_string(p->ErrorCount()) + "}";
-            first = false;
-        }
-        result += "]}\n";
-        return result;
-    });
-
-    // CPU 利用率端点（新版统一源，返回结构化 JSON）
-    http_server.RegisterHandler("/api/v1/cpu/utilization",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("cpu_utilization");
-        if (!pipe) return std::string("{\"error\":\"cpu_utilization pipeline not found\"}\n");
-        auto* source = pipe->GetSource();
-        if (!source) return std::string("{\"error\":\"no source\"}\n");
-        auto result = source->Collect();
-        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
-        return illuminator::BatchToJson(*result.value(), "cpu_utilization") + "\n";
-    });
-
-    // 进程 CPU 指标端点
-    http_server.RegisterHandler("/api/v1/cpu/processes",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("cpu_processes");
-        if (!pipe) return std::string("{\"error\":\"cpu_processes pipeline not found\"}\n");
-        auto* source = pipe->GetSource();
-        if (!source) return std::string("{\"error\":\"no source\"}\n");
-        auto result = source->Collect();
-        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
-        return illuminator::BatchToJson(*result.value(), "cpu_processes") + "\n";
-    });
-
-    // CPU Profile / 火焰图端点（含完整 Processor 链： 符号化 + 堆栈合并）
-    http_server.RegisterHandler("/api/v1/cpu/profile/flamegraph",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("cpu_profile");
-        if (!pipe) return std::string("{\"error\":\"cpu_profile pipeline not found\"}\n");
-        auto* source = pipe->GetSource();
-        if (!source) return std::string("{\"error\":\"no source\"}\n");
-        auto result = source->Collect();
-        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
-        auto processed = pipe->RunProcessors(std::move(*result));
-        if (!processed.ok()) return std::string("{\"error\":\"symbolization failed\"}\n");
-        return illuminator::BatchToJson(**processed, "cpu_profile") + "\n";
-    });
-
-    // Off-CPU 火焰图端点（含符号化 + 堆栈合并）
-    http_server.RegisterHandler("/api/v1/cpu/profile/offcpu",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("offcpu_analysis");
-        if (!pipe) return std::string("{\"error\":\"offcpu_analysis pipeline not found\"}\n");
-        auto* source = pipe->GetSource();
-        if (!source) return std::string("{\"error\":\"no source\"}\n");
-        auto result = source->Collect();
-        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
-        auto processed = pipe->RunProcessors(std::move(*result));
-        if (!processed.ok()) return std::string("{\"error\":\"symbolization failed\"}\n");
-        return illuminator::BatchToJson(**processed, "offcpu_analysis") + "\n";
-    });
-
-    // 调度器摘要端点
-    http_server.RegisterHandler("/api/v1/cpu/sched/summary",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("sched_analysis");
-        if (!pipe) return std::string("{\"error\":\"sched_analysis pipeline not found\"}\n");
-        auto* source = pipe->GetSource();
-        if (!source) return std::string("{\"error\":\"no source\"}\n");
-        auto result = source->Collect();
-        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
-        return illuminator::BatchToJson(*result.value(), "sched_analysis") + "\n";
-    });
-
-    // 调度历史数据端点（时序折线图用）
-    http_server.RegisterHandler("/api/v1/cpu/sched/history",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("sched_analysis");
-        if (!pipe) return std::string("{\"error\":\"pipeline not found\"}\n");
-        auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
-        if (!src) return std::string("{\"error\":\"source not available\"}\n");
-        auto pts = src->GetHistory();
-        std::ostringstream ss;
-        ss << "{\"history\":[";
-        bool first = true;
-        for (auto& p : pts) {
-            if (!first) ss << ",";
-            first = false;
-            ss << "{\"timestamp_ms\":" << p.timestamp_ms
-               << ",\"total_switches\":" << p.total_switches
-               << ",\"avg_latency_us\":" << p.avg_latency_us
-               << ",\"max_latency_ns\":" << p.max_latency_ns
-               << ",\"total_migrations\":" << p.total_migrations
-               << ",\"process_count\":" << p.process_count << "}";
-        }
-        ss << "]}\n";
-        return ss.str();
-    });
-
-    // 调度详细事件端点
-    http_server.RegisterHandler("/api/v1/cpu/sched/events",
-        [&controller](const std::string& path) {
-        auto* pipe = controller.GetPipeline("sched_analysis");
-        if (!pipe) return std::string("{\"error\":\"pipeline not found\"}\n");
-        auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
-        if (!src) return std::string("{\"error\":\"source not available\"}\n");
-
-        uint32_t pid = 0;
-        size_t limit = 200;
-        auto q = path.find('?');
-        if (q != std::string::npos) {
-            auto qs = path.substr(q + 1);
-            auto pp = qs.find("pid=");
-            if (pp != std::string::npos) pid = std::atoi(qs.c_str() + pp + 4);
-            auto lp = qs.find("limit=");
-            if (lp != std::string::npos) limit = std::atoi(qs.c_str() + lp + 6);
-        }
-
-        auto events = src->GetRecentEvents(pid, limit);
-        std::ostringstream ss;
-        ss << "{\"events\":[";
-        bool first = true;
-        for (auto& e : events) {
-            if (!first) ss << ",";
-            first = false;
-            const char* types[] = {"switch", "wakeup", "migrate"};
-            unsigned ti = e.event_type < 3 ? e.event_type : 0;
-            ss << "{\"timestamp_ms\":" << e.timestamp_ms
-               << ",\"event_type\":\"" << types[ti] << "\""
-               << ",\"prev_pid\":" << e.prev_pid
-               << ",\"next_pid\":" << e.next_pid
-               << ",\"cpu\":" << e.cpu
-               << ",\"latency_ns\":" << e.latency_ns
-               << ",\"prev_comm\":\"" << illuminator::EscapeJson(
-                    std::string_view(e.prev_comm, strnlen(e.prev_comm, TASK_COMM_LEN))) << "\""
-               << ",\"next_comm\":\"" << illuminator::EscapeJson(
-                    std::string_view(e.next_comm, strnlen(e.next_comm, TASK_COMM_LEN))) << "\""
-               << "}";
-        }
-        ss << "]}\n";
-        return ss.str();
-    });
-
-    // Wakeup 链分析端点
-    http_server.RegisterHandler("/api/v1/cpu/sched/wakeups",
-        [&controller](const std::string&) {
-        auto* pipe = controller.GetPipeline("sched_analysis");
-        if (!pipe) return std::string("{\"error\":\"pipeline not found\"}\n");
-        auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
-        if (!src) return std::string("{\"error\":\"source not available\"}\n");
-        auto wakeups = src->GetRecentWakeups(500);
-        std::ostringstream ss;
-        ss << "{\"wakeups\":[";
-        bool first = true;
-        for (auto& w : wakeups) {
-            if (!first) ss << ",";
-            first = false;
-            ss << "{\"timestamp_ms\":" << w.timestamp_ms
-               << ",\"waker_pid\":" << w.waker_pid
-               << ",\"wakee_pid\":" << w.wakee_pid
-               << ",\"waker_comm\":\"" << illuminator::EscapeJson(
-                    std::string_view(w.waker_comm, strnlen(w.waker_comm, TASK_COMM_LEN))) << "\""
-               << ",\"wakee_comm\":\"" << illuminator::EscapeJson(
-                    std::string_view(w.wakee_comm, strnlen(w.wakee_comm, TASK_COMM_LEN))) << "\""
-               << "}";
-        }
-        ss << "]}\n";
-        return ss.str();
-    });
-
-    // 自观测端点（Prometheus 格式 + JSON 格式）
-    http_server.RegisterHandler("/metrics", [](const std::string&) {
-        return illuminator::InternalMetrics::Instance().ExportPrometheus();
-    });
-    http_server.RegisterHandler("/api/v1/internal_metrics", [](const std::string&) {
-        return illuminator::InternalMetrics::Instance().ExportJson() + "\n";
-    });
+    RegisterApiRoutes(http_server, controller);
 
     // 静态前端文件服务 + HTTP 启动
     http_server.SetStaticDir("web/dist");
-    http_server.Start("0.0.0.0", 9527);
+    http_server.Start("0.0.0.0", kHttpPort);
     ws_manager.Start();
 
-    IL_INFO("Illuminator daemon running. HTTP on :9527. Ctrl+C to stop.");
+    IL_INFO("Illuminator daemon running. HTTP on :{}, WS on :{}. Ctrl+C to stop.",
+            kHttpPort, kWsPort);
 
     // 注册信号处理
     signal(SIGINT, SignalHandler);
@@ -614,7 +566,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
 // ========================================================================
 static int RunCollect(int duration_sec, const std::string& log_level) {
     SetLogLevel(log_level);
-    IL_INFO("Collecting for %d seconds...", duration_sec);
+    IL_INFO("Collecting for {} seconds...", duration_sec);
 
     illuminator::RegisterBuiltinPlugins();
 
@@ -651,7 +603,7 @@ static int RunTop(const std::string& log_level) {
     }
 
     illuminator::ConfigValue cfg;
-    cfg["interval_ms"] = int64_t{1000};
+    cfg.Set("interval_ms", int64_t{1000});
     source->Init(cfg);
 
     while (g_running.load()) {
@@ -747,7 +699,7 @@ int main(int argc, char** argv) {
     }
 
     std::string command = argv[1];
-    std::string config_path, log_level = "info", output, format;
+    std::string config_path, log_level = "info";
     int duration = 10;  // 默认采集 10 秒
 
     // 解析可选参数
@@ -758,17 +710,16 @@ int main(int argc, char** argv) {
             log_level = argv[++i];
         else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc)
             duration = std::atoi(argv[++i]);
-        else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc)
-            output = argv[++i];
-        else if (strcmp(argv[i], "--format") == 0 && i + 1 < argc)
-            format = argv[++i];
     }
 
     // 路由到对应命令函数
     if (command == "daemon") return RunDaemon(config_path, log_level);
     if (command == "collect") return RunCollect(duration, log_level);
     if (command == "top") return RunTop(log_level);
-    if (command == "version") { std::cout << "Illuminator v0.1.0\n"; return 0; }
+    if (command == "version") {
+        std::cout << "Illuminator v" << kIlluminatorVersion << "\n";
+        return 0;
+    }
     if (command == "plugins") return RunPluginList();
     if (command == "storage") return RunStorageList();
 

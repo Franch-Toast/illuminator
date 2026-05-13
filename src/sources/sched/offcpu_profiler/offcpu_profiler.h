@@ -59,7 +59,6 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -68,33 +67,15 @@
 #include <bpf/libbpf.h>
 
 #include "core/common/logging.h"
+#include "core/common/string_util.h"
+#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
+#include "ebpf/loader/stack_trace_util.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
-
-// ============================================================================
-// OffcpuParseCommaUint32 — 解析逗号分隔的 uint32 列表（本地版）
-// ============================================================================
-inline void OffcpuParseCommaUint32(const std::string& s,
-                                   std::vector<uint32_t>* out) {
-    out->clear();
-    std::stringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
-            token.erase(0, 1);
-        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
-            token.pop_back();
-        if (token.empty())
-            continue;
-        try {
-            out->push_back(static_cast<uint32_t>(std::stoul(token)));
-        } catch (...) {}
-    }
-}
 
 // ============================================================================
 // OffcpuProfilerSource 类 — Off-CPU 剖析插件主体
@@ -124,7 +105,8 @@ public:
         user_stacks_ = config["user_stacks"].AsBool(true);
         kernel_stacks_ = config["kernel_stacks"].AsBool(true);
         bpf_obj_path_ = config["bpf_object"].AsString("");
-        OffcpuParseCommaUint32(config["target_pids"].AsString(""), &target_pids_);
+        target_pids_ = ParseCommaSeparated<uint32_t>(
+            config["target_pids"].AsString(""));
         // 构建 PID 快速查找集合
         target_pid_allow_.clear();
         for (uint32_t p : target_pids_)
@@ -180,10 +162,11 @@ public:
         // 启动后台轮询线程
         running_.store(true);
         poll_thread_ = std::thread([this] {
+            SetThreadName("il-offcpu-poll");
             while (running_.load()) {
                 int err = ring_buffer__poll(ring_buf_, 100);
                 if (err < 0 && err != -EINTR)
-                    IL_WARN("offcpu_profiler: ringbuf poll err %d", err);
+                    IL_WARN("offcpu_profiler: ringbuf poll err {}", err);
             }
         });
 
@@ -218,32 +201,6 @@ private:
     }
 
     // ========================================================================
-    // LookupStack — 根据 stack_id 查询等待时的调用栈帧地址
-    // ========================================================================
-    // 从 offcpu_stacks map（BPF_MAP_TYPE_STACK_TRACE）中读取指定 stack_id
-    // 对应的完整调用栈原始地址（IP 指针）。后续可通过符号化工具将地址
-    // 映射为函数名，形成 Off-CPU 火焰图。
-    void LookupStack(int32_t stack_id, std::vector<StackFrame>* out) {
-        out->clear();
-        if (stack_id < 0 || stacks_fd_ < 0)
-            return;
-
-        uint64_t raw[MAX_STACK_DEPTH];
-        std::memset(raw, 0, sizeof(raw));
-        uint32_t sid = static_cast<uint32_t>(stack_id);
-        if (bpf_map_lookup_elem(stacks_fd_, &sid, raw) != 0)
-            return;
-
-        for (int i = 0; i < MAX_STACK_DEPTH; ++i) {
-            if (raw[i] == 0)
-                break;
-            StackFrame fr;
-            fr.address = raw[i];
-            out->push_back(fr);
-        }
-    }
-
-    // ========================================================================
     // HandleEvent — ring buffer 事件回调（静态函数）
     // ========================================================================
     // 收到一条完整的 off-CPU 事件后：
@@ -273,8 +230,10 @@ private:
         sample.kernel_stack_id = ev->kernel_stack_id;
         sample.user_stack_id = ev->user_stack_id;
 
-        self->LookupStack(ev->kernel_stack_id, &sample.kernel_stack);
-        self->LookupStack(ev->user_stack_id, &sample.user_stack);
+        sample.kernel_stack =
+            LookupBpfStackTrace(self->stacks_fd_, ev->kernel_stack_id);
+        sample.user_stack =
+            LookupBpfStackTrace(self->stacks_fd_, ev->user_stack_id);
 
         {
             std::lock_guard<std::mutex> lk(self->cache_mu_);

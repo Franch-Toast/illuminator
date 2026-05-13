@@ -6,6 +6,8 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/core:common",
+        "//src/core:threading",
+        "//third_party/cpp-httplib",
     ],
 )
 
@@ -15,7 +17,6 @@ cc_library(
     strip_include_prefix = "",
     include_prefix = "server",
     visibility = ["//visibility:public"],
-    linkopts = ["-lcrypto"],
     deps = [
         "//src/core:common",
     ],
@@ -30,6 +31,7 @@ cc_library(
     deps = [
         ":websocket_server",
         "//src/core:common",
+        "//src/core:threading",
         "//src/sinks:websocket_sink",
     ],
 )

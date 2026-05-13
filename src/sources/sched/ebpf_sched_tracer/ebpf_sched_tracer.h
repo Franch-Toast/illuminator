@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "core/common/logging.h"
+#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
 #include "plugin/api/source_plugin.h"
@@ -65,6 +66,7 @@ public:
 
         running_ = true;
         poll_thread_ = std::thread([this] {
+            SetThreadName("il-schedtr-pol");
             while (running_) ring_buffer__poll(ring_buf_, 100);
         });
         IL_INFO("eBPF sched tracer started");

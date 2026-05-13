@@ -38,9 +38,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unistd.h>
 #include <vector>
 #include <sstream>
 
@@ -245,7 +247,7 @@ private:
     // 输出格式示例：`45123 2345 1234 ...`
     //   第1列: 总虚拟内存页数
     //   第2列: RSS 页数（我们需要这个）
-    // 每页大小 4096 字节 (4KB)
+    // 字节数 = 页数 × 系统页大小（sysconf(_SC_PAGESIZE)）
     static uint64_t GetRssBytes() {
         FILE* f = fopen("/proc/self/statm", "r");
         if (!f) return 0;
@@ -253,7 +255,9 @@ private:
         // fscanf 格式：跳过第一列（%*u），读取第二列到 pages
         if (fscanf(f, "%*u %lu", &pages) != 1) pages = 0;
         fclose(f);
-        return pages * 4096;  // 页数 × 4KB = 字节数
+        long psz = ::sysconf(_SC_PAGESIZE);
+        if (psz <= 0) psz = 4096;
+        return pages * static_cast<uint64_t>(psz);
     }
 
     Limits limits_;

@@ -5,10 +5,14 @@ cc_library(
         "common/logging.h",
         "common/config.h",
         "common/self_observability.h",
+        "common/string_util.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
     visibility = ["//visibility:public"],
+    deps = [
+        "@spdlog",
+    ],
 )
 
 cc_library(
@@ -26,6 +30,7 @@ cc_library(
     name = "threading",
     hdrs = [
         "threading/thread_pool.h",
+        "threading/thread_util.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -59,6 +64,7 @@ cc_library(
         ":common",
         ":data",
         ":memory",
+        ":threading",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],

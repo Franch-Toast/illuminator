@@ -34,6 +34,7 @@
 #include <unistd.h>
 
 #include "core/common/logging.h"
+#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
 #include "plugin/api/source_plugin.h"
@@ -87,8 +88,11 @@ public:
 
         // 启动轮询线程持续消费 BPF 事件
         running_ = true;
-        poll_thread_ = std::thread([this] { PollLoop(); });
-        IL_INFO("eBPF CPU sampler started at %d Hz", frequency_hz_);
+        poll_thread_ = std::thread([this] {
+            SetThreadName("il-cpusamp-pol");
+            PollLoop();
+        });
+        IL_INFO("eBPF CPU sampler started at {} Hz", frequency_hz_);
         return Status::Ok();
     }
 
@@ -116,7 +120,7 @@ private:
         while (running_) {
             int err = ring_buffer__poll(ring_buf_, 100 /* ms */);
             if (err < 0 && err != -EINTR) {
-                IL_WARN("Ring buffer poll error: %d", err);
+                IL_WARN("Ring buffer poll error: {}", err);
             }
         }
     }

@@ -187,29 +187,24 @@ private:
             for (auto it = node.begin(); it != node.end(); ++it) {
                 auto key = it->first.as<std::string>();
                 if (it->second.IsScalar()) {
-                    // 标量值：直接存储
-                    cv[key] = it->second.as<std::string>();
+                    cv.Set(key, it->second.as<std::string>());
                 } else if (it->second.IsSequence()) {
-                    // 数组值：用逗号连接为字符串
-                    // 如 [8080, 8081] -> "8080,8081"
                     std::string joined;
                     for (size_t i = 0; i < it->second.size(); ++i) {
                         if (i > 0) joined += ",";
                         joined += it->second[i].as<std::string>();
                     }
-                    cv[key] = joined;
+                    cv.Set(key, joined);
                 } else if (it->second.IsMap()) {
-                    // 嵌套映射：递归解析，子键以 "parent.child" 形式存储
                     auto nested = ParseConfigValue(it->second);
                     for (auto& [nk, nv] : nested.Raw()) {
                         std::string full_key = nk.empty() ? key : key + "." + nk;
-                        cv[full_key] = nv;
+                        cv.Set(full_key, nv);
                     }
                 }
             }
         } else if (node.IsScalar()) {
-            // 顶层标量：存为空键
-            cv[""] = node.as<std::string>();
+            cv.Set("", node.as<std::string>());
         }
 
         return cv;

@@ -72,8 +72,8 @@ public:
         }
 
         // 加载成功，记录信息
-        IL_INFO("Loaded SO plugin: %s v%s (type=%u) from %s",
-                desc->name, desc->version, desc->type, path.c_str());
+        IL_INFO("Loaded SO plugin: {} v{} (type={}) from {}",
+                desc->name, desc->version, desc->type, path);
 
         handles_.push_back(handle);         // 保存 handle 供后续释放
         descriptors_.push_back(desc);       // 保存描述符

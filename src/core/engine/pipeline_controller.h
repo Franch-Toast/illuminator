@@ -69,6 +69,7 @@
 #include "core/common/status.h"
 #include "core/engine/data_batch.h"
 #include "core/memory/lock_free_queue.h"
+#include "core/threading/thread_util.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/api/processor_plugin.h"
 #include "plugin/api/aggregator_plugin.h"
@@ -153,16 +154,20 @@ public:
                 OnBatchReceived(std::move(batch));
             });
         } else {
-            // Pull 模式：启动独立线程定期拉取数据
-            collect_thread_ = std::thread([this] { CollectLoop(); });
+            collect_thread_ = std::thread([this] {
+                SetThreadName("il-" + name_.substr(0, 10) + "-c");
+                CollectLoop();
+            });
         }
 
-        // 如果有聚合器，启动定时刷新线程
         if (aggregator_) {
-            flush_thread_ = std::thread([this] { FlushLoop(); });
+            flush_thread_ = std::thread([this] {
+                SetThreadName("il-" + name_.substr(0, 10) + "-f");
+                FlushLoop();
+            });
         }
 
-        IL_INFO("Pipeline '%s' started", name_.c_str());
+        IL_INFO("Pipeline '{}' started", name_);
         return Status::Ok();
     }
 
@@ -184,7 +189,7 @@ public:
             s->Stop();
         }
 
-        IL_INFO("Pipeline '%s' stopped", name_.c_str());
+        IL_INFO("Pipeline '{}' stopped", name_);
         return Status::Ok();
     }
 
@@ -286,8 +291,8 @@ private:
         for (size_t i = 0; i < sinks_.size(); ++i) {
             auto status = sinks_[i]->Write(batch);
             if (!status.ok()) {
-                IL_WARN("Sink write error in pipeline '%s': %s",
-                        name_.c_str(), status.message().c_str());
+                IL_WARN("Sink write error in pipeline '{}': {}",
+                        name_, status.message());
                 error_count_.fetch_add(1, std::memory_order_relaxed);
             }
         }

@@ -120,7 +120,7 @@ inline KernelFeatures ProbeKernelFeatures() {
     // -------------------------------------------------------------------
     // 输出探测结果以帮助运维排查环境兼容性问题
     // -------------------------------------------------------------------
-    IL_INFO("Kernel: %d.%d.%d BTF=%s RingBuf=%s BPFTracing=%s",
+    IL_INFO("Kernel: {}.{}.{} BTF={} RingBuf={} BPFTracing={}",
             f.major, f.minor, f.patch,
             f.has_btf ? "yes" : "no",
             f.has_ringbuf ? "yes" : "no",

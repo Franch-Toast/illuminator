@@ -1,7 +1,7 @@
 cc_binary(
     name = "illuminator",
     srcs = ["main.cc"],
-    linkopts = ["-pthread", "-lbpf", "-lelf", "-lz", "-lsqlite3", "-lcrypto"],
+    linkopts = ["-pthread", "-lbpf", "-lelf", "-lz", "-lsqlite3"],
     deps = [
         "//src/core:common",
         "//src/core:engine",
@@ -10,8 +10,9 @@ cc_binary(
         "//src/plugin:manager",
         "//src/sources:sched_analyzer",
         "//src/ebpf:loader",
+        "//src/serialization:json_serializer",
         "//src/server:http_server",
-        "//src/server:websocket_server",
+        "//third_party/cpp-httplib",
         "//src/server:websocket_manager",
         "//src/sinks:prometheus_exposition",
         "//src/storage:storage",

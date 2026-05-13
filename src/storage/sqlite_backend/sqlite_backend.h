@@ -64,7 +64,7 @@ public:
         auto status = CreateTables();
         if (!status.ok()) return status;
 
-        IL_INFO("SQLite backend initialized: %s", db_path.c_str());
+        IL_INFO("SQLite backend initialized: {}", db_path);
         db_path_ = db_path;
         return Status::Ok();
     }
@@ -82,7 +82,12 @@ public:
             "VALUES (?, ?, ?, ?)";
 
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        int prc = PrepareOrLog(&stmt, sql, "WriteRecords");
+        if (prc != SQLITE_OK || !stmt) {
+            Execute("ROLLBACK");
+            return Status::Error(StatusCode::kInternal,
+                                 "SQLite prepare failed: WriteRecords");
+        }
 
         for (auto& rec : records) {
             std::string labels = SerializeLabels(rec.labels);
@@ -95,12 +100,19 @@ public:
             sqlite3_bind_text(stmt, 3, labels.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(stmt, 4, fields.c_str(), -1, SQLITE_TRANSIENT);
 
-            sqlite3_step(stmt);
+            if (!StepExpectDone(stmt, "WriteRecords insert")) {
+                sqlite3_finalize(stmt);
+                Execute("ROLLBACK");
+                return Status::Error(StatusCode::kInternal,
+                                     "SQLite step failed: WriteRecords");
+            }
             sqlite3_reset(stmt);  // 重置预编译语句状态
         }
 
         sqlite3_finalize(stmt);
-        Execute("COMMIT");
+        if (Execute("COMMIT") != SQLITE_OK) {
+            return Status::Error(StatusCode::kInternal, "SQLite COMMIT failed: WriteRecords");
+        }
         return Status::Ok();
     }
 
@@ -116,7 +128,12 @@ public:
             "comm, stack_json, count) VALUES (?, ?, ?, ?, ?, ?, ?)";
 
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        int prc = PrepareOrLog(&stmt, sql, "WriteStackSamples");
+        if (prc != SQLITE_OK || !stmt) {
+            Execute("ROLLBACK");
+            return Status::Error(StatusCode::kInternal,
+                                 "SQLite prepare failed: WriteStackSamples");
+        }
 
         for (auto& s : samples) {
             uint64_t ts = TimestampToNanos(s.timestamp);
@@ -131,12 +148,20 @@ public:
             sqlite3_bind_text(stmt, 6, stack.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(s.count));
 
-            sqlite3_step(stmt);
+            if (!StepExpectDone(stmt, "WriteStackSamples insert")) {
+                sqlite3_finalize(stmt);
+                Execute("ROLLBACK");
+                return Status::Error(StatusCode::kInternal,
+                                     "SQLite step failed: WriteStackSamples");
+            }
             sqlite3_reset(stmt);
         }
 
         sqlite3_finalize(stmt);
-        Execute("COMMIT");
+        if (Execute("COMMIT") != SQLITE_OK) {
+            return Status::Error(StatusCode::kInternal,
+                                 "SQLite COMMIT failed: WriteStackSamples");
+        }
         return Status::Ok();
     }
 
@@ -150,7 +175,11 @@ public:
             "sample_count, data) VALUES (?, ?, ?, ?, ?, ?)";
 
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+        int prc = PrepareOrLog(&stmt, sql, "WriteProfile");
+        if (prc != SQLITE_OK || !stmt) {
+            return Status::Error(StatusCode::kInternal,
+                                 "SQLite prepare failed: WriteProfile");
+        }
 
         sqlite3_bind_text(stmt, 1, meta.pipeline_name.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt, 2, meta.profile_type.c_str(), -1, SQLITE_TRANSIENT);
@@ -159,7 +188,11 @@ public:
         sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(meta.sample_count));
         sqlite3_bind_blob(stmt, 6, data.data(), static_cast<int>(data.size()), SQLITE_TRANSIENT);
 
-        sqlite3_step(stmt);
+        if (!StepExpectDone(stmt, "WriteProfile insert")) {
+            sqlite3_finalize(stmt);
+            return Status::Error(StatusCode::kInternal,
+                                 "SQLite step failed: WriteProfile");
+        }
         sqlite3_finalize(stmt);
         return Status::Ok();
     }
@@ -184,14 +217,23 @@ public:
 
         std::string query = sql.str();
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_, query.c_str(), -1, &stmt, nullptr);
+        int prc = PrepareOrLog(&stmt, query.c_str(), "Query");
+        if (prc != SQLITE_OK || !stmt) {
+            return result;
+        }
+
         sqlite3_bind_text(stmt, 1, req.pipeline_name.c_str(), -1, SQLITE_TRANSIENT);
 
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int rc = sqlite3_step(stmt);
+        while (rc == SQLITE_ROW) {
             Record rec;
             // 基础反序列化（当前为简化实现）
             result.records.push_back(std::move(rec));
             result.total_count++;
+            rc = sqlite3_step(stmt);
+        }
+        if (rc != SQLITE_DONE) {
+            StepLogError(rc, "Query fetch");
         }
 
         sqlite3_finalize(stmt);
@@ -210,10 +252,15 @@ public:
             "FROM profiles WHERE pipeline = ? ORDER BY start_ns DESC";
 
         sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_, sql.c_str(), -1, &stmt, nullptr);
+        int prc = PrepareOrLog(&stmt, sql.c_str(), "ListProfiles");
+        if (prc != SQLITE_OK || !stmt) {
+            return profiles;
+        }
+
         sqlite3_bind_text(stmt, 1, pipeline_name.c_str(), -1, SQLITE_TRANSIENT);
 
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int rc = sqlite3_step(stmt);
+        while (rc == SQLITE_ROW) {
             ProfileMeta meta;
             meta.pipeline_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
             meta.profile_type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
@@ -221,6 +268,10 @@ public:
             meta.end_time_ns = sqlite3_column_int64(stmt, 3);
             meta.sample_count = sqlite3_column_int64(stmt, 4);
             profiles.push_back(std::move(meta));
+            rc = sqlite3_step(stmt);
+        }
+        if (rc != SQLITE_DONE) {
+            StepLogError(rc, "ListProfiles fetch");
         }
 
         sqlite3_finalize(stmt);
@@ -307,10 +358,37 @@ private:
         char* err = nullptr;
         int rc = sqlite3_exec(db_, sql, nullptr, nullptr, &err);
         if (rc != SQLITE_OK && err) {
-            IL_ERROR("SQLite error: %s (SQL: %s)", err, sql);
+            IL_ERROR("SQLite error: {} (SQL: {})", err, sql);
             sqlite3_free(err);
         }
         return rc;
+    }
+
+    // sqlite3_prepare_v2 封装：非 SQLITE_OK 时写日志
+    int PrepareOrLog(sqlite3_stmt** stmt, const char* sql, const char* context) {
+        *stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db_, sql, -1, stmt, nullptr);
+        if (rc != SQLITE_OK) {
+            IL_ERROR("SQLite prepare failed [{}]: {} (SQL: {})", context,
+                     sqlite3_errmsg(db_), sql);
+            *stmt = nullptr;
+        }
+        return rc;
+    }
+
+    // 写路径：单行执行后应为 SQLITE_DONE
+    bool StepExpectDone(sqlite3_stmt* stmt, const char* context) {
+        int rc = sqlite3_step(stmt);
+        if (rc != SQLITE_DONE) {
+            StepLogError(rc, context);
+            return false;
+        }
+        return true;
+    }
+
+    void StepLogError(int rc, const char* context) {
+        IL_ERROR("SQLite step failed [{}]: code={} {}", context, rc,
+                 sqlite3_errmsg(db_));
     }
 
     // ---- 序列化标签为 JSON ----

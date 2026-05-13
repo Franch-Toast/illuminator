@@ -42,6 +42,7 @@
 #include <optional>
 #include <new>
 #include <type_traits>
+#include <utility>
 
 namespace illuminator {
 
@@ -68,9 +69,10 @@ public:
     LockFreeQueue(const LockFreeQueue&) = delete;
     LockFreeQueue& operator=(const LockFreeQueue&) = delete;
 
-    // ---- 左值入队 ----
-    // 尝试推入一个元素（拷贝），成功返回 true，队列满返回 false
-    bool TryPush(const T& value) {
+    // ---- 入队 ----
+    // 尝试推入元素（拷贝或移动），成功返回 true，队列满返回 false
+    template <typename U>
+    bool TryPush(U&& value) {
         Cell* cell;
         size_t pos = head_.load(std::memory_order_relaxed);
         for (;;) {
@@ -92,32 +94,7 @@ public:
                 pos = head_.load(std::memory_order_relaxed);
             }
         }
-        // 写入数据并更新序列号（表示该位置已填充）
-        cell->data = value;
-        cell->sequence.store(pos + 1, std::memory_order_release);
-        return true;
-    }
-
-    // ---- 右值入队 ----
-    // 移动语义版本，避免不必要的拷贝
-    bool TryPush(T&& value) {
-        Cell* cell;
-        size_t pos = head_.load(std::memory_order_relaxed);
-        for (;;) {
-            cell = &cells_[pos & kMask];
-            size_t seq = cell->sequence.load(std::memory_order_acquire);
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
-            if (diff == 0) {
-                if (head_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    break;
-                }
-            } else if (diff < 0) {
-                return false;
-            } else {
-                pos = head_.load(std::memory_order_relaxed);
-            }
-        }
-        cell->data = std::move(value);
+        cell->data = std::forward<U>(value);
         cell->sequence.store(pos + 1, std::memory_order_release);
         return true;
     }
@@ -153,23 +130,23 @@ public:
 
     // ---- 状态查询 ----
     // 近似大小（可能略有不准确，无锁读取）
-    size_t SizeApprox() const {
+    size_t SizeApprox() const noexcept {
         size_t h = head_.load(std::memory_order_relaxed);
         size_t t = tail_.load(std::memory_order_relaxed);
         return h >= t ? h - t : 0;
     }
 
-    bool Empty() const { return SizeApprox() == 0; }
-    static constexpr size_t capacity() { return Capacity; }
+    bool Empty() const noexcept { return SizeApprox() == 0; }
+    static constexpr size_t capacity() noexcept { return Capacity; }
 
     // ---- 水位线查询 ----
     // 高水位：默认 80%，用于触发反压
-    bool AboveHighWatermark(double ratio = 0.8) const {
+    bool AboveHighWatermark(double ratio = 0.8) const noexcept {
         return SizeApprox() > static_cast<size_t>(Capacity * ratio);
     }
 
     // 低水位：默认 20%，用于解除反压
-    bool BelowLowWatermark(double ratio = 0.2) const {
+    bool BelowLowWatermark(double ratio = 0.2) const noexcept {
         return SizeApprox() < static_cast<size_t>(Capacity * ratio);
     }
 

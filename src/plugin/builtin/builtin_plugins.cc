@@ -34,25 +34,27 @@
 
 #include "plugin/builtin/builtin_plugins.h"
 
-// ---- 遗留数据源（保持向后兼容） ----
-#include "sources/proc_stat_reader/proc_stat_reader.h"          // 读取 /proc/stat、/proc/meminfo、/proc/loadavg
-#include "sources/cpu_sys_monitor/cpu_sys_monitor.h"            // 系统级 CPU 指标（利用率、上下文切换、负载）
-#include "sources/process_cpu_monitor/process_cpu_monitor.h"    // 按进程/线程的 CPU 利用率（htop 风格）
-#include "sources/ebpf_cpu_sampler/ebpf_cpu_sampler.h"          // eBPF CPU 采样器（流式模式）
-#include "sources/ebpf_net_tracer/ebpf_net_tracer.h"            // eBPF TCP 连接追踪
-#include "sources/ebpf_io_monitor/ebpf_io_monitor.h"            // eBPF 块设备 I/O 延迟监控
-#include "sources/ebpf_sched_tracer/ebpf_sched_tracer.h"        // eBPF 调度器事件追踪（唤醒/切换）
+// ---- CPU 子系统 ----
+#include "sources/cpu/proc_stat_reader/proc_stat_reader.h"
+#include "sources/cpu/cpu_sys_monitor/cpu_sys_monitor.h"
+#include "sources/cpu/process_cpu_monitor/process_cpu_monitor.h"
+#include "sources/cpu/ebpf_cpu_sampler/ebpf_cpu_sampler.h"
+#include "sources/cpu/cpu_utilization/cpu_utilization.h"
+#include "sources/cpu/process_cpu/process_cpu.h"
+#include "sources/cpu/cpu_profiler/cpu_profiler.h"
+#include "sources/cpu/cpu_sys_stats/cpu_sys_stats.h"
+#include "sources/cpu/proc_cpu_monitor/proc_cpu_monitor.h"
 
-// ---- 新版 CPU 监控数据源 ----
-#include "sources/cpu_utilization/cpu_utilization.h"            // 统一 CPU 利用率源（EMA 平滑、多维指标）
-#include "sources/process_cpu/process_cpu.h"                    // 进程 CPU 监控（正则过滤、Top-N、线程详情）
-#include "sources/cpu_profiler/cpu_profiler.h"                  // CPU 性能剖析（eBPF perf_event + 堆栈聚合）
-#include "sources/sched_analyzer/sched_analyzer.h"              // 调度分析器（运行队列延迟、迁移追踪）
-#include "sources/offcpu_profiler/offcpu_profiler.h"            // Off-CPU 性能剖析（等待时间分析）
+// ---- 调度子系统 ----
+#include "sources/sched/sched_analyzer/sched_analyzer.h"
+#include "sources/sched/ebpf_sched_tracer/ebpf_sched_tracer.h"
+#include "sources/sched/offcpu_profiler/offcpu_profiler.h"
 
-// ---- 补充数据源 (通过其他 BUILD 目标注册) ----
-#include "sources/cpu_sys_stats/cpu_sys_stats.h"
-#include "sources/proc_cpu_monitor/proc_cpu_monitor.h"
+// ---- I/O 子系统 ----
+#include "sources/io/ebpf_io_monitor/ebpf_io_monitor.h"
+
+// ---- 网络子系统 ----
+#include "sources/net/ebpf_net_tracer/ebpf_net_tracer.h"
 
 // ---- 数据处理器 ----
 #include "processors/passthrough/passthrough_processor.h"       // 透传处理器（无操作，测试用）

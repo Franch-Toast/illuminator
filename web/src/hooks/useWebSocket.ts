@@ -25,7 +25,8 @@ export function useWebSocket(opts: WebSocketOptions) {
     if (!enabledRef.current) return
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${protocol}//${window.location.host}/ws/${pipelineKey}`
+    const wsPort = window.location.port ? parseInt(window.location.port) + 1 : 9528
+    const url = `${protocol}//${window.location.hostname}:${wsPort}/ws/${pipelineKey}`
 
     setConnectionState(retriesRef.current > 0 ? 'reconnecting' : 'connecting')
 

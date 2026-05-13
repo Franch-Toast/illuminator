@@ -32,6 +32,7 @@
 
 #pragma once
 
+#include <cassert>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -76,14 +77,14 @@ public:
     }
 
     // 判断当前状态是否为成功
-    bool ok() const { return code_ == StatusCode::kOk; }
+    [[nodiscard]] bool ok() const { return code_ == StatusCode::kOk; }
     // 获取错误码
-    StatusCode code() const { return code_; }
+    [[nodiscard]] StatusCode code() const { return code_; }
     // 获取错误消息（引用以避免拷贝）
-    const std::string& message() const { return message_; }
+    [[nodiscard]] const std::string& message() const { return message_; }
 
     // 将状态转为可读字符串
-    std::string ToString() const {
+    [[nodiscard]] std::string ToString() const {
         if (ok()) return "OK";
         return "Error(" + std::to_string(static_cast<int>(code_)) + "): " + message_;
     }
@@ -105,21 +106,30 @@ public:
     StatusOr(Status status) : data_(std::move(status)) {}
 
     // 判断是否为成功状态（即持有 T 类型的值）
-    bool ok() const { return std::holds_alternative<T>(data_); }
+    [[nodiscard]] bool ok() const { return std::holds_alternative<T>(data_); }
 
     // ---- 获取成功值 ----
     // 提供 const 左值、左值、右值引用三个重载，支持各种使用场景
 
-    const T& value() const& { return std::get<T>(data_); }
-    T& value() & { return std::get<T>(data_); }
-    T&& value() && { return std::get<T>(std::move(data_)); }
+    [[nodiscard]] const T& value() const& {
+        assert(ok() && "StatusOr::value() called on error");
+        return std::get<T>(data_);
+    }
+    [[nodiscard]] T& value() & {
+        assert(ok() && "StatusOr::value() called on error");
+        return std::get<T>(data_);
+    }
+    [[nodiscard]] T&& value() && {
+        assert(ok() && "StatusOr::value() called on error");
+        return std::get<T>(std::move(data_));
+    }
 
     // 获取错误状态（仅在失败时调用有意义）
-    const Status& status() const { return std::get<Status>(data_); }
+    [[nodiscard]] const Status& status() const { return std::get<Status>(data_); }
 
     // operator* 简化访问：使 StatusOr 可像指针一样解引用
-    const T& operator*() const& { return value(); }
-    T& operator*() & { return value(); }
+    [[nodiscard]] const T& operator*() const& { return value(); }
+    [[nodiscard]] T& operator*() & { return value(); }
 
 private:
     // variant 内部存储要么是成功的 T，要么是失败的 Status

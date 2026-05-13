@@ -53,7 +53,6 @@
 #include <deque>
 #include <fstream>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -62,35 +61,14 @@
 #include <bpf/libbpf.h>
 
 #include "core/common/logging.h"
+#include "core/common/string_util.h"
+#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
-
-// ============================================================================
-// ParseCommaSeparatedUint32sLocal — 解析逗号分隔的 uint32 列表（本地版）
-// ============================================================================
-// 功能与 cpu_profiler.h 中的 ParseCommaSeparatedInts 相同，
-// 独立实现以避免跨源文件依赖。
-inline void ParseCommaSeparatedUint32sLocal(const std::string& s,
-                                            std::vector<uint32_t>* out) {
-    out->clear();
-    std::stringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
-            token.erase(0, 1);
-        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
-            token.pop_back();
-        if (token.empty())
-            continue;
-        try {
-            out->push_back(static_cast<uint32_t>(std::stoul(token)));
-        } catch (...) {}
-    }
-}
 
 struct SchedHistoryPoint {
     uint64_t timestamp_ms = 0;
@@ -138,8 +116,8 @@ public:
             static_cast<uint32_t>(config["aggregate_interval_ms"].AsInt(5000));
         track_migrations_ = config["track_migrations"].AsBool(true);
         bpf_obj_path_ = config["bpf_object"].AsString("");
-        ParseCommaSeparatedUint32sLocal(config["target_pids"].AsString(""),
-                                      &target_pids_);
+        target_pids_ = ParseCommaSeparated<uint32_t>(
+            config["target_pids"].AsString(""));
         // 构建 PID 快速查找集合
         target_pid_allow_.clear();
         for (uint32_t p : target_pids_)
@@ -207,6 +185,7 @@ public:
             }
             running_.store(true);
             poll_thread_ = std::thread([this] {
+                SetThreadName("il-sched-poll");
                 while (running_.load())
                     ring_buffer__poll(ring_buf_, 100);
             });
@@ -214,7 +193,7 @@ public:
             running_.store(true);
         }
 
-        IL_INFO("sched_analyzer started (detailed=%d migrations=%d)",
+        IL_INFO("sched_analyzer started (detailed={} migrations={})",
                 detailed_mode_, track_migrations_);
         return Status::Ok();
     }

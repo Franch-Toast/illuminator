@@ -47,7 +47,7 @@ public:
         for (auto& dir : dirs) {
             // 检查目录是否存在，避免不必要的错误
             if (!std::filesystem::exists(dir)) {
-                IL_WARN("Plugin directory does not exist: %s", dir.c_str());
+                IL_WARN("Plugin directory does not exist: {}", dir);
                 continue;
             }
             // 遍历目录，只处理 .so 文件
@@ -55,8 +55,8 @@ public:
                 if (entry.path().extension() == ".so") {
                     auto status = so_loader_.LoadPlugin(entry.path().string());
                     if (!status.ok()) {
-                        IL_ERROR("Failed to load plugin %s: %s",
-                                 entry.path().c_str(), status.message().c_str());
+                        IL_ERROR("Failed to load plugin {}: {}",
+                                 entry.path().string(), status.message());
                     }
                 }
             }
@@ -73,10 +73,10 @@ public:
     void PrintRegisteredPlugins() const {
         auto& reg = PluginRegistry::Instance();
         IL_INFO("=== Registered Plugins ===");
-        for (auto& n : reg.ListSources())     IL_INFO("  Source:     %s", n.c_str());
-        for (auto& n : reg.ListProcessors())  IL_INFO("  Processor:  %s", n.c_str());
-        for (auto& n : reg.ListAggregators()) IL_INFO("  Aggregator: %s", n.c_str());
-        for (auto& n : reg.ListSinks())       IL_INFO("  Sink:       %s", n.c_str());
+        for (auto& n : reg.ListSources())     IL_INFO("  Source:     {}", n);
+        for (auto& n : reg.ListProcessors())  IL_INFO("  Processor:  {}", n);
+        for (auto& n : reg.ListAggregators()) IL_INFO("  Aggregator: {}", n);
+        for (auto& n : reg.ListSinks())       IL_INFO("  Sink:       {}", n);
     }
 
 private:

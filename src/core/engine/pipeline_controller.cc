@@ -95,7 +95,7 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
             pipeline->AddSink(std::move(sink));
         }
 
-        IL_INFO("Built pipeline: %s", pc.name.c_str());
+        IL_INFO("Built pipeline: {}", pc.name);
         pipelines_.push_back(std::move(pipeline));
     }
 
@@ -109,13 +109,13 @@ Status PipelineController::StartAll() {
     for (auto& pipeline : pipelines_) {
         auto status = pipeline->Start();
         if (!status.ok()) {
-            IL_ERROR("Failed to start pipeline '%s': %s",
-                     pipeline->name().c_str(), status.message().c_str());
+            IL_ERROR("Failed to start pipeline '{}': {}",
+                     pipeline->name(), status.message());
             StopAll();  // 回滚：停止已启动的管道
             return status;
         }
     }
-    IL_INFO("All %zu pipelines started", pipelines_.size());
+    IL_INFO("All {} pipelines started", pipelines_.size());
     return Status::Ok();
 }
 

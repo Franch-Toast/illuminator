@@ -151,6 +151,9 @@ private:
     // 分配一个新的内存块
     void AllocateBlock(size_t size) {
         void* data = std::malloc(size);
+        if (!data) {
+            std::abort();
+        }
         blocks_.push_back({data, size});
         current_offset_ = 0;  // 新块从头开始分配
     }

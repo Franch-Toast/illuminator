@@ -80,8 +80,11 @@
 #include <bpf/libbpf.h>
 
 #include "core/common/logging.h"
+#include "core/common/string_util.h"
+#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
+#include "ebpf/loader/stack_trace_util.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
@@ -114,29 +117,6 @@ inline std::vector<int> ParseOnlineCpuIds() {
         }
     }
     return cpus;
-}
-
-// ============================================================================
-// ParseCommaSeparatedInts — 解析逗号分隔的整数列表
-// ============================================================================
-// 将 "123,456,789" 格式的字符串解析为 uint32_t 的 vector。
-// 自动去除每个元素前后的空白字符，非法数值会被静默跳过。
-inline void ParseCommaSeparatedInts(const std::string& s,
-                                    std::vector<uint32_t>* out) {
-    out->clear();
-    std::stringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
-            token.erase(0, 1);
-        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
-            token.pop_back();
-        if (token.empty())
-            continue;
-        try {
-            out->push_back(static_cast<uint32_t>(std::stoul(token)));
-        } catch (...) {}
-    }
 }
 
 // ============================================================================
@@ -229,8 +209,8 @@ public:
 
         bpf_obj_path_ = config["bpf_object"].AsString("");
 
-        ParseCommaSeparatedInts(config["target_pids"].AsString(""),
-                                &target_pids_);
+        target_pids_ =
+            ParseCommaSeparated<uint32_t>(config["target_pids"].AsString(""));
         ParseCommaSeparatedStrings(config["target_comms"].AsString(""),
                                    &target_comms_);
 
@@ -312,14 +292,14 @@ public:
                 PerfEventOpenSys(&attr, /*pid=*/-1, cpu, /*group=*/-1,
                                  PERF_FLAG_FD_CLOEXEC));
             if (fd < 0) {
-                IL_WARN("cpu_profiler: perf_event_open failed for cpu %d errno=%d",
+                IL_WARN("cpu_profiler: perf_event_open failed for cpu {} errno={}",
                         cpu, errno);
                 continue;
             }
 
             // 将 eBPF 程序挂载到 perf_event
             if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0) {
-                IL_WARN("cpu_profiler: PERF_EVENT_IOC_SET_BPF failed cpu %d errno=%d",
+                IL_WARN("cpu_profiler: PERF_EVENT_IOC_SET_BPF failed cpu {} errno={}",
                         cpu, errno);
                 close(fd);
                 continue;
@@ -328,7 +308,7 @@ public:
             // 启用 perf_event
             if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
                 ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-                IL_WARN("cpu_profiler: PERF_EVENT_IOC_ENABLE failed cpu %d errno=%d",
+                IL_WARN("cpu_profiler: PERF_EVENT_IOC_ENABLE failed cpu {} errno={}",
                         cpu, errno);
                 close(fd);
                 continue;
@@ -357,12 +337,18 @@ public:
                 return Status::Error(StatusCode::kInternal,
                                      "cpu_profiler: ring buffer init failed");
             }
-            poll_thread_ = std::thread([this] { StreamPollLoop(); });
+            poll_thread_ = std::thread([this] {
+                SetThreadName("il-cpuprof-pol");
+                StreamPollLoop();
+            });
         } else {
-            agg_thread_ = std::thread([this] { AggregatedPullLoop(); });
+            agg_thread_ = std::thread([this] {
+                SetThreadName("il-cpuprof-agg");
+                AggregatedPullLoop();
+            });
         }
 
-        IL_INFO("cpu_profiler started (%s mode, %zu perf fds)",
+        IL_INFO("cpu_profiler started ({} mode, {} perf fds)",
                 stream_mode_ ? "stream" : "aggregated", perf_fds_.size());
         return Status::Ok();
     }
@@ -448,7 +434,7 @@ private:
         while (running_.load()) {
             int err = ring_buffer__poll(ring_buf_, 100);
             if (err < 0 && err != -EINTR)
-                IL_WARN("cpu_profiler: ringbuf poll err %d", err);
+                IL_WARN("cpu_profiler: ringbuf poll err {}", err);
         }
     }
 
@@ -465,35 +451,6 @@ private:
             if (!running_.load())
                 break;
             FlushAggregatedCounts();
-        }
-    }
-
-    // ========================================================================
-    // LookupStackFrames — 根据 stack_id 查询堆栈帧地址列表
-    // ========================================================================
-    // 从 BPF_MAP_TYPE_STACK_TRACE 类型的 stacks map 中查询指定 stack_id
-    // 对应的调用栈原始地址数组。每个元素是一条指令地址（IP）。
-    //
-    // 参数：
-    //   stack_id - 堆栈追踪 ID（来自 eBPF bpf_get_stackid() 返回值）
-    //   out      - 输出参数，填充 StackFrame 列表
-    void LookupStackFrames(int32_t stack_id, std::vector<StackFrame>* out) {
-        out->clear();
-        if (stack_id < 0 || stacks_fd_ < 0)
-            return;
-
-        uint64_t raw[MAX_STACK_DEPTH];
-        std::memset(raw, 0, sizeof(raw));
-        uint32_t sid = static_cast<uint32_t>(stack_id);
-        if (bpf_map_lookup_elem(stacks_fd_, &sid, raw) != 0)
-            return;
-
-        for (int i = 0; i < MAX_STACK_DEPTH && i < stack_depth_; ++i) {
-            if (raw[i] == 0)
-                break;
-            StackFrame fr;
-            fr.address = raw[i];
-            out->push_back(fr);
         }
     }
 
@@ -535,8 +492,11 @@ private:
             sample.user_stack_id = key.user_stack_id;
 
             // 解析内核态和用户态的完整调用栈
-            LookupStackFrames(key.kernel_stack_id, &sample.kernel_stack);
-            LookupStackFrames(key.user_stack_id, &sample.user_stack);
+            sample.kernel_stack = LookupBpfStackTrace(
+                stacks_fd_, key.kernel_stack_id,
+                static_cast<size_t>(stack_depth_));
+            sample.user_stack = LookupBpfStackTrace(stacks_fd_, key.user_stack_id,
+                                                     static_cast<size_t>(stack_depth_));
         }
     }
 
@@ -601,8 +561,12 @@ private:
         sample.kernel_stack_id = ev->kernel_stack_id;
         sample.user_stack_id = ev->user_stack_id;
 
-        self->LookupStackFrames(ev->kernel_stack_id, &sample.kernel_stack);
-        self->LookupStackFrames(ev->user_stack_id, &sample.user_stack);
+        sample.kernel_stack = LookupBpfStackTrace(
+            self->stacks_fd_, ev->kernel_stack_id,
+            static_cast<size_t>(self->stack_depth_));
+        sample.user_stack =
+            LookupBpfStackTrace(self->stacks_fd_, ev->user_stack_id,
+                                static_cast<size_t>(self->stack_depth_));
 
         self->callback_(std::move(batch));
         return 0;

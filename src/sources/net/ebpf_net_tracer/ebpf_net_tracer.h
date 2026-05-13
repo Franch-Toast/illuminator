@@ -24,6 +24,7 @@
 #include <thread>
 
 #include "core/common/logging.h"
+#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
 #include "plugin/api/source_plugin.h"
@@ -68,7 +69,10 @@ public:
         }
 
         running_ = true;
-        poll_thread_ = std::thread([this] { PollLoop(); });
+        poll_thread_ = std::thread([this] {
+            SetThreadName("il-net-poll");
+            PollLoop();
+        });
         IL_INFO("eBPF net tracer started");
         return Status::Ok();
     }
