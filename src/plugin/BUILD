@@ -54,6 +54,8 @@ cc_library(
         "//src/sources:ebpf_net_tracer",
         "//src/sources:ebpf_io_monitor",
         "//src/sources:ebpf_sched_tracer",
+        "//src/sources:cpu_sys_stats",
+        "//src/sources:proc_cpu_monitor",
         # New CPU monitoring sources
         "//src/sources:cpu_utilization",
         "//src/sources:process_cpu",

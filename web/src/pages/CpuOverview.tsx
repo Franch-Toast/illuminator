@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useState, useCallback, useRef } from 'react'
 import {
   ResponsiveContainer,
   AreaChart,
@@ -10,6 +10,7 @@ import {
   Legend,
 } from 'recharts'
 import { useCpuUtilization } from '../hooks/useCpuMetrics'
+import { useWebSocket, ConnectionState } from '../hooks/useWebSocket'
 
 const card: React.CSSProperties = {
   background: '#1a1d23',
@@ -51,9 +52,31 @@ function coreSortKey(cpu: string): number {
   return parseInt(m[m.length - 1]!, 10)
 }
 
+function WsIndicator({ state }: { state: ConnectionState }) {
+  const color = state === 'connected' ? '#4ade80' :
+                state === 'connecting' || state === 'reconnecting' ? '#f59e0b' : '#6b7280'
+  const label = state === 'connected' ? 'WS Live' :
+                state === 'reconnecting' ? 'WS Reconnecting' : 'HTTP Polling'
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#888' }}>
+      <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, display: 'inline-block' }} />
+      {label}
+    </span>
+  )
+}
+
 export default function CpuOverview() {
   const { data, history, error } = useCpuUtilization(1000)
   const [rangeMinutes, setRangeMinutes] = useState<1 | 5 | 15>(1)
+
+  const wsDataRef = useRef<any>(null)
+  const handleWsMessage = useCallback((msg: any) => {
+    wsDataRef.current = msg
+  }, [])
+  const { connectionState: wsState } = useWebSocket({
+    pipelineKey: 'cpu_utilization',
+    onMessage: handleWsMessage,
+  })
 
   const chartData = useMemo(() => {
     if (history.length === 0) return []
@@ -71,7 +94,10 @@ export default function CpuOverview() {
   return (
     <div style={{ padding: 24 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <h2 style={{ margin: 0, fontSize: 22 }}>CPU Overview</h2>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <h2 style={{ margin: 0, fontSize: 22 }}>CPU Overview</h2>
+          <WsIndicator state={wsState} />
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 12, color: '#888' }}>Chart range</span>
           {([1, 5, 15] as const).map((m) => (

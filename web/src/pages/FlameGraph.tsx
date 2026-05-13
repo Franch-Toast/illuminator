@@ -27,16 +27,19 @@ const btnActiveStyle: React.CSSProperties = {
 
 async function fetchFlameGraphData(profileType: string): Promise<FlameNode | null> {
   try {
-    const res = await fetch(`/api/v1/cpu/profile/flamegraph?type=${profileType}`)
+    const url = profileType === 'offcpu'
+      ? '/api/v1/cpu/profile/offcpu'
+      : '/api/v1/cpu/profile/flamegraph'
+    const res = await fetch(url)
     if (!res.ok) {
       console.warn('flamegraph fetch failed:', res.status)
       return null
     }
     const data = await res.json()
     const samples = data.stack_samples || []
-    console.log('flamegraph API:', { records: data.records?.length, stack_samples: samples.length })
+    console.log('flamegraph API:', { type: profileType, records: data.records?.length, stack_samples: samples.length })
     if (samples.length > 0) {
-      return convertToFlameNode(data)
+      return convertToFlameNode(data, profileType === 'offcpu')
     }
     return null
   } catch (e) {
@@ -45,7 +48,7 @@ async function fetchFlameGraphData(profileType: string): Promise<FlameNode | nul
   }
 }
 
-function convertToFlameNode(data: any): FlameNode {
+function convertToFlameNode(data: any, isOffCpu = false): FlameNode {
   const root: FlameNode = { name: 'root', value: 0, children: [] }
   const samples = data.stack_samples || []
 
@@ -72,8 +75,10 @@ function convertToFlameNode(data: any): FlameNode {
       }
     }
     if (frames.length === 1) frames.push('[no stack]')
-    const count = sample.count || 1
-    insertStack(root, frames, count)
+    const weight = isOffCpu && sample.duration_ns
+      ? Math.max(1, Math.round(sample.duration_ns / 1000))
+      : (sample.count || 1)
+    insertStack(root, frames, weight)
   }
 
   root.value = root.children?.reduce((s, c) => s + c.value, 0) || 0

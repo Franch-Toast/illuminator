@@ -17,6 +17,10 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_utilization
+      - type: websocket_sink
+        config:
+          pipeline_key: cpu_utilization
+          max_buffer_size: 30
 
   cpu_processes:
     source:
@@ -63,11 +67,40 @@ pipelines:
           path: /tmp/illuminator_data
           pipeline: cpu_profile
 
+  offcpu_analysis:
+    source:
+      type: offcpu_profiler
+      config:
+        min_duration_us: 100
+        user_stacks: true
+        kernel_stacks: true
+        bpf_object: /sandbox/illuminator/build/bpf/offcpu_profiler.bpf.o
+    processors:
+      - type: stack_symbolizer
+        config:
+          demangle: true
+          kernel_symbols: true
+          cache_ttl_sec: 30
+      - type: stack_merger
+        config:
+          group_by: comm
+          include_kernel: true
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: offcpu_analysis
+      - type: websocket_sink
+        config:
+          pipeline_key: offcpu_analysis
+          max_buffer_size: 50
+
   sched_analysis:
     source:
       type: sched_analyzer
       config:
-        detailed_mode: false
+        detailed_mode: true
         aggregate_interval_ms: 5000
         track_migrations: true
         bpf_object: /sandbox/illuminator/build/bpf/sched_analyzer.bpf.o
@@ -77,3 +110,7 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: sched_analysis
+      - type: websocket_sink
+        config:
+          pipeline_key: sched_analysis
+          max_buffer_size: 30

@@ -67,9 +67,24 @@
 #include "plugin/builtin/builtin_plugins.h"
 #include "plugin/manager/plugin_manager.h"
 #include "server/http_server.h"
+#include "server/websocket_server.h"
+#include "server/websocket_manager.h"
+#include "ebpf/loader/bpf_program_manager.h"
+#include "sources/sched_analyzer/sched_analyzer.h"
 #include "sinks/prometheus_exposition/prometheus_sink.h"
 #include "storage/storage_backend.h"
 #include "core/common/self_observability.h"
+
+namespace illuminator {
+void HttpServer::HandleWebSocketUpgrade(int fd, const std::string& request) {
+    if (!WebSocketCodec::PerformHandshake(fd, request)) {
+        close(fd);
+        return;
+    }
+    auto path = WebSocketCodec::GetUpgradePath(request);
+    ws_manager_->AddConnection(fd, path);
+}
+}  // namespace illuminator
 
 // 全局运行标志，受信号处理器控制
 static std::atomic<bool> g_running{true};
@@ -205,8 +220,10 @@ std::string BatchToJson(const DataBatch& batch, const std::string& pipeline) {
                << ",\"cpu\":" << s.cpu
                << ",\"count\":" << s.count
                << ",\"comm\":\"" << EscapeJson(s.comm) << "\""
-               << ",\"type\":" << static_cast<int>(s.sample_type)
-               << ",\"kernel_stack\":" << StackFramesToJson(s.kernel_stack)
+               << ",\"type\":" << static_cast<int>(s.sample_type);
+            if (s.duration_ns > 0)
+               ss << ",\"duration_ns\":" << s.duration_ns;
+            ss << ",\"kernel_stack\":" << StackFramesToJson(s.kernel_stack)
                << ",\"user_stack\":" << StackFramesToJson(s.user_stack)
                << "}";
         }
@@ -364,9 +381,18 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         return 1;
     }
 
+    // ---- 启动 WebSocket 管理器 ----
+    illuminator::WebSocketManager ws_manager;
+    ws_manager.SetBroadcastInterval(1000);
+    ws_manager.SetSerializer([](const std::string& pipeline_key,
+                                illuminator::DataBatchPtr batch) {
+        return illuminator::BatchToJson(*batch, pipeline_key);
+    });
+
     // ---- 启动 HTTP 服务器（注册所有 API 端点） ----
 
     illuminator::HttpServer http_server;
+    http_server.SetWebSocketManager(&ws_manager);
 
     // 健康检查端点
     http_server.RegisterHandler("/healthz", [](const std::string&) {
@@ -429,6 +455,20 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         return illuminator::BatchToJson(**processed, "cpu_profile") + "\n";
     });
 
+    // Off-CPU 火焰图端点（含符号化 + 堆栈合并）
+    http_server.RegisterHandler("/api/v1/cpu/profile/offcpu",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("offcpu_analysis");
+        if (!pipe) return std::string("{\"error\":\"offcpu_analysis pipeline not found\"}\n");
+        auto* source = pipe->GetSource();
+        if (!source) return std::string("{\"error\":\"no source\"}\n");
+        auto result = source->Collect();
+        if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
+        auto processed = pipe->RunProcessors(std::move(*result));
+        if (!processed.ok()) return std::string("{\"error\":\"symbolization failed\"}\n");
+        return illuminator::BatchToJson(**processed, "offcpu_analysis") + "\n";
+    });
+
     // 调度器摘要端点
     http_server.RegisterHandler("/api/v1/cpu/sched/summary",
         [&controller](const std::string&) {
@@ -439,6 +479,102 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         auto result = source->Collect();
         if (!result.ok()) return std::string("{\"error\":\"collect failed\"}\n");
         return illuminator::BatchToJson(*result.value(), "sched_analysis") + "\n";
+    });
+
+    // 调度历史数据端点（时序折线图用）
+    http_server.RegisterHandler("/api/v1/cpu/sched/history",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("sched_analysis");
+        if (!pipe) return std::string("{\"error\":\"pipeline not found\"}\n");
+        auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
+        if (!src) return std::string("{\"error\":\"source not available\"}\n");
+        auto pts = src->GetHistory();
+        std::ostringstream ss;
+        ss << "{\"history\":[";
+        bool first = true;
+        for (auto& p : pts) {
+            if (!first) ss << ",";
+            first = false;
+            ss << "{\"timestamp_ms\":" << p.timestamp_ms
+               << ",\"total_switches\":" << p.total_switches
+               << ",\"avg_latency_us\":" << p.avg_latency_us
+               << ",\"max_latency_ns\":" << p.max_latency_ns
+               << ",\"total_migrations\":" << p.total_migrations
+               << ",\"process_count\":" << p.process_count << "}";
+        }
+        ss << "]}\n";
+        return ss.str();
+    });
+
+    // 调度详细事件端点
+    http_server.RegisterHandler("/api/v1/cpu/sched/events",
+        [&controller](const std::string& path) {
+        auto* pipe = controller.GetPipeline("sched_analysis");
+        if (!pipe) return std::string("{\"error\":\"pipeline not found\"}\n");
+        auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
+        if (!src) return std::string("{\"error\":\"source not available\"}\n");
+
+        uint32_t pid = 0;
+        size_t limit = 200;
+        auto q = path.find('?');
+        if (q != std::string::npos) {
+            auto qs = path.substr(q + 1);
+            auto pp = qs.find("pid=");
+            if (pp != std::string::npos) pid = std::atoi(qs.c_str() + pp + 4);
+            auto lp = qs.find("limit=");
+            if (lp != std::string::npos) limit = std::atoi(qs.c_str() + lp + 6);
+        }
+
+        auto events = src->GetRecentEvents(pid, limit);
+        std::ostringstream ss;
+        ss << "{\"events\":[";
+        bool first = true;
+        for (auto& e : events) {
+            if (!first) ss << ",";
+            first = false;
+            const char* types[] = {"switch", "wakeup", "migrate"};
+            unsigned ti = e.event_type < 3 ? e.event_type : 0;
+            ss << "{\"timestamp_ms\":" << e.timestamp_ms
+               << ",\"event_type\":\"" << types[ti] << "\""
+               << ",\"prev_pid\":" << e.prev_pid
+               << ",\"next_pid\":" << e.next_pid
+               << ",\"cpu\":" << e.cpu
+               << ",\"latency_ns\":" << e.latency_ns
+               << ",\"prev_comm\":\"" << illuminator::EscapeJson(
+                    std::string_view(e.prev_comm, strnlen(e.prev_comm, TASK_COMM_LEN))) << "\""
+               << ",\"next_comm\":\"" << illuminator::EscapeJson(
+                    std::string_view(e.next_comm, strnlen(e.next_comm, TASK_COMM_LEN))) << "\""
+               << "}";
+        }
+        ss << "]}\n";
+        return ss.str();
+    });
+
+    // Wakeup 链分析端点
+    http_server.RegisterHandler("/api/v1/cpu/sched/wakeups",
+        [&controller](const std::string&) {
+        auto* pipe = controller.GetPipeline("sched_analysis");
+        if (!pipe) return std::string("{\"error\":\"pipeline not found\"}\n");
+        auto* src = dynamic_cast<illuminator::SchedAnalyzerSource*>(pipe->GetSource());
+        if (!src) return std::string("{\"error\":\"source not available\"}\n");
+        auto wakeups = src->GetRecentWakeups(500);
+        std::ostringstream ss;
+        ss << "{\"wakeups\":[";
+        bool first = true;
+        for (auto& w : wakeups) {
+            if (!first) ss << ",";
+            first = false;
+            ss << "{\"timestamp_ms\":" << w.timestamp_ms
+               << ",\"waker_pid\":" << w.waker_pid
+               << ",\"wakee_pid\":" << w.wakee_pid
+               << ",\"waker_comm\":\"" << illuminator::EscapeJson(
+                    std::string_view(w.waker_comm, strnlen(w.waker_comm, TASK_COMM_LEN))) << "\""
+               << ",\"wakee_comm\":\"" << illuminator::EscapeJson(
+                    std::string_view(w.wakee_comm, strnlen(w.wakee_comm, TASK_COMM_LEN))) << "\""
+               << "}";
+        }
+        ss << "]}\n";
+        return ss.str();
     });
 
     // 自观测端点（Prometheus 格式 + JSON 格式）
@@ -452,6 +588,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     // 静态前端文件服务 + HTTP 启动
     http_server.SetStaticDir("web/dist");
     http_server.Start("0.0.0.0", 9527);
+    ws_manager.Start();
 
     IL_INFO("Illuminator daemon running. HTTP on :9527. Ctrl+C to stop.");
 
@@ -464,8 +601,8 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
-    // 优雅关闭
     IL_INFO("Shutting down...");
+    ws_manager.Stop();
     http_server.Stop();
     controller.StopAll();
     IL_INFO("Illuminator stopped.");

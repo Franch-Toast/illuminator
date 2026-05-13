@@ -102,6 +102,32 @@ cc_library(
 )
 
 cc_library(
+    name = "cpu_sys_stats",
+    hdrs = ["cpu_sys_stats/cpu_sys_stats.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "proc_cpu_monitor",
+    hdrs = ["proc_cpu_monitor/proc_cpu_monitor.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
     name = "cpu_utilization",
     hdrs = ["cpu_utilization/cpu_utilization.h"],
     strip_include_prefix = "",

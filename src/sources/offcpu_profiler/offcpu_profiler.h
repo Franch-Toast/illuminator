@@ -58,6 +58,7 @@
 #include <cerrno>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -103,8 +104,16 @@ public:
     const char* Name() const override { return "offcpu_profiler"; }
     const char* Version() const override { return "0.1.0"; }
 
-    // Off-CPU 剖析器纯粹为 Push 模式（事件即时推送，无聚合）
-    bool IsPushMode() const override { return true; }
+    bool IsPushMode() const override { return false; }
+
+    StatusOr<DataBatchPtr> Collect() override {
+        std::lock_guard<std::mutex> lk(cache_mu_);
+        auto result = cached_batch_
+            ? cached_batch_
+            : std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        return result;
+    }
 
     // ========================================================================
     // Init — 初始化 Off-CPU 剖析器配置
@@ -248,11 +257,7 @@ private:
             return 0;
         auto* ev = static_cast<il_offcpu_event*>(data);
 
-        // PID 白名单过滤
         if (!self->AllowPid(ev->pid))
-            return 0;
-
-        if (!self->callback_)
             return 0;
 
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
@@ -262,17 +267,36 @@ private:
         sample.cpu = ev->cpu;
         sample.comm = batch->InternString(std::string_view(
             ev->comm, strnlen(ev->comm, TASK_COMM_LEN)));
-        sample.sample_type = SampleType::kOffCpu;     // 标识为 Off-CPU 采样
-        sample.duration_ns = ev->duration_ns;          // 等待持续时间
-        sample.count = 1;                              // 每条事件单独统计
+        sample.sample_type = SampleType::kOffCpu;
+        sample.duration_ns = ev->duration_ns;
+        sample.count = 1;
         sample.kernel_stack_id = ev->kernel_stack_id;
         sample.user_stack_id = ev->user_stack_id;
 
-        // 解析等待时的内核态和用户态调用栈
         self->LookupStack(ev->kernel_stack_id, &sample.kernel_stack);
         self->LookupStack(ev->user_stack_id, &sample.user_stack);
 
-        self->callback_(std::move(batch));
+        {
+            std::lock_guard<std::mutex> lk(self->cache_mu_);
+            if (!self->cached_batch_)
+                self->cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+            auto& cs = self->cached_batch_->AddStackSample();
+            cs.pid = ev->pid;
+            cs.tid = ev->tid;
+            cs.cpu = ev->cpu;
+            cs.comm = self->cached_batch_->InternString(std::string_view(
+                ev->comm, strnlen(ev->comm, TASK_COMM_LEN)));
+            cs.sample_type = SampleType::kOffCpu;
+            cs.duration_ns = ev->duration_ns;
+            cs.count = 1;
+            cs.kernel_stack_id = ev->kernel_stack_id;
+            cs.user_stack_id = ev->user_stack_id;
+            cs.kernel_stack = sample.kernel_stack;
+            cs.user_stack = sample.user_stack;
+        }
+
+        if (self->callback_)
+            self->callback_(std::move(batch));
         return 0;
     }
 
@@ -285,11 +309,13 @@ private:
     std::unordered_set<uint32_t> target_pid_allow_;  // PID 快速查找集合
 
     // ---- 运行时状态 ----
-    std::atomic<bool> running_{false};        // 运行中标志
-    BpfProgramManager bpf_mgr_;               // eBPF 程序管理器
-    int stacks_fd_ = -1;                      // offcpu_stacks map 的文件描述符
-    struct ring_buffer* ring_buf_ = nullptr;  // ring buffer 句柄
-    std::thread poll_thread_;                 // 后台轮询线程
+    std::atomic<bool> running_{false};
+    BpfProgramManager bpf_mgr_;
+    int stacks_fd_ = -1;
+    struct ring_buffer* ring_buf_ = nullptr;
+    std::thread poll_thread_;
+    mutable std::mutex cache_mu_;
+    DataBatchPtr cached_batch_;
 };
 
 IL_REGISTER_SOURCE("offcpu_profiler", OffcpuProfilerSource);

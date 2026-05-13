@@ -51,10 +51,13 @@
 
 namespace illuminator {
 
+class WebSocketManager;
+
 class HttpServer {
 public:
-    // Handler 类型：接收请求路径，返回响应 body 字符串
     using Handler = std::function<std::string(const std::string& path)>;
+
+    void SetWebSocketManager(WebSocketManager* mgr) { ws_manager_ = mgr; }
 
     // ---- 启动服务器 ----
     // listen_addr: 监听地址（当前不支持，固定 INADDR_ANY）
@@ -132,15 +135,20 @@ private:
         }
     }
 
-    // ---- 处理单个客户端请求 ----
     void HandleClient(int fd) {
         char buf[4096] = {};
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
         if (n <= 0) { close(fd); return; }
 
-        // 解析 HTTP 请求行，提取路径
         std::string request(buf, n);
-        std::string path = ParsePath(request);
+
+        if (ws_manager_ && IsWebSocketUpgrade(request)) {
+            HandleWebSocketUpgrade(fd, request);
+            return;
+        }
+
+        std::string full_path = ParseFullPath(request);
+        std::string path = StripQuery(full_path);
 
         std::string body;
         std::string content_type = "text/plain";
@@ -149,8 +157,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = handlers_.find(path);
             if (it != handlers_.end()) {
-                // 匹配到注册的 handler
-                body = it->second(path);
+                body = it->second(full_path);
                 if (path.find("/api/") == 0) content_type = "application/json";
             } else if (!static_dir_.empty()) {
                 // 静态文件服务
@@ -188,17 +195,17 @@ private:
         close(fd);
     }
 
-    // ---- 从 HTTP 请求行中提取路径 ----
-    // "GET /api/v1/cpu/utilization HTTP/1.1" → "/api/v1/cpu/utilization"
-    // 自动去除查询参数（?key=val 部分）
-    static std::string ParsePath(const std::string& request) {
+    static std::string ParseFullPath(const std::string& request) {
         auto pos = request.find(' ');
         if (pos == std::string::npos) return "/";
         auto end = request.find(' ', pos + 1);
         if (end == std::string::npos) return "/";
-        auto full = request.substr(pos + 1, end - pos - 1);
-        auto qmark = full.find('?');
-        return (qmark != std::string::npos) ? full.substr(0, qmark) : full;
+        return request.substr(pos + 1, end - pos - 1);
+    }
+
+    static std::string StripQuery(const std::string& path) {
+        auto q = path.find('?');
+        return (q != std::string::npos) ? path.substr(0, q) : path;
     }
 
     // ---- 根据文件扩展名猜测 MIME 类型 ----
@@ -215,12 +222,22 @@ private:
         return "text/plain";
     }
 
-    std::string static_dir_;                              // 静态文件根目录
-    int server_fd_ = -1;                                  // 监听 socket fd
-    std::atomic<bool> running_{false};                    // 运行状态标志
-    std::thread thread_;                                  // Accept 线程
-    std::mutex mutex_;                                    // 保护 handlers_ 的互斥锁
-    std::unordered_map<std::string, Handler> handlers_;   // 路径 → handler 映射
+    static bool IsWebSocketUpgrade(const std::string& request) {
+        auto lower = request;
+        for (auto& c : lower) c = static_cast<char>(::tolower(c));
+        return lower.find("upgrade: websocket") != std::string::npos &&
+               lower.find("connection:") != std::string::npos;
+    }
+
+    void HandleWebSocketUpgrade(int fd, const std::string& request);
+
+    std::string static_dir_;
+    int server_fd_ = -1;
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+    std::mutex mutex_;
+    std::unordered_map<std::string, Handler> handlers_;
+    WebSocketManager* ws_manager_ = nullptr;
 };
 
 }  // namespace illuminator

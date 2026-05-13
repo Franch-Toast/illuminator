@@ -48,8 +48,11 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstring>
+#include <deque>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -89,16 +92,40 @@ inline void ParseCommaSeparatedUint32sLocal(const std::string& s,
     }
 }
 
-// ============================================================================
-// SchedAnalyzerSource 类 — 调度分析插件主体
-// ============================================================================
+struct SchedHistoryPoint {
+    uint64_t timestamp_ms = 0;
+    uint64_t total_switches = 0;
+    double avg_latency_us = 0;
+    uint64_t max_latency_ns = 0;
+    uint64_t total_migrations = 0;
+    uint32_t process_count = 0;
+};
+
+struct SchedEventRecord {
+    uint64_t timestamp_ms = 0;
+    uint32_t event_type = 0;   // 0=switch, 1=wakeup, 2=migrate
+    uint32_t prev_pid = 0;
+    uint32_t next_pid = 0;
+    uint32_t cpu = 0;
+    uint64_t latency_ns = 0;
+    char prev_comm[TASK_COMM_LEN] = {};
+    char next_comm[TASK_COMM_LEN] = {};
+};
+
+struct WakeupRecord {
+    uint64_t timestamp_ms = 0;
+    uint32_t waker_pid = 0;
+    uint32_t wakee_pid = 0;
+    char waker_comm[TASK_COMM_LEN] = {};
+    char wakee_comm[TASK_COMM_LEN] = {};
+};
+
 class SchedAnalyzerSource : public SourcePlugin {
 public:
     const char* Name() const override { return "sched_analyzer"; }
     const char* Version() const override { return "0.2.0"; }
 
-    // 详细模式下为 Push 模式（ring buffer 主动推送事件）
-    bool IsPushMode() const override { return detailed_mode_; }
+    bool IsPushMode() const override { return false; }
 
     uint32_t IntervalMs() const override { return aggregate_interval_ms_; }
 
@@ -216,10 +243,9 @@ public:
     // 详细模式下 Collect 返回空 batch（数据已通过 ring buffer 推送）。
     StatusOr<DataBatchPtr> Collect() override {
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kTrace);
-        if (detailed_mode_ || agg_fd_ < 0)
+        if (agg_fd_ < 0)
             return batch;
 
-        // 先收集所有 PID key（遍历时不能修改 map）
         uint32_t cur{}, next{};
         std::vector<uint32_t> pids;
         int err = bpf_map_get_next_key(agg_fd_, nullptr, &cur);
@@ -229,12 +255,14 @@ public:
             cur = next;
         }
 
+        uint64_t total_sw = 0, total_lat = 0, max_lat = 0, total_mig = 0;
+        uint32_t proc_count = 0;
+
         for (uint32_t pid : pids) {
             il_sched_stats stats{};
             if (bpf_map_lookup_elem(agg_fd_, &pid, &stats) != 0)
                 continue;
 
-            // 不在白名单的 PID 也删除其数据（避免 map 膨胀）
             if (!AllowPid(pid)) {
                 bpf_map_delete_elem(agg_fd_, &pid);
                 continue;
@@ -264,9 +292,61 @@ public:
                          stats.max_runqueue_latency_ns);
             rec.SetField(batch->InternString("migrate_count"),
                          stats.migrate_count);
+
+            total_sw += stats.switch_count;
+            total_lat += stats.total_runqueue_latency_ns;
+            if (stats.max_runqueue_latency_ns > max_lat)
+                max_lat = stats.max_runqueue_latency_ns;
+            total_mig += stats.migrate_count;
+            proc_count++;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(history_mu_);
+            SchedHistoryPoint pt;
+            pt.timestamp_ms = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            pt.total_switches = total_sw;
+            pt.avg_latency_us = total_sw > 0
+                ? static_cast<double>(total_lat) / total_sw / 1000.0
+                : 0;
+            pt.max_latency_ns = max_lat;
+            pt.total_migrations = total_mig;
+            pt.process_count = proc_count;
+            history_.push_back(pt);
+            while (history_.size() > kMaxHistory)
+                history_.pop_front();
         }
 
         return batch;
+    }
+
+    std::vector<SchedHistoryPoint> GetHistory(size_t max_n = 0) const {
+        std::lock_guard<std::mutex> lk(history_mu_);
+        if (max_n == 0 || max_n >= history_.size())
+            return {history_.begin(), history_.end()};
+        return {history_.end() - max_n, history_.end()};
+    }
+
+    std::vector<SchedEventRecord> GetRecentEvents(uint32_t filter_pid = 0,
+                                                    size_t max_n = 200) const {
+        std::lock_guard<std::mutex> lk(events_mu_);
+        std::vector<SchedEventRecord> out;
+        for (auto it = recent_events_.rbegin();
+             it != recent_events_.rend() && out.size() < max_n; ++it) {
+            if (filter_pid == 0 || it->prev_pid == filter_pid ||
+                it->next_pid == filter_pid)
+                out.push_back(*it);
+        }
+        std::reverse(out.begin(), out.end());
+        return out;
+    }
+
+    std::vector<WakeupRecord> GetRecentWakeups(size_t max_n = 200) const {
+        std::lock_guard<std::mutex> lk(wakeups_mu_);
+        size_t start = wakeups_.size() > max_n ? wakeups_.size() - max_n : 0;
+        return {wakeups_.begin() + start, wakeups_.end()};
     }
 
 private:
@@ -292,46 +372,78 @@ private:
             return 0;
         auto* event = static_cast<il_sched_event*>(data);
 
-        // 双方 PID 都必须通过白名单检查
         if (!self->AllowPid(event->prev_pid) &&
             !self->AllowPid(event->next_pid))
             return 0;
 
-        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kTrace);
-        auto& rec = batch->AddRecord();
+        auto now_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
 
-        const char* evt_types[] = {"switch", "wakeup", "migrate"};
-        unsigned idx =
-            event->event_type <
-                    sizeof(evt_types) / sizeof(evt_types[0])
-                ? event->event_type
-                : 0;
+        {
+            std::lock_guard<std::mutex> lk(self->events_mu_);
+            SchedEventRecord er;
+            er.timestamp_ms = now_ms;
+            er.event_type = event->event_type;
+            er.prev_pid = event->prev_pid;
+            er.next_pid = event->next_pid;
+            er.cpu = event->cpu;
+            er.latency_ns = event->latency_ns;
+            std::memcpy(er.prev_comm, event->prev_comm,
+                        strnlen(event->prev_comm, TASK_COMM_LEN));
+            std::memcpy(er.next_comm, event->next_comm,
+                        strnlen(event->next_comm, TASK_COMM_LEN));
+            self->recent_events_.push_back(er);
+            while (self->recent_events_.size() > kMaxEvents)
+                self->recent_events_.pop_front();
+        }
 
-        rec.labels.push_back({batch->InternString("type"),
-                              batch->InternString("sched")});
-        rec.labels.push_back({batch->InternString("event"),
-                              batch->InternString(evt_types[idx])});
+        if (event->event_type == 1) {
+            std::lock_guard<std::mutex> lk(self->wakeups_mu_);
+            WakeupRecord wr;
+            wr.timestamp_ms = now_ms;
+            wr.waker_pid = event->prev_pid;
+            wr.wakee_pid = event->next_pid;
+            std::memcpy(wr.waker_comm, event->prev_comm,
+                        strnlen(event->prev_comm, TASK_COMM_LEN));
+            std::memcpy(wr.wakee_comm, event->next_comm,
+                        strnlen(event->next_comm, TASK_COMM_LEN));
+            self->wakeups_.push_back(wr);
+            while (self->wakeups_.size() > kMaxWakeups)
+                self->wakeups_.pop_front();
+        }
 
-        rec.SetField(batch->InternString("prev_pid"),
-                     static_cast<uint64_t>(event->prev_pid));
-        rec.SetField(batch->InternString("next_pid"),
-                     static_cast<uint64_t>(event->next_pid));
-        rec.SetField(batch->InternString("cpu"),
-                     static_cast<uint64_t>(event->cpu));
-        rec.SetField(batch->InternString("latency_ns"),
-                     static_cast<uint64_t>(event->latency_ns));
-        rec.SetField(batch->InternString("prev_comm"),
-                     batch->InternString(std::string_view(
-                         event->prev_comm,
-                         strnlen(event->prev_comm, TASK_COMM_LEN))));
-        rec.SetField(batch->InternString("next_comm"),
-                     batch->InternString(std::string_view(
-                         event->next_comm,
-                         strnlen(event->next_comm, TASK_COMM_LEN))));
+        if (self->callback_) {
+            auto batch = std::make_shared<DataBatch>(DataBatch::Type::kTrace);
+            auto& rec = batch->AddRecord();
 
-        // 通过 callback_ 立即推送到下游管道
-        if (self->callback_)
+            const char* evt_types[] = {"switch", "wakeup", "migrate"};
+            unsigned idx = event->event_type < 3 ? event->event_type : 0;
+
+            rec.labels.push_back({batch->InternString("type"),
+                                  batch->InternString("sched")});
+            rec.labels.push_back({batch->InternString("event"),
+                                  batch->InternString(evt_types[idx])});
+
+            rec.SetField(batch->InternString("prev_pid"),
+                         static_cast<uint64_t>(event->prev_pid));
+            rec.SetField(batch->InternString("next_pid"),
+                         static_cast<uint64_t>(event->next_pid));
+            rec.SetField(batch->InternString("cpu"),
+                         static_cast<uint64_t>(event->cpu));
+            rec.SetField(batch->InternString("latency_ns"),
+                         static_cast<uint64_t>(event->latency_ns));
+            rec.SetField(batch->InternString("prev_comm"),
+                         batch->InternString(std::string_view(
+                             event->prev_comm,
+                             strnlen(event->prev_comm, TASK_COMM_LEN))));
+            rec.SetField(batch->InternString("next_comm"),
+                         batch->InternString(std::string_view(
+                             event->next_comm,
+                             strnlen(event->next_comm, TASK_COMM_LEN))));
+
             self->callback_(std::move(batch));
+        }
         return 0;
     }
 
@@ -344,11 +456,25 @@ private:
     std::unordered_set<uint32_t> target_pid_allow_;  // PID 快速查找集合
 
     // ---- 运行时状态 ----
-    std::atomic<bool> running_{false};        // 运行中标志
-    BpfProgramManager bpf_mgr_;               // eBPF 程序管理器
-    struct ring_buffer* ring_buf_ = nullptr;  // BPF ring buffer 句柄
-    std::thread poll_thread_;                 // 详细模式的后台轮询线程
-    int agg_fd_ = -1;                         // 聚合 map 的文件描述符
+    std::atomic<bool> running_{false};
+    BpfProgramManager bpf_mgr_;
+    struct ring_buffer* ring_buf_ = nullptr;
+    std::thread poll_thread_;
+    int agg_fd_ = -1;
+
+    // ---- 历史和缓存 ----
+    static constexpr size_t kMaxHistory = 360;
+    static constexpr size_t kMaxEvents = 5000;
+    static constexpr size_t kMaxWakeups = 2000;
+
+    mutable std::mutex history_mu_;
+    std::deque<SchedHistoryPoint> history_;
+
+    mutable std::mutex events_mu_;
+    std::deque<SchedEventRecord> recent_events_;
+
+    mutable std::mutex wakeups_mu_;
+    std::deque<WakeupRecord> wakeups_;
 };
 
 IL_REGISTER_SOURCE("sched_analyzer", SchedAnalyzerSource);
