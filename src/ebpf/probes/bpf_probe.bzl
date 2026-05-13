@@ -18,7 +18,7 @@ def bpf_probe(name, src, arch = "x86"):
         name = name,
         srcs = [src] + _BPF_HDRS,
         outs = [name + ".bpf.o"],
-        cmd = "$${BPF_CLANG:-clang} {} {} -c $(location {}) -o $@".format(
+        cmd = "$${{BPF_CLANG:-clang}} {} {} -c $(location {}) -o $@".format(
             copts, _BPF_INCLUDES, src),
         visibility = ["//visibility:public"],
     )

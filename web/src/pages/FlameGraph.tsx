@@ -25,36 +25,48 @@ const btnActiveStyle: React.CSSProperties = {
   boxShadow: 'inset 0 1px 3px rgba(0,0,0,0.4)',
 }
 
-async function fetchFlameGraphData(profileType: string): Promise<FlameNode | null> {
+interface FetchResult {
+  data: FlameNode | null
+  stub: boolean
+  errorMsg: string
+}
+
+async function fetchFlameGraphData(profileType: string): Promise<FetchResult> {
   try {
+    // Check pipeline stub status first
+    const pipeRes = await fetch('/api/v1/pipelines')
+    const pipeData = await pipeRes.json()
+    const profilePipeline = (pipeData.pipelines || []).find(
+      (p: any) => p.name === (profileType === 'offcpu' ? 'offcpu_analysis' : 'cpu_profile'),
+    )
+    if (profilePipeline?.stub) {
+      return { data: null, stub: true, errorMsg: 'BPF object not configured' }
+    }
+
     const url = profileType === 'offcpu'
       ? '/api/v1/cpu/profile/offcpu'
       : '/api/v1/cpu/profile/flamegraph'
     const res = await fetch(url)
     if (!res.ok) {
-      console.warn('flamegraph fetch failed:', res.status)
-      return null
+      return { data: null, stub: false, errorMsg: `HTTP ${res.status}` }
     }
     const data = await res.json()
-    const samples = data.stack_samples || []
-    console.log('flamegraph API:', { type: profileType, records: data.records?.length, stack_samples: samples.length })
-    if (samples.length > 0) {
-      return convertToFlameNode(data, profileType === 'offcpu')
+    if (data.error) {
+      return { data: null, stub: false, errorMsg: data.error }
     }
-    return null
+    const samples = data.stack_samples || []
+    if (samples.length > 0) {
+      return { data: convertToFlameNode(data, profileType === 'offcpu'), stub: false, errorMsg: '' }
+    }
+    return { data: null, stub: false, errorMsg: 'No stack samples collected yet' }
   } catch (e) {
-    console.error('flamegraph fetch error:', e)
-    return null
+    return { data: null, stub: false, errorMsg: e instanceof Error ? e.message : String(e) }
   }
 }
 
 function convertToFlameNode(data: any, isOffCpu = false): FlameNode {
   const root: FlameNode = { name: 'root', value: 0, children: [] }
   const samples = data.stack_samples || []
-
-  if (samples.length === 0 && data.records) {
-    return buildDemoTree()
-  }
 
   for (const sample of samples) {
     const frames: string[] = []
@@ -100,29 +112,6 @@ function insertStack(node: FlameNode, frames: string[], count: number) {
   }
 }
 
-function buildDemoTree(): FlameNode {
-  return {
-    name: 'root', value: 5000, children: [
-      { name: 'main', value: 4000, children: [
-        { name: 'process_request', value: 2500, children: [
-          { name: 'parse_input', value: 800 },
-          { name: 'compute', value: 1200, children: [
-            { name: 'matrix_multiply', value: 900 },
-            { name: 'normalize', value: 300 },
-          ]},
-          { name: 'serialize_output', value: 500 },
-        ]},
-        { name: 'handle_io', value: 1000, children: [
-          { name: 'read_socket', value: 600 },
-          { name: 'write_socket', value: 400 },
-        ]},
-        { name: 'gc_collect', value: 500 },
-      ]},
-      { name: 'idle_thread', value: 700 },
-      { name: 'signal_handler', value: 300 },
-    ],
-  }
-}
 
 export default function FlameGraph() {
   const chartRef = useRef<HTMLDivElement>(null)
@@ -130,12 +119,16 @@ export default function FlameGraph() {
   const [searchText, setSearchText] = useState('')
   const [data, setData] = useState<FlameNode | null>(null)
   const [loading, setLoading] = useState(false)
+  const [stub, setStub] = useState(false)
+  const [errorMsg, setErrorMsg] = useState('')
   const fgRef = useRef<any>(null)
 
   const loadData = useCallback(async () => {
     setLoading(true)
     const result = await fetchFlameGraphData(profileType)
-    setData(result || buildDemoTree())
+    setData(result.data)
+    setStub(result.stub)
+    setErrorMsg(result.errorMsg)
     setLoading(false)
   }, [profileType])
 
@@ -226,6 +219,36 @@ export default function FlameGraph() {
         {loading && (
           <div style={{ textAlign: 'center', padding: 40, color: '#888' }}>
             Loading profile data...
+          </div>
+        )}
+        {!loading && !data && (
+          <div style={{ textAlign: 'center', padding: 60 }}>
+            {stub ? (
+              <>
+                <div style={{ fontSize: 36, marginBottom: 12 }}>🔌</div>
+                <div style={{ fontSize: 16, color: '#f59e0b', marginBottom: 8 }}>
+                  CPU Profiler is in stub mode
+                </div>
+                <div style={{ fontSize: 13, color: '#888', maxWidth: 480, margin: '0 auto' }}>
+                  The eBPF-based profiler requires a compiled BPF object. Configure <code style={{ color: '#93c5fd' }}>bpf_object</code> path
+                  in the pipeline config, or compile probes with <code style={{ color: '#93c5fd' }}>bazel build //src/ebpf/probes:all</code>.
+                </div>
+              </>
+            ) : errorMsg ? (
+              <>
+                <div style={{ fontSize: 36, marginBottom: 12 }}>📊</div>
+                <div style={{ fontSize: 14, color: '#888' }}>
+                  {errorMsg}
+                </div>
+                <div style={{ fontSize: 13, color: '#666', marginTop: 8 }}>
+                  Click <strong>Refresh</strong> to retry, or wait for data collection.
+                </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 14, color: '#888' }}>
+                No profile data available yet. Waiting for samples...
+              </div>
+            )}
           </div>
         )}
       </div>

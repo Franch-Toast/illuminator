@@ -126,18 +126,12 @@ function buildLatencyHistogram(summaries: SchedSummary[]): LatencyBucket[] {
   return buckets.map(b => ({ range: b.range, count: b.count }))
 }
 
-const DEMO_SUMMARIES: SchedSummary[] = [
-  { pid: 1234, comm: 'planning', switch_count: 12345, avg_runqueue_latency_us: 45, max_runqueue_latency_us: 1200, migrate_count: 234 },
-  { pid: 5678, comm: 'perception', switch_count: 8901, avg_runqueue_latency_us: 120, max_runqueue_latency_us: 3400, migrate_count: 156 },
-  { pid: 9012, comm: 'map_engine', switch_count: 5600, avg_runqueue_latency_us: 23, max_runqueue_latency_us: 890, migrate_count: 89 },
-  { pid: 3456, comm: 'localization', switch_count: 4200, avg_runqueue_latency_us: 67, max_runqueue_latency_us: 2100, migrate_count: 112 },
-]
-
 type TabKey = 'overview' | 'timeseries' | 'migrations' | 'wakeups'
 
 export default function Timeline() {
-  const [summaries, setSummaries] = useState<SchedSummary[]>(DEMO_SUMMARIES)
+  const [summaries, setSummaries] = useState<SchedSummary[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [stub, setStub] = useState(false)
   const [sortBy, setSortBy] = useState<'switches' | 'latency' | 'migrations'>('switches')
   const [activeTab, setActiveTab] = useState<TabKey>('overview')
   const [selectedPid, setSelectedPid] = useState<number | null>(null)
@@ -159,11 +153,16 @@ export default function Timeline() {
 
   const fetchSummary = useCallback(async () => {
     try {
+      const pipeRes = await fetch('/api/v1/pipelines')
+      const pipeData = await pipeRes.json()
+      const schedPipeline = (pipeData.pipelines || []).find((p: any) => p.name === 'sched_analysis')
+      setStub(schedPipeline?.stub === true)
+
       const res = await fetch('/api/v1/cpu/sched/summary')
       if (!res.ok) return
       const json = await res.json()
       const parsed = parseSchedData(json)
-      if (parsed.length > 0) setSummaries(parsed)
+      setSummaries(parsed)
       setError(null)
     } catch (e: any) {
       setError(e.message)
@@ -267,6 +266,19 @@ export default function Timeline() {
       {error && (
         <div style={{ background: '#331a1a', border: '1px solid #7f1d1d', borderRadius: 8, padding: 12, marginBottom: 16, color: '#f87171', fontSize: 13 }}>
           {error}
+        </div>
+      )}
+
+      {stub && summaries.length === 0 && (
+        <div style={{ background: '#1a1d23', border: '1px solid #2a2d35', borderRadius: 8, padding: 48, textAlign: 'center', marginBottom: 16 }}>
+          <div style={{ fontSize: 36, marginBottom: 12 }}>🔌</div>
+          <div style={{ fontSize: 16, color: '#f59e0b', marginBottom: 8 }}>
+            Scheduler Analyzer is in stub mode
+          </div>
+          <div style={{ fontSize: 13, color: '#888', maxWidth: 480, margin: '0 auto' }}>
+            The eBPF-based scheduler analyzer requires a compiled BPF object. Configure <code style={{ color: '#93c5fd' }}>bpf_object</code> path
+            in the sched_analysis pipeline config, or compile probes with <code style={{ color: '#93c5fd' }}>bazel build //src/ebpf/probes:all</code>.
+          </div>
         </div>
       )}
 
