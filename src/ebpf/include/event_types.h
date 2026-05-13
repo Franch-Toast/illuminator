@@ -1,20 +1,56 @@
 #ifndef __ILLUMINATOR_EVENT_TYPES_H
 #define __ILLUMINATOR_EVENT_TYPES_H
 
-// Shared event structures between BPF programs and userspace.
-// This file must be compatible with both BPF C and C++ compilers.
+// ============================================================================
+// 文件：illuminator/src/ebpf/include/event_types.h
+// ============================================================================
+//
+// 【作用】
+// 定义 eBPF 内核探针与用户态程序之间共享的事件数据结构体。
+// 这是 Illuminator 事件系统的核心类型定义文件，所有性能数据通过
+// 这些结构体在内核态（eBPF 程序）和用户态（C++ 分析/存储引擎）之间传递。
+//
+// 【工作原理】
+// 1. 本文件使用条件编译兼容两种编译器环境：
+//    - 非 C++ 环境（eBPF C 编译器）：类型定义来自 vmlinux.h（内核类型）
+//    - C++ 环境（用户态编译器）：使用 <cstdint> 提供的标准整数类型
+//
+// 2. 通过统一的 il_xxx 前缀别名，确保在两种编译环境下类型一致。
+//
+// 3. 各事件结构体采用固定大小、对齐友好的布局，以保证：
+//    - eBPF ring buffer 直接映射无拷贝读写
+//    - 结构体跨编译单元二进制兼容
+//
+// 4. 宏 MAX_STACK_DEPTH=127 定义最大栈帧深度，TASK_COMM_LEN=16 定义
+//    进程名最大长度（与 Linux 内核 TASK_COMM_LEN 一致）。
+//
+// 【设计约束】
+// - 必须兼容 BPF C 和 C++ 编译器，因此不能使用任何 C++ 专有特性
+// - 所有字段必须是固定大小的整数类型，不能使用指针、字符串或动态容器
+// - 结构体布局应与 ring buffer 的读写对齐要求兼容
+// ============================================================================
 
 #ifndef __cplusplus
-// BPF side: types come from vmlinux.h
+// ============================================================================
+// BPF 侧编译环境：类型定义来自 vmlinux.h，无需额外类型别名
+// vmlinux.h 由 bpftool 从内核 BTF 信息自动生成，提供 __u8/__u16 等类型
+// ============================================================================
 #else
-// Userspace C++ side
+// ============================================================================
+// 用户态 C++ 侧编译环境：使用 <cstdint> 的标准整数类型
+// 通过 typedef/宏定义统一为与 BPF 侧一致的 __u8/__u16 等名称
+// ============================================================================
 #include <cstdint>
 #ifndef __u8
-typedef uint8_t  il_u8;
-typedef uint16_t il_u16;
-typedef uint32_t il_u32;
-typedef uint64_t il_u64;
-typedef int32_t  il_s32;
+// 定义 Illuminator 专用类型别名，避免与系统头文件中的定义冲突
+typedef uint8_t  il_u8;   // 8 位无符号整数
+typedef uint16_t il_u16;  // 16 位无符号整数
+typedef uint32_t il_u32;  // 32 位无符号整数
+typedef uint64_t il_u64;  // 64 位无符号整数
+typedef int32_t  il_s32;  // 32 位有符号整数
+
+// 将 il_xxx 类型映射为 BPF 侧使用的 __xxx 宏名
+// 这样 BPF C 和 C++ 侧可以使用统一的字段类型名称
 #define __u8  il_u8
 #define __u16 il_u16
 #define __u32 il_u32
@@ -23,75 +59,165 @@ typedef int32_t  il_s32;
 #endif
 #endif
 
-#define MAX_STACK_DEPTH 128
+// ============================================================================
+// 全局常量定义
+// ============================================================================
+
+// 最大栈帧深度：限制一次采样中记录的调用栈帧数
+// 值 127 是经过权衡的选择：既能捕捉足够深的调用链，又避免 ring buffer 过度消耗
+#define MAX_STACK_DEPTH 127
+
+// 进程名最大长度：与 Linux 内核 TASK_COMM_LEN (16) 保持一致
+// 包含结束符，实际可存储 15 个有效字符
 #define TASK_COMM_LEN 16
 
+// ============================================================================
+// 事件数据结构体定义
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// il_stack_key：栈帧聚合键
+//
+// 用于在 eBPF maps 中对具有相同调用栈的采样进行聚合计数。
+// 通过 pid, tid, kernel_stack_id, user_stack_id 四元组唯一标识
+// 一个特定的调用栈上下文，相同上下文的采样累加到同一个计数器中。
+// ---------------------------------------------------------------------------
 struct il_stack_key {
-    __u32 pid;
-    __u32 tid;
-    __s32 kernel_stack_id;
-    __s32 user_stack_id;
-    char comm[TASK_COMM_LEN];
+    __u32 pid;               // 进程 ID（tgid）
+    __u32 tid;               // 线程 ID（pid）
+    __s32 kernel_stack_id;   // 内核栈 ID：指向 stack trace map 中的内核调用栈
+    __s32 user_stack_id;     // 用户栈 ID：指向 stack trace map 中的用户态调用栈
+    char comm[TASK_COMM_LEN]; // 进程名称（comm），用于可读显示
 };
 
+// ---------------------------------------------------------------------------
+// il_cpu_sample_event：CPU 剖析采样事件
+//
+// 记录一次 CPU perf_event 采样，包含当前正在执行的进程/线程信息、
+// 所在 CPU 编号、以及内核态和用户态的调用栈引用。
+// 用户态通过 ring buffer 异步读取此事件，用于火焰图生成和 CPU 热点分析。
+// ---------------------------------------------------------------------------
 struct il_cpu_sample_event {
-    __u64 timestamp_ns;
-    __u32 pid;
-    __u32 tid;
-    __u32 cpu;
-    char comm[TASK_COMM_LEN];
-    __s32 kernel_stack_id;
-    __s32 user_stack_id;
+    __u64 timestamp_ns;      // 事件时间戳（纳秒，自启动以来）
+    __u32 pid;               // 进程 ID（tgid）
+    __u32 tid;               // 线程 ID（pid）
+    __u32 cpu;               // 发生采样的 CPU 核心编号
+    char comm[TASK_COMM_LEN]; // 进程名称
+    __s32 kernel_stack_id;   // 内核调用栈 ID（-1 表示无内核栈）
+    __s32 user_stack_id;     // 用户态调用栈 ID（-1 表示无用户栈）
 };
 
+// ---------------------------------------------------------------------------
+// il_mem_event：内存分配/释放事件
+//
+// 记录一次内存分配（malloc/calloc/realloc）或释放（free）操作。
+// alloc 字段区分分配（1）和释放（0）事件。
+// 用户态通过跟踪分配-释放配对实现内存泄漏检测。
+// ---------------------------------------------------------------------------
 struct il_mem_event {
-    __u64 timestamp_ns;
-    __u32 pid;
-    __u32 tid;
-    __u64 addr;
-    __u64 size;
-    char comm[TASK_COMM_LEN];
-    __u8 alloc;
+    __u64 timestamp_ns;      // 事件时间戳（纳秒）
+    __u32 pid;               // 进程 ID
+    __u32 tid;               // 线程 ID
+    __u64 addr;              // 分配/释放的内存地址（虚拟地址）
+    __u64 size;              // 分配/释放的内存大小（字节）
+    char comm[TASK_COMM_LEN]; // 进程名称
+    __u8 alloc;              // 事件类型：1=分配(malloc), 0=释放(free)
 };
 
+// ---------------------------------------------------------------------------
+// il_net_event：网络事件
+//
+// 记录一次 TCP 连接状态变迁事件（建立连接、关闭连接）。
+// 包含源/目标 IP 地址、端口号、协议类型和收发字节数。
+// 用于网络流量监控和连接追踪分析。
+// ---------------------------------------------------------------------------
 struct il_net_event {
-    __u64 timestamp_ns;
-    __u32 pid;
-    __u32 tid;
-    __u32 saddr;
-    __u32 daddr;
-    __u16 sport;
-    __u16 dport;
-    __u32 protocol;
-    __u64 bytes_sent;
-    __u64 bytes_recv;
-    char comm[TASK_COMM_LEN];
-    __u8 event_type;
+    __u64 timestamp_ns;      // 事件时间戳（纳秒）
+    __u32 pid;               // 进程 ID
+    __u32 tid;               // 线程 ID
+    __u32 saddr;             // 源 IPv4 地址（网络字节序）
+    __u32 daddr;             // 目标 IPv4 地址（网络字节序）
+    __u16 sport;             // 源端口号
+    __u16 dport;             // 目标端口号
+    __u32 protocol;          // 传输层协议（6=TCP, 17=UDP）
+    __u64 bytes_sent;        // 已发送字节数（预留字段）
+    __u64 bytes_recv;        // 已接收字节数（预留字段）
+    char comm[TASK_COMM_LEN]; // 进程名称
+    __u8 event_type;         // 事件类型：0=连接建立, 2=连接关闭
 };
 
+// ---------------------------------------------------------------------------
+// il_bio_event：块 IO 事件
+//
+// 记录一次块设备 IO 请求从提交到完成的全过程。
+// 延迟（latency_ns）是通过在 block_rq_issue 时记录时间戳、
+// 在 block_rq_complete 时计算差值得到的。
+// 用于磁盘 IO 性能分析和瓶颈定位。
+// ---------------------------------------------------------------------------
 struct il_bio_event {
-    __u64 timestamp_ns;
-    __u32 pid;
-    __u32 tid;
-    __u64 sector;
-    __u32 nr_sector;
-    __u32 dev;
-    __u64 latency_ns;
-    char comm[TASK_COMM_LEN];
-    __u8 rwflag;
+    __u64 timestamp_ns;      // 事件完成时间戳（纳秒）
+    __u32 pid;               // 发起 IO 的进程 ID
+    __u32 tid;               // 发起 IO 的线程 ID
+    __u64 sector;            // IO 请求的起始扇区号（LBA）
+    __u32 nr_sector;         // IO 请求的扇区数量
+    __u32 dev;               // 设备号（major << 20 | minor）
+    __u64 latency_ns;        // IO 延迟（纳秒）：完成时间 - 提交时间
+    char comm[TASK_COMM_LEN]; // 进程名称
+    __u8 rwflag;             // 读写标志：1=写操作(W), 0=读操作(R)
 };
 
+// ---------------------------------------------------------------------------
+// il_sched_event：调度事件
+//
+// 记录一次 Linux 调度器事件，包括任务切换、唤醒、迁移。
+// prev_xxx 保存被切出 CPU 的任务信息，next_xxx 保存被切入 CPU 的任务信息。
+// event_type 字段区分事件类型（switch=0, wakeup=1, migrate=2）。
+// latency_ns 字段在切换事件中保存运行队列等待延迟。
+// ---------------------------------------------------------------------------
 struct il_sched_event {
-    __u64 timestamp_ns;
-    __u32 prev_pid;
-    __u32 next_pid;
-    __u32 prev_tid;
-    __u32 next_tid;
-    __u32 cpu;
-    __u64 latency_ns;
-    char prev_comm[TASK_COMM_LEN];
-    char next_comm[TASK_COMM_LEN];
-    __u8 event_type;
+    __u64 timestamp_ns;      // 事件时间戳（纳秒）
+    __u32 prev_pid;          // 切出任务的进程 ID
+    __u32 next_pid;          // 切入任务的进程 ID
+    __u32 prev_tid;          // 切出任务的线程 ID
+    __u32 next_tid;          // 切入任务的线程 ID
+    __u32 cpu;               // 事件发生的 CPU 核心编号
+    __u64 latency_ns;        // 运行队列延迟（纳秒），仅在 switch 事件有效
+    char prev_comm[TASK_COMM_LEN]; // 切出任务的进程名称
+    char next_comm[TASK_COMM_LEN]; // 切入任务的进程名称
+    __u8 event_type;         // 事件类型：0=上下文切换, 1=任务唤醒, 2=任务迁移
+};
+
+// ---------------------------------------------------------------------------
+// il_offcpu_event：Off-CPU 剖析事件
+//
+// 记录一个任务离开 CPU（被阻塞、睡眠等）并在之后返回 CPU 的完整周期。
+// duration_ns 字段保存 off-CPU 的持续时长（纳秒），用于分析阻塞原因。
+// 配合 kernel_stack_id 和 user_stack_id 可定位阻塞发生的调用栈位置。
+// ---------------------------------------------------------------------------
+struct il_offcpu_event {
+    __u64 timestamp_ns;      // off-CPU 开始时间戳（纳秒）
+    __u32 pid;               // 进程 ID
+    __u32 tid;               // 线程 ID
+    __u32 cpu;               // 任务重新回到的 CPU 核心编号
+    __u64 duration_ns;       // off-CPU 持续时长（纳秒）
+    __s32 kernel_stack_id;   // 阻塞发生时的内核调用栈 ID
+    __s32 user_stack_id;     // 阻塞发生时的用户态调用栈 ID
+    char comm[TASK_COMM_LEN]; // 进程名称
+};
+
+// ---------------------------------------------------------------------------
+// il_sched_stats：调度统计聚合结果
+//
+// 对单个进程/线程的调度行为进行累积统计，存储在 eBPF maps 中作为聚合表。
+// 包含切换次数、运行队列延迟统计（总和和最大值）以及 CPU 迁移次数。
+// 用户态定期读取此结构体以获取调度行为趋势报告。
+// ---------------------------------------------------------------------------
+struct il_sched_stats {
+    __u64 switch_count;               // 上下文切换总次数
+    __u64 total_runqueue_latency_ns;  // 运行队列等待延迟总和（纳秒）
+    __u64 max_runqueue_latency_ns;    // 运行队列等待延迟最大值（纳秒）
+    __u64 migrate_count;              // CPU 迁移总次数
+    char comm[TASK_COMM_LEN];         // 进程名称
 };
 
 #endif /* __ILLUMINATOR_EVENT_TYPES_H */

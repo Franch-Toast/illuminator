@@ -23,3 +23,29 @@ cc_library(
         "//src/plugin:manager",
     ],
 )
+
+cc_library(
+    name = "stack_symbolizer",
+    hdrs = ["stack_symbolizer/stack_symbolizer.h"],
+    strip_include_prefix = "",
+    include_prefix = "processors",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "stack_merger",
+    hdrs = ["stack_merger/stack_merger.h"],
+    strip_include_prefix = "",
+    include_prefix = "processors",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)

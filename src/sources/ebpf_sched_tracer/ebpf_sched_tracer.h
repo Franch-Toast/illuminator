@@ -1,3 +1,23 @@
+// ============================================================================
+// EbpfSchedTracer — 基于 eBPF 的调度器事件追踪器（Push 模式）
+// ============================================================================
+//
+// 使用 eBPF tracepoint 追踪内核调度器事件：
+//   - sched_wakeup: 进程被唤醒，记录唤醒时间戳用于计算运行队列延迟
+//   - sched_switch: 上下文切换，计算实际的运行队列等待时间
+//
+// 输出 Record 指标：
+// ===================
+// 每条调度事件记录包含：
+//   - prev_pid/next_pid: 被切换出的进程 / 被切换进的进程
+//   - cpu: 发生在哪个 CPU 核
+//   - latency_us: 运行队列延迟（微秒，仅在 sched_switch 时有意义）
+//   - prev_comm/next_comm: 进程名
+//   - event 类型: "switch" 或 "wakeup"
+//
+// 备选模式（无 bpf_object 时）：静默 IDLE 模式，不产生数据
+// ============================================================================
+
 #pragma once
 
 #include <cstring>
@@ -12,7 +32,6 @@
 
 namespace illuminator {
 
-// eBPF-based scheduler tracer: context switches, wakeups, runqueue latency.
 class EbpfSchedTracer : public SourcePlugin {
 public:
     const char* Name() const override { return "ebpf_sched_tracer"; }
@@ -32,6 +51,8 @@ public:
 
         auto status = bpf_mgr_.LoadObject("sched_tracer", bpf_obj_path_);
         if (!status.ok()) return status;
+
+        // 挂载 sched_wakeup 和 sched_switch 两个 tracepoint BPF 程序
         status = bpf_mgr_.AttachPrograms("sched_tracer",
             {"trace_sched_wakeup", "trace_sched_switch"});
         if (!status.ok()) return status;
@@ -59,6 +80,7 @@ public:
     }
 
 private:
+    // Ring Buffer 事件回调：将调度事件转为 DataBatch Record
     static int HandleEvent(void* ctx, void* data, size_t size) {
         auto* self = static_cast<EbpfSchedTracer*>(ctx);
         if (size < sizeof(il_sched_event)) return 0;
