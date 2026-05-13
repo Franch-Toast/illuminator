@@ -1,6 +1,24 @@
+// ============================================================================
+// EbpfNetTracer — 基于 eBPF 的 TCP 连接追踪器（Push 模式）
+// ============================================================================
+//
+// 使用 eBPF tracepoint 跟踪 TCP 连接的生命周期事件（连接建立/关闭）。
+// 挂钩点在 inet_sock_set_state，自动过滤 IPv4 协议族。
+//
+// 输出 Record 指标：
+// ===================
+// 每条连接事件记录包含：
+//   - 进程信息（pid, comm）
+//   - 源/目标地址和端口（saddr, daddr, sport, dport）
+//   - 事件类型（connect/accept/close）
+//
+// 备选模式（无 bpf_object 时）：
+//   - 自动启用 /proc/net/tcp fallback（当前为空实现）
+// ============================================================================
+
 #pragma once
 
-#include <arpa/inet.h>
+#include <arpa/inet.h>           // inet_ntop
 #include <cstring>
 #include <string>
 #include <thread>
@@ -13,19 +31,19 @@
 
 namespace illuminator {
 
-// eBPF-based network connection tracer.
-// Tracks TCP connection lifecycle events (connect/accept/close).
 class EbpfNetTracer : public SourcePlugin {
 public:
     const char* Name() const override { return "ebpf_net_tracer"; }
     const char* Version() const override { return "0.1.0"; }
     bool IsPushMode() const override { return true; }
 
+    // 初始化：读取 BPF 对象路径
     Status Init(const ConfigValue& config) override {
         bpf_obj_path_ = config["bpf_object"].AsString("");
         return Status::Ok();
     }
 
+    // 启动：加载 BPF 程序或进入 /proc/net/tcp fallback
     Status Start() override {
         if (bpf_obj_path_.empty()) {
             IL_WARN("ebpf_net_tracer: no BPF object, using /proc/net/tcp fallback");
@@ -35,6 +53,7 @@ public:
         auto status = bpf_mgr_.LoadObject("net_tracer", bpf_obj_path_);
         if (!status.ok()) return status;
 
+        // 挂载 inet_sock_set_state tracepoint BPF 程序
         status = bpf_mgr_.AttachProgram("net_tracer", "trace_inet_sock_set_state");
         if (!status.ok()) return status;
 
@@ -63,6 +82,7 @@ public:
     }
 
 private:
+    // /proc/net/tcp 备选启动（当前仅设置状态）
     Status StartProcFallback() {
         running_ = true;
         return Status::Ok();
@@ -70,10 +90,11 @@ private:
 
     void PollLoop() {
         while (running_) {
-            ring_buffer__poll(ring_buf_, 100);
+            ring_buffer__poll(ring_buf_, 100 /* ms */);
         }
     }
 
+    // Ring Buffer 事件回调：将 BPF 事件转为 DataBatch Record
     static int HandleEvent(void* ctx, void* data, size_t size) {
         auto* self = static_cast<EbpfNetTracer*>(ctx);
         if (size < sizeof(il_net_event)) return 0;
@@ -82,6 +103,7 @@ private:
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
         auto& rec = batch->AddRecord();
 
+        // 二进制 IP 转字符串（IPv4 点分十进制）
         char saddr_str[INET_ADDRSTRLEN], daddr_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &event->saddr, saddr_str, sizeof(saddr_str));
         inet_ntop(AF_INET, &event->daddr, daddr_str, sizeof(daddr_str));
@@ -97,6 +119,7 @@ private:
         rec.SetField(batch->InternString("sport"), static_cast<uint64_t>(event->sport));
         rec.SetField(batch->InternString("dport"), static_cast<uint64_t>(event->dport));
 
+        // 事件类型映射
         const char* evt_types[] = {"connect", "accept", "close"};
         int idx = event->event_type < 3 ? event->event_type : 0;
         rec.SetField(batch->InternString("event"), batch->InternString(evt_types[idx]));

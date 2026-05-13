@@ -63,3 +63,17 @@ cc_library(
         "//src/plugin:manager",
     ],
 )
+
+cc_library(
+    name = "yaml_config",
+    hdrs = [
+        "config/yaml_config_loader.h",
+    ],
+    strip_include_prefix = "",
+    include_prefix = "core",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":common",
+        "@yaml_cpp//:yaml-cpp",
+    ],
+)

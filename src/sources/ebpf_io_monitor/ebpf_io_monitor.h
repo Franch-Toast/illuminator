@@ -1,3 +1,19 @@
+// ============================================================================
+// EbpfIoMonitor — 基于 eBPF 的块设备 I/O 延迟监控器（Push 模式）
+// ============================================================================
+//
+// 使用 eBPF tracepoint 监控块设备 I/O 请求的生命周期，
+// 在 block_rq_issue（请求发出）和 block_rq_complete（请求完成）两个点
+// 采集时间戳，计算 I/O 延迟。
+//
+// 输出 Record 指标：
+// ===================
+// 每条 I/O 事件记录包含：
+//   - 进程信息（pid, comm）
+//   - I/O 延迟（latency_us 微秒）
+//   - 操作信息（sector 扇区号, nr_sector 扇区数, rw 读/写）
+// ============================================================================
+
 #pragma once
 
 #include <cstring>
@@ -12,7 +28,6 @@
 
 namespace illuminator {
 
-// eBPF-based block I/O latency monitor.
 class EbpfIoMonitor : public SourcePlugin {
 public:
     const char* Name() const override { return "ebpf_io_monitor"; }
@@ -32,6 +47,8 @@ public:
 
         auto status = bpf_mgr_.LoadObject("bio_latency", bpf_obj_path_);
         if (!status.ok()) return status;
+
+        // 挂载 block_rq_issue 和 block_rq_complete 两个 tracepoint 探针
         status = bpf_mgr_.AttachPrograms("bio_latency",
             {"trace_block_rq_issue", "trace_block_rq_complete"});
         if (!status.ok()) return status;
@@ -59,6 +76,7 @@ public:
     }
 
 private:
+    // Ring Buffer 事件回调：将 BPF I/O 事件转为 DataBatch Record
     static int HandleEvent(void* ctx, void* data, size_t size) {
         auto* self = static_cast<EbpfIoMonitor*>(ctx);
         if (size < sizeof(il_bio_event)) return 0;
@@ -74,7 +92,7 @@ private:
                      batch->InternString(std::string_view(event->comm,
                          strnlen(event->comm, TASK_COMM_LEN))));
         rec.SetField(batch->InternString("latency_us"),
-                     static_cast<uint64_t>(event->latency_ns / 1000));
+                     static_cast<uint64_t>(event->latency_ns / 1000));  // ns → us
         rec.SetField(batch->InternString("sector"), event->sector);
         rec.SetField(batch->InternString("nr_sector"), static_cast<uint64_t>(event->nr_sector));
         rec.SetField(batch->InternString("rw"),
