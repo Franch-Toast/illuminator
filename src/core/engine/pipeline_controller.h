@@ -1,30 +1,29 @@
 // ============================================================================
-// Illuminator 流水线引擎 — Pipeline 和 PipelineController
+// Illuminator 流水线引擎 — Pipeline / PullScheduler / PipelineController
 // ============================================================================
 //
-// 异步三段式管道架构：
+// 分层混合线程模型：
 //
-//   Source ──→ AsyncChannel (LockFreeQueue) ──→ ProcessThread ──→ ThreadPool (Sinks)
+//   Layer 0 - Ingestion:
+//     Push Sources: eBPF 回调直接无锁入队
+//     Pull Sources: 全局 PullScheduler (1 thread) 统一调度所有 Pull 间隔
 //
-// 一、Pipeline 类 — 单条数据处理管道
-// ======================================
-// 每条 Pipeline 遵循固定的数据流向：
-//   Source → [AsyncChannel] → Processor₁ → ... → (Aggregator) → Sink₁, Sink₂, ...
+//   Layer 1 - Processing:
+//     每管道 1 个 process_thread (从 channel 消费 -> Processor 链 -> 分发)
+//     兼任 Aggregator flush 定时 (消除独立 flush_thread)
 //
-// 异步解耦设计：
-// --------
-// 1. Source 产生数据后通过 AsyncChannel 无锁入队（纳秒级 CAS）
-// 2. 独立的 process_thread_ 从 Channel 消费，运行 Processor 链
-// 3. 多 Sink 通过共享 ThreadPool 并行写入
-// 4. 水位线反压防止内存无限增长，Source 可感知背压状态
+//   Layer 2 - Delivery:
+//     共享 SinkPool (ThreadPool) 并行写多个 Sink
+//     单 Sink 快路径: 直接在 process_thread 中写
 //
-// 二、PipelineController 类 — 多管道管理器
-// ============================================
-// 管理全局共享的 Sink ThreadPool 和所有 Pipeline 实例。
+// 线程计数 (N 条管道):
+//   1 scheduler + N process_threads + M sink_workers
+//   典型 10 管道 = 1 + 10 + 4 = 15 线程 (对比原 30+ 线程)
 // ============================================================================
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -48,8 +47,10 @@
 
 namespace illuminator {
 
+class PipelineController;
+
 // ============================================================================
-// Pipeline — 单条异步数据处理管道
+// Pipeline - single async data processing pipeline
 // ============================================================================
 class Pipeline {
 public:
@@ -60,8 +61,6 @@ public:
     Pipeline& operator=(const Pipeline&) = delete;
 
     const std::string& name() const { return name_; }
-
-    // ---- 配置阶段 ----
 
     void SetSource(std::unique_ptr<SourcePlugin> source) {
         source_ = std::move(source);
@@ -81,8 +80,6 @@ public:
     }
 
     void SetSinkPool(ThreadPool* pool) { sink_pool_ = pool; }
-
-    // ---- 运行阶段 ----
 
     Status Start() {
         if (!source_) {
@@ -112,7 +109,6 @@ public:
 
         running_.store(true, std::memory_order_release);
 
-        // 启动 ProcessLoop 消费线程（所有模式都需要）
         process_thread_ = std::thread([this] {
             SetThreadName("il-" + name_.substr(0, 10) + "-p");
             ProcessLoop();
@@ -120,19 +116,7 @@ public:
 
         if (source_->IsPushMode()) {
             source_->SetCallback([this](DataBatchPtr batch) {
-                OnBatchReceived(std::move(batch));
-            });
-        } else {
-            collect_thread_ = std::thread([this] {
-                SetThreadName("il-" + name_.substr(0, 10) + "-c");
-                CollectLoop();
-            });
-        }
-
-        if (aggregator_) {
-            flush_thread_ = std::thread([this] {
-                SetThreadName("il-" + name_.substr(0, 10) + "-f");
-                FlushLoop();
+                Enqueue(std::move(batch));
             });
         }
 
@@ -144,19 +128,10 @@ public:
     Status Stop() {
         if (!running_.exchange(false)) return Status::Ok();
 
-        // 1. 停止 Source，防止新数据产生
         source_->Stop();
 
-        // 2. 等待采集线程退出（Pull 模式）
-        if (collect_thread_.joinable()) collect_thread_.join();
-
-        // 3. 等待处理线程退出（会 drain 残余数据）
         if (process_thread_.joinable()) process_thread_.join();
 
-        // 4. 等待聚合器刷新线程退出
-        if (flush_thread_.joinable()) flush_thread_.join();
-
-        // 5. 关闭各级插件
         for (auto& p : processors_) p->Stop();
         if (aggregator_) aggregator_->Stop();
         for (auto& s : sinks_) {
@@ -175,13 +150,28 @@ public:
 
     bool IsRunning() const { return running_.load(std::memory_order_acquire); }
 
-    // ---- 运行统计 ----
+    void Enqueue(DataBatchPtr batch) {
+        if (!batch || batch->Empty()) return;
+
+        if (!ingest_channel_.TryEnqueue(std::move(batch))) {
+            IL_WARN("Pipeline '{}': channel full, data dropped", name_);
+        }
+
+        bool bp = ingest_channel_.IsBackpressured();
+        if (bp != last_backpressure_state_) {
+            last_backpressure_state_ = bp;
+            source_->OnBackpressure(bp);
+            if (bp) {
+                IL_WARN("Pipeline '{}': backpressure ON", name_);
+            } else {
+                IL_INFO("Pipeline '{}': backpressure OFF", name_);
+            }
+        }
+    }
 
     uint64_t BatchesProcessed() const { return batches_processed_.load(); }
     uint64_t RecordsProcessed() const { return records_processed_.load(); }
     uint64_t ErrorCount() const { return error_count_.load(); }
-
-    // ---- Channel 统计（供 API 暴露） ----
 
     uint64_t ChannelEnqueued() const {
         return ingest_channel_.stats().enqueued.load(std::memory_order_relaxed);
@@ -199,7 +189,6 @@ public:
     size_t ChannelCapacity() const { return ingest_channel_.capacity(); }
     bool ChannelBackpressured() const { return ingest_channel_.IsBackpressured(); }
 
-    // ---- 手动运行处理器链（供 HTTP API 直接调用） ----
     StatusOr<DataBatchPtr> RunProcessors(DataBatchPtr batch) {
         for (auto& proc : processors_) {
             auto result = proc->Process(std::move(batch));
@@ -211,53 +200,42 @@ public:
     }
 
 private:
-    // ---- 数据入队（Source 回调或 CollectLoop 调用） ----
-    // 无锁 CAS 入队，纳秒级延迟。
-    // 同时检测反压状态并通知 Source。
-    void OnBatchReceived(DataBatchPtr batch) {
-        if (!batch || batch->Empty()) return;
-
-        if (!ingest_channel_.TryEnqueue(std::move(batch))) {
-            IL_WARN("Pipeline '{}': channel full, data dropped", name_);
-        }
-
-        // 反压通知：状态变化时通知 Source
-        bool bp = ingest_channel_.IsBackpressured();
-        if (bp != last_backpressure_state_) {
-            last_backpressure_state_ = bp;
-            source_->OnBackpressure(bp);
-            if (bp) {
-                IL_WARN("Pipeline '{}': backpressure ON", name_);
-            } else {
-                IL_INFO("Pipeline '{}': backpressure OFF", name_);
-            }
-        }
-    }
-
-    // ---- Pull 模式采集循环 ----
-    void CollectLoop() {
-        while (running_.load(std::memory_order_acquire)) {
-            auto result = source_->Collect();
-            if (result.ok()) {
-                OnBatchReceived(std::move(result.value()));
-            }
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(source_->IntervalMs()));
-        }
-    }
-
-    // ---- 异步处理循环（独立线程） ----
-    // 从 AsyncChannel 消费数据，运行 Processor 链，分发到 Sinks。
-    // 每 100 次循环检查一次 ResourceLimiter。
+    // Unified processing loop: channel consume + Processor chain + Sink dispatch
+    // + Aggregator flush timer (eliminates dedicated flush_thread_)
     void ProcessLoop() {
+        using Clock = std::chrono::steady_clock;
         uint32_t loop_count = 0;
+
+        auto next_flush = aggregator_
+            ? Clock::now() + std::chrono::milliseconds(aggregator_->FlushIntervalMs())
+            : Clock::time_point::max();
+
         while (running_.load(std::memory_order_acquire)) {
-            auto batch = ingest_channel_.Dequeue(std::chrono::milliseconds(100));
+            auto now = Clock::now();
+            auto wait = std::chrono::milliseconds(100);
+
+            if (aggregator_) {
+                auto until_flush = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(next_flush - now);
+                if (until_flush.count() <= 0) {
+                    FlushAggregator();
+                    next_flush = Clock::now() +
+                        std::chrono::milliseconds(aggregator_->FlushIntervalMs());
+                    until_flush = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(next_flush - Clock::now());
+                }
+                if (until_flush < wait && until_flush.count() > 0) {
+                    wait = std::chrono::milliseconds(until_flush.count());
+                }
+            }
+
+            auto batch = ingest_channel_.Dequeue(wait);
             if (batch) {
                 ProcessAndDeliver(std::move(*batch));
             }
 
             if (++loop_count % 100 == 0) {
+                SyncChannelMetrics();
                 auto usage = ResourceLimiter::Instance().Check();
                 if (usage.memory_exceeded) {
                     IL_WARN("Pipeline '{}': memory limit exceeded (RSS={} bytes)",
@@ -265,13 +243,16 @@ private:
                 }
             }
         }
-        // 优雅停机：drain channel 中的残余数据
+
+        // Graceful shutdown: drain remaining batches
         while (auto batch = ingest_channel_.TryDequeue()) {
             ProcessAndDeliver(std::move(*batch));
         }
+        if (aggregator_) {
+            FlushAggregator();
+        }
     }
 
-    // ---- 处理 + 分发（单线程，无需锁） ----
     void ProcessAndDeliver(DataBatchPtr batch) {
         records_processed_.fetch_add(batch->Size(), std::memory_order_relaxed);
 
@@ -294,18 +275,7 @@ private:
         batches_processed_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // ---- Aggregator 刷新循环 ----
-    void FlushLoop() {
-        while (running_.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(aggregator_->FlushIntervalMs()));
-            auto result = aggregator_->Flush();
-            if (result.ok()) {
-                for (auto& batch : result.value()) {
-                    DeliverToSinks(std::move(batch));
-                }
-            }
-        }
+    void FlushAggregator() {
         auto result = aggregator_->Flush();
         if (result.ok()) {
             for (auto& batch : result.value()) {
@@ -314,8 +284,6 @@ private:
         }
     }
 
-    // ---- 分发数据到所有 Sink ----
-    // 单 Sink 走快路径；多 Sink 通过 ThreadPool 并行写入。
     void DeliverToSinks(DataBatchPtr batch) {
         if (sinks_.size() == 1) {
             auto status = sinks_[0]->Write(batch);
@@ -328,7 +296,6 @@ private:
         }
 
         if (!sink_pool_ || sinks_.size() <= 1) {
-            // 无线程池时回退串行
             for (auto& sink : sinks_) {
                 auto status = sink->Write(batch);
                 if (!status.ok()) {
@@ -340,7 +307,6 @@ private:
             return;
         }
 
-        // 多 Sink 并行写入
         std::vector<std::future<Status>> futures;
         futures.reserve(sinks_.size());
 
@@ -362,7 +328,24 @@ private:
         }
     }
 
-    // ============ 成员变量 ============
+    void SyncChannelMetrics() {
+        auto& m = InternalMetrics::Instance();
+        const auto& s = ingest_channel_.stats();
+        std::string prefix = "pipeline_" + name_ + "_channel_";
+        m.SetGauge(prefix + "size", static_cast<double>(ingest_channel_.SizeApprox()));
+        m.SetGauge(prefix + "enqueued", static_cast<double>(
+            s.enqueued.load(std::memory_order_relaxed)));
+        m.SetGauge(prefix + "dequeued", static_cast<double>(
+            s.dequeued.load(std::memory_order_relaxed)));
+        m.SetGauge(prefix + "dropped", static_cast<double>(
+            s.dropped.load(std::memory_order_relaxed)));
+        m.SetGauge(prefix + "backpressure_events", static_cast<double>(
+            s.backpressure_events.load(std::memory_order_relaxed)));
+        m.SetGauge(prefix + "utilization",
+            ingest_channel_.capacity() > 0
+            ? static_cast<double>(ingest_channel_.SizeApprox()) / ingest_channel_.capacity()
+            : 0.0);
+    }
 
     std::string name_;
     std::atomic<bool> running_{false};
@@ -372,12 +355,10 @@ private:
     std::unique_ptr<AggregatorPlugin> aggregator_;
     std::vector<std::unique_ptr<SinkPlugin>> sinks_;
 
-    AsyncChannel<4096> ingest_channel_;   // Source → ProcessThread 异步通道
-    ThreadPool* sink_pool_ = nullptr;     // 共享 Sink 线程池（PipelineController 拥有）
+    AsyncChannel<4096> ingest_channel_;
+    ThreadPool* sink_pool_ = nullptr;
 
-    std::thread collect_thread_;    // Pull 模式采集线程
-    std::thread process_thread_;    // 异步处理线程
-    std::thread flush_thread_;      // Aggregator 刷新线程
+    std::thread process_thread_;
 
     bool last_backpressure_state_ = false;
 
@@ -387,7 +368,80 @@ private:
 };
 
 // ============================================================================
-// PipelineController — 多管道管理器
+// PullScheduler - unified scheduler for all Pull-mode Sources
+// ============================================================================
+// Replaces N collect_threads with 1 scheduler thread that calls
+// Source::Collect() at each source's configured interval.
+class PullScheduler {
+public:
+    struct Entry {
+        Pipeline* pipeline;
+        SourcePlugin* source;
+        uint32_t interval_ms;
+        std::chrono::steady_clock::time_point next_fire;
+    };
+
+    void Register(Pipeline* pipeline, SourcePlugin* source) {
+        entries_.push_back({
+            pipeline, source, source->IntervalMs(),
+            std::chrono::steady_clock::now()
+        });
+    }
+
+    void Start() {
+        if (entries_.empty()) return;
+        running_.store(true, std::memory_order_release);
+        thread_ = std::thread([this] {
+            SetThreadName("il-scheduler");
+            Run();
+        });
+        IL_INFO("PullScheduler started ({} sources)", entries_.size());
+    }
+
+    void Stop() {
+        if (!running_.exchange(false)) return;
+        if (thread_.joinable()) thread_.join();
+        IL_INFO("PullScheduler stopped");
+    }
+
+    size_t EntryCount() const { return entries_.size(); }
+
+private:
+    void Run() {
+        while (running_.load(std::memory_order_acquire)) {
+            auto now = std::chrono::steady_clock::now();
+            auto next_wake = now + std::chrono::milliseconds(500);
+
+            for (auto& entry : entries_) {
+                if (!entry.pipeline->IsRunning()) continue;
+
+                if (now >= entry.next_fire) {
+                    auto result = entry.source->Collect();
+                    if (result.ok()) {
+                        entry.pipeline->Enqueue(std::move(*result));
+                    }
+                    entry.next_fire = now +
+                        std::chrono::milliseconds(entry.interval_ms);
+                }
+                if (entry.next_fire < next_wake) {
+                    next_wake = entry.next_fire;
+                }
+            }
+
+            auto sleep_dur = next_wake - std::chrono::steady_clock::now();
+            if (sleep_dur.count() > 0) {
+                std::this_thread::sleep_for(sleep_dur);
+            }
+        }
+    }
+
+    std::vector<Entry> entries_;
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+};
+
+// ============================================================================
+// PipelineController - multi-pipeline manager
 // ============================================================================
 class PipelineController {
 public:
@@ -401,7 +455,6 @@ public:
         return pipelines_;
     }
 
-    // 创建共享 Sink 线程池并关联到所有管道
     void InitSinkPool(size_t num_threads = 0) {
         if (num_threads == 0) {
             num_threads = std::max(2u, std::thread::hardware_concurrency() / 2);
@@ -413,9 +466,12 @@ public:
         IL_INFO("Sink thread pool initialized with {} threads", num_threads);
     }
 
+    PullScheduler& GetScheduler() { return scheduler_; }
+
 private:
     std::vector<std::unique_ptr<Pipeline>> pipelines_;
     std::unique_ptr<ThreadPool> sink_pool_;
+    PullScheduler scheduler_;
 };
 
 }  // namespace illuminator

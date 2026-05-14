@@ -574,6 +574,22 @@ private:
         return 0;
     }
 
+    // ---- 反压响应 ----
+    // 反压激活时降低采样频率至原始值的 1/4，解除时恢复。
+    // 通过 PERF_EVENT_IOC_PERIOD 修改每个 perf_event 的采样周期。
+    void OnBackpressure(bool active) override {
+        uint64_t new_freq = active
+            ? std::max(1, frequency_hz_ / 4)
+            : static_cast<uint64_t>(frequency_hz_);
+
+        for (int fd : perf_fds_) {
+            uint64_t period = 1000000000ULL / new_freq;  // ns per sample
+            ioctl(fd, PERF_EVENT_IOC_PERIOD, &period);
+        }
+        IL_INFO("cpu_profiler: backpressure {} → freq {}Hz",
+                active ? "ON" : "OFF", new_freq);
+    }
+
     // ---- 配置参数 ----
     int frequency_hz_ = 49;                   // 采样频率（Hz）
     uint32_t aggregate_interval_ms_ = 1000;   // 聚合间隔（毫秒）
