@@ -10,6 +10,8 @@ import {
   Legend,
 } from 'recharts'
 import { useCpuUtilization } from '../hooks/useCpuMetrics'
+import { usePipelines } from '../hooks/useApi'
+import { card as themeCard, colors } from '../styles/theme'
 
 const card: React.CSSProperties = {
   background: '#1a1d23',
@@ -201,6 +203,109 @@ export default function CpuOverview() {
             {data.runqueue ? `${data.runqueue.procs_running} / ${data.runqueue.procs_blocked}` : '—'}
           </div>
         </div>
+      </div>
+
+      {/* Pipeline Channel 状态面板 */}
+      <ChannelStatsPanel />
+    </div>
+  )
+}
+
+function ChannelStatsPanel() {
+  const { pipelines } = usePipelines(3000)
+  const withChannel = pipelines.filter(p => p.channel)
+
+  if (withChannel.length === 0) return null
+
+  return (
+    <div style={{ marginTop: 20 }}>
+      <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 600, color: colors.textPrimary }}>
+        Pipeline Channels
+      </h3>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+              {['Pipeline', 'Capacity', 'Queue', 'Utilization', 'Enqueued', 'Dequeued',
+                'Dropped', 'Backpressure'].map(h => (
+                <th key={h} style={{
+                  padding: '8px 12px', textAlign: 'left',
+                  color: colors.textMuted, fontWeight: 500, fontSize: 11,
+                  textTransform: 'uppercase', letterSpacing: '0.05em',
+                }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {withChannel.map(p => {
+              const ch = p.channel!
+              const utilPct = ch.capacity > 0
+                ? (ch.size / ch.capacity) * 100 : 0
+              const barColor = utilPct > 80 ? colors.danger
+                : utilPct > 50 ? colors.amber : colors.success
+              return (
+                <tr key={p.name} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
+                  <td style={{ padding: '8px 12px', fontWeight: 600 }}>{p.name}</td>
+                  <td style={{ padding: '8px 12px', color: colors.textSecondary }}>
+                    {ch.capacity.toLocaleString()}
+                  </td>
+                  <td style={{ padding: '8px 12px', color: colors.textSecondary }}>
+                    {ch.size.toLocaleString()}
+                  </td>
+                  <td style={{ padding: '8px 12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{
+                        width: 80, height: 6, background: colors.cardBorder,
+                        borderRadius: 3, overflow: 'hidden',
+                      }}>
+                        <div style={{
+                          width: `${Math.min(100, utilPct)}%`, height: '100%',
+                          background: barColor, borderRadius: 3,
+                          transition: 'width 0.3s',
+                        }} />
+                      </div>
+                      <span style={{ fontSize: 11, color: colors.textMuted }}>
+                        {utilPct.toFixed(1)}%
+                      </span>
+                    </div>
+                  </td>
+                  <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: colors.textSecondary }}>
+                    {ch.enqueued.toLocaleString()}
+                  </td>
+                  <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: colors.textSecondary }}>
+                    {ch.dequeued.toLocaleString()}
+                  </td>
+                  <td style={{
+                    padding: '8px 12px', fontFamily: 'monospace',
+                    color: ch.dropped > 0 ? colors.danger : colors.textSecondary,
+                    fontWeight: ch.dropped > 0 ? 700 : 400,
+                  }}>
+                    {ch.dropped.toLocaleString()}
+                  </td>
+                  <td style={{ padding: '8px 12px' }}>
+                    {ch.backpressured ? (
+                      <span style={{
+                        padding: '2px 8px', borderRadius: 4, fontSize: 11,
+                        background: colors.dangerBg, color: colors.danger,
+                        border: `1px solid ${colors.dangerBorder}`,
+                      }}>ACTIVE</span>
+                    ) : (
+                      <span style={{
+                        padding: '2px 8px', borderRadius: 4, fontSize: 11,
+                        color: colors.textMuted,
+                      }}>—</span>
+                    )}
+                    {ch.backpressure_events > 0 && (
+                      <span style={{ marginLeft: 6, fontSize: 11, color: colors.textMuted }}>
+                        ({ch.backpressure_events}x)
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   )

@@ -99,12 +99,13 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
         pipelines_.push_back(std::move(pipeline));
     }
 
+    // 所有管道构建完成后，初始化共享 Sink 线程池
+    size_t sink_threads = config.engine.sink_pool_threads;
+    InitSinkPool(sink_threads);
+
     return Status::Ok();
 }
 
-// ---- 启动所有管道 ----
-// 如果某条管道启动失败，会停止之前已启动的所有管道，
-// 避免留下部分运行的不一致状态。
 Status PipelineController::StartAll() {
     for (auto& pipeline : pipelines_) {
         auto status = pipeline->Start();

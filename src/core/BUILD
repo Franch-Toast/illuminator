@@ -21,6 +21,7 @@ cc_library(
     name = "memory",
     hdrs = [
         "memory/arena.h",
+        "memory/lock_free_queue.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -31,6 +32,7 @@ cc_library(
     name = "threading",
     hdrs = [
         "threading/thread_util.h",
+        "threading/thread_pool.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -55,6 +57,7 @@ cc_library(
     name = "engine",
     srcs = ["engine/pipeline_controller.cc"],
     hdrs = [
+        "engine/async_channel.h",
         "engine/pipeline_controller.h",
     ],
     strip_include_prefix = "",

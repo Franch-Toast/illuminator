@@ -106,6 +106,26 @@ private:
             }
         }
 
+        // 解析 [engine] 节
+        if (auto engine = root["engine"]) {
+            if (engine["sink_pool_threads"])
+                config.engine.sink_pool_threads =
+                    engine["sink_pool_threads"].as<unsigned>(0);
+            if (auto ch = engine["channel"]) {
+                if (ch["size"])
+                    config.engine.channel.size = ch["size"].as<std::string>("medium");
+                if (ch["drop_policy"])
+                    config.engine.channel.drop_policy =
+                        ch["drop_policy"].as<std::string>("drop_newest");
+                if (ch["backpressure_high"])
+                    config.engine.channel.backpressure_high =
+                        ch["backpressure_high"].as<double>(0.8);
+                if (ch["backpressure_low"])
+                    config.engine.channel.backpressure_low =
+                        ch["backpressure_low"].as<double>(0.2);
+            }
+        }
+
         // 解析 [pipelines] 节
         // YAML 格式示例：
         //   pipelines:

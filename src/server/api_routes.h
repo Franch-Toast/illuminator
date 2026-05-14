@@ -45,6 +45,15 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                         {"batches", p->BatchesProcessed()},
                         {"records", p->RecordsProcessed()},
                         {"errors", p->ErrorCount()},
+                        {"channel", {
+                            {"capacity", p->ChannelCapacity()},
+                            {"size", p->ChannelSize()},
+                            {"enqueued", p->ChannelEnqueued()},
+                            {"dequeued", p->ChannelDequeued()},
+                            {"dropped", p->ChannelDropped()},
+                            {"backpressure_events", p->ChannelBackpressureEvents()},
+                            {"backpressured", p->ChannelBackpressured()},
+                        }},
                     });
                 }
                 res.set_content(
@@ -156,6 +165,30 @@ inline void RegisterApiRoutes(httplib::Server& srv,
     srv.Get("/api/v1/cpu/sched/wakeups",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("sched_analysis", "wakeups", req, res);
+            });
+
+    // Channel stats endpoint
+    srv.Get("/api/v1/channel_stats",
+            [&controller](const httplib::Request&, httplib::Response& res) {
+                json arr = json::array();
+                for (auto& p : controller.Pipelines()) {
+                    arr.push_back({
+                        {"pipeline", p->name()},
+                        {"capacity", p->ChannelCapacity()},
+                        {"size", p->ChannelSize()},
+                        {"utilization", p->ChannelCapacity() > 0
+                            ? static_cast<double>(p->ChannelSize()) / p->ChannelCapacity()
+                            : 0.0},
+                        {"enqueued", p->ChannelEnqueued()},
+                        {"dequeued", p->ChannelDequeued()},
+                        {"dropped", p->ChannelDropped()},
+                        {"backpressure_events", p->ChannelBackpressureEvents()},
+                        {"backpressured", p->ChannelBackpressured()},
+                    });
+                }
+                res.set_content(
+                    json{{"channels", std::move(arr)}}.dump() + "\n",
+                    "application/json");
             });
 
     // Metrics endpoints

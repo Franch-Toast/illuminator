@@ -24,11 +24,23 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 // 管道运行信息（对应后端 Pipeline 的统计字段）
 export interface PipelineInfo {
-  name: string      // 管道名称
-  running: boolean  // 是否正在运行
-  batches: number   // 已处理的批次数
-  records: number   // 已处理的记录数
-  errors: number    // 错误累计次数
+  name: string
+  running: boolean
+  batches: number
+  records: number
+  errors: number
+  channel?: ChannelInfo
+}
+
+// 异步通道统计（对应后端 AsyncChannel 的 Stats）
+export interface ChannelInfo {
+  capacity: number
+  size: number
+  enqueued: number
+  dequeued: number
+  dropped: number
+  backpressure_events: number
+  backpressured: boolean
 }
 
 // ---- usePipelines: 定期获取管道状态 ----

@@ -49,6 +49,11 @@ public:
     virtual bool IsPushMode() const { return false; }
     virtual uint32_t IntervalMs() const { return 1000; }
 
+    // 反压通知：当下游处理速度跟不上时，Pipeline 会调用此方法。
+    // active=true 表示进入反压状态，Source 应降低采集频率或丢弃低优先级数据。
+    // active=false 表示反压解除，Source 可恢复正常速率。
+    virtual void OnBackpressure(bool /*active*/) {}
+
     // Plugin-specific query API — eliminates need for dynamic_cast in HTTP handlers.
     // Subclasses override to expose custom data endpoints (e.g. history, events).
     virtual StatusOr<std::string> QueryExtra(

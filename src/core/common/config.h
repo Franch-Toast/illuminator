@@ -135,21 +135,36 @@ struct PipelineConfig {
     std::vector<StageConfig> sinks;             // 数据出口（至少一个）
 };
 
+// ---- EngineConfig: 管道引擎全局配置 ----
+struct EngineConfig {
+    uint32_t sink_pool_threads = 0;  // Sink 线程池大小（0 = auto: CPU核数/2）
+
+    struct ChannelConfig {
+        std::string size = "medium";            // small(1024) | medium(4096) | large(16384)
+        std::string drop_policy = "drop_newest"; // drop_newest | drop_oldest
+        double backpressure_high = 0.8;
+        double backpressure_low = 0.2;
+    } channel;
+};
+
 // ---- GlobalConfig: 全局配置结构 ----
 //
 // 根级配置，包含整个 Illuminator 实例的配置信息
 struct GlobalConfig {
     // 全局设置
-    std::string log_level = "info";                     // 默认日志级别
-    std::string data_dir = "/var/lib/illuminator";      // 默认数据目录
-    std::vector<std::string> plugin_dirs;                // SO 插件搜索路径列表
+    std::string log_level = "info";
+    std::string data_dir = "/var/lib/illuminator";
+    std::vector<std::string> plugin_dirs;
 
     // 服务器配置
     struct ServerConfig {
-        bool http_enabled = true;                       // 是否启用 HTTP 服务
-        std::string http_listen = "0.0.0.0:9527";      // HTTP 监听地址
-        bool ws_enabled = true;                         // 是否启用 WebSocket
+        bool http_enabled = true;
+        std::string http_listen = "0.0.0.0:9527";
+        bool ws_enabled = true;
     } server;
+
+    // 管道引擎配置
+    EngineConfig engine;
 
     // 关联的管道配置列表
     std::vector<PipelineConfig> pipelines;
