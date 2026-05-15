@@ -108,6 +108,9 @@ private:
 
         // 解析 [engine] 节
         if (auto engine = root["engine"]) {
+            if (engine["collect_pool_threads"])
+                config.engine.collect_pool_threads =
+                    engine["collect_pool_threads"].as<unsigned>(0);
             if (engine["sink_pool_threads"])
                 config.engine.sink_pool_threads =
                     engine["sink_pool_threads"].as<unsigned>(0);

@@ -137,7 +137,8 @@ struct PipelineConfig {
 
 // ---- EngineConfig: 管道引擎全局配置 ----
 struct EngineConfig {
-    uint32_t sink_pool_threads = 0;  // Sink 线程池大小（0 = auto: CPU核数/2）
+    uint32_t collect_pool_threads = 0;  // CollectPool 线程数（0 = auto: 2）
+    uint32_t sink_pool_threads = 0;     // SinkPool 线程数（0 = auto: CPU核数/2）
 
     struct ChannelConfig {
         std::string size = "medium";            // small(1024) | medium(4096) | large(16384)

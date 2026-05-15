@@ -1,29 +1,30 @@
 // ============================================================================
-// Illuminator 流水线引擎 — Pipeline / PullScheduler / PipelineController
+// Illuminator Pipeline v3 — 事件驱动异步管道引擎
 // ============================================================================
 //
-// 分层混合线程模型：
+// 架构:
+//   TimerWheel (1 thread)  — 全局定时调度，触发 Collect 和 Flush 事件
+//   CollectPool (M threads) — 并行执行 Source::Collect()
+//   ProcessThread (1 per pipeline) — 纯事件处理器 (variant dispatch)
+//   SinkPool (K threads)   — 并行执行 Sink::Write()
 //
-//   Layer 0 - Ingestion:
-//     Push Sources: eBPF 回调直接无锁入队
-//     Pull Sources: 全局 PullScheduler (1 thread) 统一调度所有 Pull 间隔
+// 数据流:
+//   Push Source → channel.TryEnqueue(DataBatch)  ─┐
+//   TimerWheel → CollectPool → src.Collect()     ─┤→ AsyncChannel<ChannelItem>
+//   TimerWheel → channel.InjectFlush()           ─┘        │
+//                                                          ▼
+//                                                   ProcessThread
+//                                                   match event:
+//                                                     DataBatch  → Process → Sink
+//                                                     Sentinel   → Flush   → Sink
 //
-//   Layer 1 - Processing:
-//     每管道 1 个 process_thread (从 channel 消费 -> Processor 链 -> 分发)
-//     兼任 Aggregator flush 定时 (消除独立 flush_thread)
-//
-//   Layer 2 - Delivery:
-//     共享 SinkPool (ThreadPool) 并行写多个 Sink
-//     单 Sink 快路径: 直接在 process_thread 中写
-//
-// 线程计数 (N 条管道):
-//   1 scheduler + N process_threads + M sink_workers
-//   典型 10 管道 = 1 + 10 + 4 = 15 线程 (对比原 30+ 线程)
+// 线程计数 (N pipelines):
+//   1 timer + M collect + N process + K sink
+//   典型 10 管道 = 1 + 2 + 10 + 4 = 17 线程
 // ============================================================================
 
 #pragma once
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -38,6 +39,7 @@
 #include "core/common/status.h"
 #include "core/engine/async_channel.h"
 #include "core/engine/data_batch.h"
+#include "core/engine/timer_wheel.h"
 #include "core/threading/thread_pool.h"
 #include "core/threading/thread_util.h"
 #include "plugin/api/source_plugin.h"
@@ -50,7 +52,7 @@ namespace illuminator {
 class PipelineController;
 
 // ============================================================================
-// Pipeline - single async data processing pipeline
+// Pipeline — 单条异步数据处理管道
 // ============================================================================
 class Pipeline {
 public:
@@ -120,7 +122,7 @@ public:
             });
         }
 
-        IL_INFO("Pipeline '{}' started (async, channel capacity={})",
+        IL_INFO("Pipeline '{}' started (v3 event-driven, channel capacity={})",
                 name_, ingest_channel_.capacity());
         return Status::Ok();
     }
@@ -140,11 +142,13 @@ public:
         }
 
         auto& ch = ingest_channel_.stats();
-        IL_INFO("Pipeline '{}' stopped (enqueued={}, dequeued={}, dropped={})",
+        IL_INFO("Pipeline '{}' stopped (enqueued={}, dequeued={}, dropped={}, "
+                "flush_injected={})",
                 name_,
                 ch.enqueued.load(std::memory_order_relaxed),
                 ch.dequeued.load(std::memory_order_relaxed),
-                ch.dropped.load(std::memory_order_relaxed));
+                ch.dropped.load(std::memory_order_relaxed),
+                ch.flush_injected.load(std::memory_order_relaxed));
         return Status::Ok();
     }
 
@@ -169,6 +173,17 @@ public:
         }
     }
 
+    void InjectFlush() {
+        if (!ingest_channel_.InjectFlush()) {
+            IL_WARN("Pipeline '{}': failed to inject FlushSentinel", name_);
+        }
+    }
+
+    bool HasAggregator() const { return aggregator_ != nullptr; }
+    uint32_t FlushIntervalMs() const {
+        return aggregator_ ? aggregator_->FlushIntervalMs() : 0;
+    }
+
     uint64_t BatchesProcessed() const { return batches_processed_.load(); }
     uint64_t RecordsProcessed() const { return records_processed_.load(); }
     uint64_t ErrorCount() const { return error_count_.load(); }
@@ -181,6 +196,9 @@ public:
     }
     uint64_t ChannelDropped() const {
         return ingest_channel_.stats().dropped.load(std::memory_order_relaxed);
+    }
+    uint64_t ChannelFlushInjected() const {
+        return ingest_channel_.stats().flush_injected.load(std::memory_order_relaxed);
     }
     uint64_t ChannelBackpressureEvents() const {
         return ingest_channel_.stats().backpressure_events.load(std::memory_order_relaxed);
@@ -200,39 +218,29 @@ public:
     }
 
 private:
-    // Unified processing loop: channel consume + Processor chain + Sink dispatch
-    // + Aggregator flush timer (eliminates dedicated flush_thread_)
+    // ====================================================================
+    // ProcessLoop — 纯事件处理器
+    // 只做: Dequeue → variant dispatch (HandleData | HandleFlush)
+    // 不做: I/O, 定时器管理, 调度决策
+    // ====================================================================
     void ProcessLoop() {
-        using Clock = std::chrono::steady_clock;
         uint32_t loop_count = 0;
 
-        auto next_flush = aggregator_
-            ? Clock::now() + std::chrono::milliseconds(aggregator_->FlushIntervalMs())
-            : Clock::time_point::max();
-
         while (running_.load(std::memory_order_acquire)) {
-            auto now = Clock::now();
-            auto wait = std::chrono::milliseconds(100);
-
-            if (aggregator_) {
-                auto until_flush = std::chrono::duration_cast<
-                    std::chrono::milliseconds>(next_flush - now);
-                if (until_flush.count() <= 0) {
-                    FlushAggregator();
-                    next_flush = Clock::now() +
-                        std::chrono::milliseconds(aggregator_->FlushIntervalMs());
-                    until_flush = std::chrono::duration_cast<
-                        std::chrono::milliseconds>(next_flush - Clock::now());
-                }
-                if (until_flush < wait && until_flush.count() > 0) {
-                    wait = std::chrono::milliseconds(until_flush.count());
-                }
+            auto item = ingest_channel_.Dequeue(std::chrono::milliseconds(100));
+            if (!item) {
+                if (++loop_count % 100 == 0) SyncChannelMetrics();
+                continue;
             }
 
-            auto batch = ingest_channel_.Dequeue(wait);
-            if (batch) {
-                ProcessAndDeliver(std::move(*batch));
-            }
+            std::visit(Overloaded{
+                [this](DataBatchPtr& batch) {
+                    HandleData(std::move(batch));
+                },
+                [this](FlushSentinel&) {
+                    HandleFlush();
+                },
+            }, *item);
 
             if (++loop_count % 100 == 0) {
                 SyncChannelMetrics();
@@ -244,16 +252,10 @@ private:
             }
         }
 
-        // Graceful shutdown: drain remaining batches
-        while (auto batch = ingest_channel_.TryDequeue()) {
-            ProcessAndDeliver(std::move(*batch));
-        }
-        if (aggregator_) {
-            FlushAggregator();
-        }
+        Drain();
     }
 
-    void ProcessAndDeliver(DataBatchPtr batch) {
+    void HandleData(DataBatchPtr batch) {
         records_processed_.fetch_add(batch->Size(), std::memory_order_relaxed);
 
         for (auto& proc : processors_) {
@@ -269,33 +271,39 @@ private:
         if (aggregator_) {
             aggregator_->Add(std::move(batch));
         } else {
-            DeliverToSinks(std::move(batch));
+            SubmitToSinks(std::move(batch));
         }
 
         batches_processed_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void FlushAggregator() {
+    void HandleFlush() {
+        if (!aggregator_) return;
+
         auto result = aggregator_->Flush();
         if (result.ok()) {
             for (auto& batch : result.value()) {
-                DeliverToSinks(std::move(batch));
+                SubmitToSinks(std::move(batch));
             }
         }
     }
 
-    void DeliverToSinks(DataBatchPtr batch) {
-        if (sinks_.size() == 1) {
-            auto status = sinks_[0]->Write(batch);
-            if (!status.ok()) {
-                IL_WARN("Sink write error in pipeline '{}': {}",
-                        name_, status.message());
-                error_count_.fetch_add(1, std::memory_order_relaxed);
-            }
-            return;
+    void Drain() {
+        while (auto item = ingest_channel_.TryDequeue()) {
+            std::visit(Overloaded{
+                [this](DataBatchPtr& batch) {
+                    HandleData(std::move(batch));
+                },
+                [this](FlushSentinel&) {
+                    HandleFlush();
+                },
+            }, *item);
         }
+        if (aggregator_) HandleFlush();
+    }
 
-        if (!sink_pool_ || sinks_.size() <= 1) {
+    void SubmitToSinks(DataBatchPtr batch) {
+        if (!sink_pool_) {
             for (auto& sink : sinks_) {
                 auto status = sink->Write(batch);
                 if (!status.ok()) {
@@ -307,24 +315,17 @@ private:
             return;
         }
 
-        std::vector<std::future<Status>> futures;
-        futures.reserve(sinks_.size());
-
         for (auto& sink : sinks_) {
-            futures.push_back(sink_pool_->Submit(
-                [&sink, batch]() -> Status {
-                    return sink->Write(batch);
+            sink_pool_->Submit(
+                [sink_ptr = sink.get(), batch, this]() -> void {
+                    auto status = sink_ptr->Write(batch);
+                    if (!status.ok()) {
+                        IL_WARN("Sink write error in pipeline '{}': {}",
+                                name_, status.message());
+                        error_count_.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-            ));
-        }
-
-        for (auto& f : futures) {
-            auto status = f.get();
-            if (!status.ok()) {
-                IL_WARN("Sink write error in pipeline '{}': {}",
-                        name_, status.message());
-                error_count_.fetch_add(1, std::memory_order_relaxed);
-            }
+            );
         }
     }
 
@@ -339,6 +340,8 @@ private:
             s.dequeued.load(std::memory_order_relaxed)));
         m.SetGauge(prefix + "dropped", static_cast<double>(
             s.dropped.load(std::memory_order_relaxed)));
+        m.SetGauge(prefix + "flush_injected", static_cast<double>(
+            s.flush_injected.load(std::memory_order_relaxed)));
         m.SetGauge(prefix + "backpressure_events", static_cast<double>(
             s.backpressure_events.load(std::memory_order_relaxed)));
         m.SetGauge(prefix + "utilization",
@@ -368,80 +371,7 @@ private:
 };
 
 // ============================================================================
-// PullScheduler - unified scheduler for all Pull-mode Sources
-// ============================================================================
-// Replaces N collect_threads with 1 scheduler thread that calls
-// Source::Collect() at each source's configured interval.
-class PullScheduler {
-public:
-    struct Entry {
-        Pipeline* pipeline;
-        SourcePlugin* source;
-        uint32_t interval_ms;
-        std::chrono::steady_clock::time_point next_fire;
-    };
-
-    void Register(Pipeline* pipeline, SourcePlugin* source) {
-        entries_.push_back({
-            pipeline, source, source->IntervalMs(),
-            std::chrono::steady_clock::now()
-        });
-    }
-
-    void Start() {
-        if (entries_.empty()) return;
-        running_.store(true, std::memory_order_release);
-        thread_ = std::thread([this] {
-            SetThreadName("il-scheduler");
-            Run();
-        });
-        IL_INFO("PullScheduler started ({} sources)", entries_.size());
-    }
-
-    void Stop() {
-        if (!running_.exchange(false)) return;
-        if (thread_.joinable()) thread_.join();
-        IL_INFO("PullScheduler stopped");
-    }
-
-    size_t EntryCount() const { return entries_.size(); }
-
-private:
-    void Run() {
-        while (running_.load(std::memory_order_acquire)) {
-            auto now = std::chrono::steady_clock::now();
-            auto next_wake = now + std::chrono::milliseconds(500);
-
-            for (auto& entry : entries_) {
-                if (!entry.pipeline->IsRunning()) continue;
-
-                if (now >= entry.next_fire) {
-                    auto result = entry.source->Collect();
-                    if (result.ok()) {
-                        entry.pipeline->Enqueue(std::move(*result));
-                    }
-                    entry.next_fire = now +
-                        std::chrono::milliseconds(entry.interval_ms);
-                }
-                if (entry.next_fire < next_wake) {
-                    next_wake = entry.next_fire;
-                }
-            }
-
-            auto sleep_dur = next_wake - std::chrono::steady_clock::now();
-            if (sleep_dur.count() > 0) {
-                std::this_thread::sleep_for(sleep_dur);
-            }
-        }
-    }
-
-    std::vector<Entry> entries_;
-    std::atomic<bool> running_{false};
-    std::thread thread_;
-};
-
-// ============================================================================
-// PipelineController - multi-pipeline manager
+// PipelineController — 多管道管理器 + TimerWheel + CollectPool + SinkPool
 // ============================================================================
 class PipelineController {
 public:
@@ -463,15 +393,22 @@ public:
         for (auto& p : pipelines_) {
             p->SetSinkPool(sink_pool_.get());
         }
-        IL_INFO("Sink thread pool initialized with {} threads", num_threads);
+        IL_INFO("SinkPool initialized ({} threads)", num_threads);
     }
 
-    PullScheduler& GetScheduler() { return scheduler_; }
+    void InitCollectPool(size_t num_threads = 0) {
+        if (num_threads == 0) num_threads = 2;
+        collect_pool_ = std::make_unique<ThreadPool>(num_threads, "il-collect");
+        IL_INFO("CollectPool initialized ({} threads)", num_threads);
+    }
+
+    TimerWheel& GetTimerWheel() { return timer_; }
 
 private:
     std::vector<std::unique_ptr<Pipeline>> pipelines_;
     std::unique_ptr<ThreadPool> sink_pool_;
-    PullScheduler scheduler_;
+    std::unique_ptr<ThreadPool> collect_pool_;
+    TimerWheel timer_;
 };
 
 }  // namespace illuminator

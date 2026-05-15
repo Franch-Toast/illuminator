@@ -1,5 +1,5 @@
 // ============================================================================
-// PipelineController implementation
+// PipelineController v3 implementation
 // ============================================================================
 
 #include "core/engine/pipeline_controller.h"
@@ -63,16 +63,8 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
         pipelines_.push_back(std::move(pipeline));
     }
 
-    size_t sink_threads = config.engine.sink_pool_threads;
-    InitSinkPool(sink_threads);
-
-    // Register Pull-mode sources with the global scheduler
-    for (auto& p : pipelines_) {
-        auto* src = p->GetSource();
-        if (src && !src->IsPushMode()) {
-            scheduler_.Register(p.get(), src);
-        }
-    }
+    InitSinkPool(config.engine.sink_pool_threads);
+    InitCollectPool(config.engine.collect_pool_threads);
 
     return Status::Ok();
 }
@@ -88,18 +80,95 @@ Status PipelineController::StartAll() {
         }
     }
 
-    scheduler_.Start();
+    // Register Pull-mode sources as TimerWheel collect events
+    for (auto& p : pipelines_) {
+        auto* src = p->GetSource();
+        if (src && !src->IsPushMode()) {
+            auto interval = std::chrono::milliseconds(src->IntervalMs());
+            Pipeline* pipeline_ptr = p.get();
+            SourcePlugin* source_ptr = src;
 
-    IL_INFO("All {} pipelines started", pipelines_.size());
+            timer_.AddRepeating(interval,
+                [this, pipeline_ptr, source_ptr] {
+                    if (!pipeline_ptr->IsRunning()) return;
+                    collect_pool_->Submit(
+                        [pipeline_ptr, source_ptr] {
+                            auto result = source_ptr->Collect();
+                            if (result.ok() && *result && !(*result)->Empty()) {
+                                pipeline_ptr->Enqueue(std::move(*result));
+                            }
+                        }
+                    );
+                }
+            );
+            IL_INFO("Registered Pull source for pipeline '{}' (interval={}ms)",
+                     pipeline_ptr->name(), src->IntervalMs());
+        }
+    }
+
+    // Register Aggregator flush events as TimerWheel sentinel injections
+    for (auto& p : pipelines_) {
+        if (p->HasAggregator()) {
+            auto interval = std::chrono::milliseconds(p->FlushIntervalMs());
+            Pipeline* pipeline_ptr = p.get();
+
+            timer_.AddRepeating(interval,
+                [pipeline_ptr] {
+                    if (pipeline_ptr->IsRunning()) {
+                        pipeline_ptr->InjectFlush();
+                    }
+                }
+            );
+            IL_INFO("Registered Aggregator flush for pipeline '{}' (interval={}ms)",
+                     pipeline_ptr->name(), p->FlushIntervalMs());
+        }
+    }
+
+    // Register periodic metrics sync
+    timer_.AddRepeating(std::chrono::seconds(10),
+        [this] {
+            if (collect_pool_) {
+                collect_pool_->Submit([this] {
+                    auto& m = InternalMetrics::Instance();
+                    m.SetGauge("timer_wheel_fires_total",
+                               static_cast<double>(timer_.FiresTotal()));
+                    m.SetGauge("timer_wheel_timers_active",
+                               static_cast<double>(timer_.ActiveTimers()));
+                    if (collect_pool_) {
+                        m.SetGauge("collect_pool_pending_tasks",
+                                   static_cast<double>(collect_pool_->PendingTasks()));
+                    }
+                    if (sink_pool_) {
+                        m.SetGauge("sink_pool_pending_tasks",
+                                   static_cast<double>(sink_pool_->PendingTasks()));
+                    }
+                });
+            }
+        }
+    );
+
+    timer_.Start();
+
+    IL_INFO("All {} pipelines started (v3: TimerWheel + CollectPool + SinkPool)",
+            pipelines_.size());
     return Status::Ok();
 }
 
 Status PipelineController::StopAll() {
-    scheduler_.Stop();
+    // Phase 1: Stop TimerWheel — no more Collect/Flush events
+    timer_.Stop();
 
+    // Phase 2: Stop CollectPool — wait for in-flight Collects
+    collect_pool_.reset();
+
+    // Phase 3: Stop each pipeline (ProcessThread drains channel)
     for (auto& pipeline : pipelines_) {
         pipeline->Stop();
     }
+
+    // Phase 4: SinkPool destroyed last (ensure last writes complete)
+    // sink_pool_ destroyed in destructor
+
     IL_INFO("All pipelines stopped");
     return Status::Ok();
 }

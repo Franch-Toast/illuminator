@@ -59,6 +59,7 @@ cc_library(
     hdrs = [
         "engine/async_channel.h",
         "engine/pipeline_controller.h",
+        "engine/timer_wheel.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",

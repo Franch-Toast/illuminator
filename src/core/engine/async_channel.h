@@ -1,18 +1,20 @@
 // ============================================================================
-// Illuminator AsyncChannel — 基于 LockFreeQueue 的管道异步通道
+// Illuminator AsyncChannel — 支持事件多态的管道异步通道
 // ============================================================================
 //
-// 封装 LockFreeQueue，为 Pipeline 提供 Source → ProcessThread 的异步解耦。
+// 封装 LockFreeQueue，传输 variant<DataBatchPtr, FlushSentinel>，
+// 使 ProcessThread 成为纯事件处理器 (Event Handler)。
 //
-// 设计要点：
-// ==========
-// 1. 生产端（Source 回调 / CollectLoop）调用 TryEnqueue —— 无锁 CAS，纳秒级
-// 2. 消费端（ProcessLoop）调用 Dequeue(timeout) —— spin → yield → sleep 三级退避
-// 3. 水位线反压：队列使用率超过 high watermark 时触发 backpressured 标志
-// 4. 丢弃策略：队列满时可选 drop_newest（默认）或 drop_oldest
-// 5. 全量统计：enqueued / dequeued / dropped / backpressure_events
+// Channel 传输两种消息:
+//   - DataBatchPtr: 正常数据批次
+//   - FlushSentinel: Aggregator flush 触发信号（由 TimerWheel 注入）
 //
-// 模板参数 Capacity 必须是 2 的幂（LockFreeQueue 约束）。
+// 设计要点:
+//   1. 数据入队 TryEnqueue: 无锁 CAS，纳秒级
+//   2. Sentinel 注入 InjectFlush: 优先级高于普通数据
+//   3. 消费端 Dequeue: spin → yield → sleep 三级退避
+//   4. 水位线反压: 超过 high watermark 时触发 backpressured
+//   5. 全量统计: enqueued / dequeued / dropped / flush_injected
 // ============================================================================
 
 #pragma once
@@ -21,15 +23,24 @@
 #include <chrono>
 #include <optional>
 #include <thread>
+#include <variant>
 
 #include "core/engine/data_batch.h"
 #include "core/memory/lock_free_queue.h"
 
 namespace illuminator {
 
+// Overloaded helper for std::visit (C++17)
+template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
+template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
+
+struct FlushSentinel {};
+
+using ChannelItem = std::variant<DataBatchPtr, FlushSentinel>;
+
 enum class DropPolicy : uint8_t {
-    kDropNewest,   // 队列满时丢弃新到达的数据（默认，最安全）
-    kDropOldest,   // 队列满时丢弃队首旧数据，腾出空间给新数据
+    kDropNewest,
+    kDropOldest,
 };
 
 template <size_t Capacity = 4096>
@@ -39,6 +50,7 @@ public:
         std::atomic<uint64_t> enqueued{0};
         std::atomic<uint64_t> dropped{0};
         std::atomic<uint64_t> dequeued{0};
+        std::atomic<uint64_t> flush_injected{0};
         std::atomic<uint64_t> backpressure_events{0};
     };
 
@@ -46,22 +58,21 @@ public:
                           double high_wm = 0.8, double low_wm = 0.2)
         : drop_policy_(policy), high_wm_(high_wm), low_wm_(low_wm) {}
 
-    // 生产端：尝试入队。队列满时按 drop_policy_ 处理。
-    // 返回 true 表示数据已成功入队。
     bool TryEnqueue(DataBatchPtr batch) {
-        if (queue_.TryPush(std::move(batch))) {
+        ChannelItem item(std::move(batch));
+        if (queue_.TryPush(std::move(item))) {
             stats_.enqueued.fetch_add(1, std::memory_order_relaxed);
             UpdateBackpressure();
             return true;
         }
 
-        // 队列满
         if (drop_policy_ == DropPolicy::kDropOldest) {
-            DataBatchPtr discarded;
+            ChannelItem discarded;
             if (queue_.TryPop(discarded)) {
                 stats_.dropped.fetch_add(1, std::memory_order_relaxed);
             }
-            if (queue_.TryPush(std::move(batch))) {
+            ChannelItem retry(std::move(batch));
+            if (queue_.TryPush(std::move(retry))) {
                 stats_.enqueued.fetch_add(1, std::memory_order_relaxed);
                 UpdateBackpressure();
                 return true;
@@ -73,12 +84,27 @@ public:
         return false;
     }
 
-    // 消费端：阻塞式出队（带超时）。
-    // 使用 spin → yield → sleep 三级退避策略，平衡延迟与 CPU 占用。
-    std::optional<DataBatchPtr> Dequeue(std::chrono::milliseconds timeout) {
-        DataBatchPtr result;
+    bool InjectFlush() {
+        ChannelItem item(FlushSentinel{});
+        if (queue_.TryPush(std::move(item))) {
+            stats_.flush_injected.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        ChannelItem discarded;
+        if (queue_.TryPop(discarded)) {
+            stats_.dropped.fetch_add(1, std::memory_order_relaxed);
+        }
+        ChannelItem retry(FlushSentinel{});
+        if (queue_.TryPush(std::move(retry))) {
+            stats_.flush_injected.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    }
 
-        // 阶段 1：spin（~100 次，适合极低延迟场景）
+    std::optional<ChannelItem> Dequeue(std::chrono::milliseconds timeout) {
+        ChannelItem result;
+
         for (int i = 0; i < 100; ++i) {
             if (queue_.TryPop(result)) {
                 stats_.dequeued.fetch_add(1, std::memory_order_relaxed);
@@ -87,7 +113,6 @@ public:
             }
         }
 
-        // 阶段 2：yield + sleep，按 1ms 步进检查直到超时
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             if (queue_.TryPop(result)) {
@@ -101,9 +126,8 @@ public:
         return std::nullopt;
     }
 
-    // 消费端：非阻塞出队
-    std::optional<DataBatchPtr> TryDequeue() {
-        DataBatchPtr result;
+    std::optional<ChannelItem> TryDequeue() {
+        ChannelItem result;
         if (queue_.TryPop(result)) {
             stats_.dequeued.fetch_add(1, std::memory_order_relaxed);
             UpdateBackpressure();
@@ -134,7 +158,7 @@ private:
         }
     }
 
-    LockFreeQueue<DataBatchPtr, Capacity> queue_;
+    LockFreeQueue<ChannelItem, Capacity> queue_;
     Stats stats_;
     std::atomic<bool> backpressured_{false};
     DropPolicy drop_policy_;
