@@ -1,0 +1,10 @@
+cc_test(
+    name = "console_sink_test",
+    srcs = ["console_sink_test.cc"],
+    deps = [
+        "//src/sinks:console_output",
+        "//src/core:engine",
+        "//src/core:common",
+        "@googletest//:gtest_main",
+    ],
+)

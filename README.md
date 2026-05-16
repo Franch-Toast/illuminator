@@ -431,6 +431,67 @@ extern "C" const IlPluginDescriptor* illuminator_plugin_describe() {
 
 ---
 
+## 测试
+
+### 测试架构
+
+项目采用 **GoogleTest** 框架，测试代码遵循就近放置原则：每个组件在其源码目录下创建 `test/` 子目录存放对应的单元测试。
+
+### 测试目录结构
+
+```
+src/
+├── core/
+│   ├── common/test/           # Status, ConfigValue 测试
+│   ├── memory/test/           # Arena, LockFreeQueue 测试
+│   ├── threading/test/        # ThreadPool 测试
+│   └── engine/test/           # TimerWheel, AsyncChannel, DataBatch, Pipeline 集成测试
+├── processors/
+│   ├── passthrough/test/      # PassthroughProcessor 测试
+│   ├── filter/test/           # FilterProcessor 测试
+│   ├── stack_merger/test/     # StackMergerProcessor 测试
+│   └── stack_symbolizer/test/ # StackSymbolizerProcessor 测试
+├── aggregators/
+│   └── cpu_stats_aggregator/test/  # CpuStatsAggregator 测试
+└── sinks/
+    ├── console_output/test/        # ConsoleSink 测试
+    ├── file_export/test/           # FileExportSink 测试
+    ├── local_storage/test/         # LocalStorageSink + SQLite 测试
+    ├── otlp_export/test/           # OtlpExportSink 测试
+    ├── pprof_export/test/          # PprofExportSink 测试
+    ├── prometheus_exposition/test/ # PrometheusSink 测试
+    └── websocket_sink/test/        # WebSocketSink + Store 测试
+```
+
+### 运行测试
+
+```bash
+# 运行全部 21 个测试目标
+bazel test //src/...
+
+# 运行单个模块的测试
+bazel test //src/core/engine/test:all
+
+# 运行单个测试目标并输出详细信息
+bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
+```
+
+### 测试覆盖范围
+
+| 层级 | 组件 | 测试目标数 | 覆盖内容 |
+|------|------|-----------|---------|
+| **Core Infra** | Status, ConfigValue | 2 | 错误码、StatusOr、类型转换、嵌套配置 |
+| **Core Memory** | Arena, LockFreeQueue | 2 | 分配对齐、CopyString、MPSC 并发、水位线 |
+| **Core Threading** | ThreadPool | 1 | Submit/Future、异常恢复、析构等待 |
+| **Core Engine** | TimerWheel, AsyncChannel, DataBatch | 3 | timerfd 定时、variant dispatch、反压、InternString |
+| **Integration** | Pipeline E2E | 1 | Source→Sink 数据流、统计计数器、错误路径 |
+| **Processors** | passthrough, filter, stack_merger, stack_symbolizer | 4 | 透传、标签过滤、堆栈合并分组、符号化 |
+| **Aggregators** | cpu_stats_aggregator | 1 | 窗口聚合、avg/min/max/p50/p99、Flush 清空 |
+| **Sinks** | console, file, local_storage, otlp, pprof, prometheus, websocket | 7 | I/O 写入、格式化、缓冲淘汰、pipeline 隔离 |
+| **总计** | | **21** | |
+
+---
+
 ## 许可证
 
 MIT License

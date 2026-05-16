@@ -1,0 +1,8 @@
+cc_test(
+    name = "thread_pool_test",
+    srcs = ["thread_pool_test.cc"],
+    deps = [
+        "//src/core:threading",
+        "@googletest//:gtest_main",
+    ],
+)
