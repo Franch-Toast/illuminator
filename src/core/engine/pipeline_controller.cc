@@ -11,7 +11,14 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
     auto& registry = PluginRegistry::Instance();
 
     for (auto& pc : config.pipelines) {
-        auto pipeline = std::make_unique<Pipeline>(pc.name);
+        DropPolicy dp = DropPolicy::kDropNewest;
+        if (config.engine.channel.drop_policy == "drop_oldest") {
+            dp = DropPolicy::kDropOldest;
+        }
+        auto pipeline = std::make_unique<Pipeline>(
+            pc.name, dp,
+            config.engine.channel.backpressure_high,
+            config.engine.channel.backpressure_low);
 
         auto source = registry.CreateSource(pc.source.type);
         if (!source) {

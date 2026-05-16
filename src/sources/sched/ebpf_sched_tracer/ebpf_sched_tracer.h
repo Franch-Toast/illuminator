@@ -68,7 +68,7 @@ public:
 
         running_ = true;
         poll_thread_ = std::thread([this] {
-            SetThreadName("il-schedtr-pol");
+            SetThreadName("schedtrc-poll");
             while (running_) ring_buffer__poll(ring_buf_, 100);
         });
         IL_INFO("eBPF sched tracer started");

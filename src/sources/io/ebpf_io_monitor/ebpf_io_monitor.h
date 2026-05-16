@@ -64,7 +64,7 @@ public:
 
         running_ = true;
         poll_thread_ = std::thread([this] {
-            SetThreadName("il-iomon-poll");
+            SetThreadName("io-poll");
             while (running_) ring_buffer__poll(ring_buf_, 100);
         });
         IL_INFO("eBPF I/O monitor started");

@@ -54,7 +54,7 @@ public:
         }
 
         thread_ = std::thread([this, listen_addr, port] {
-            SetThreadName("il-http");
+            SetThreadName("http-server");
             IL_INFO("HTTP server started on {}:{}", listen_addr, port);
             server_.listen(listen_addr, port);
         });

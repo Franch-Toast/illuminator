@@ -163,7 +163,7 @@ public:
         // 启动后台轮询线程
         running_.store(true);
         poll_thread_ = std::thread([this] {
-            SetThreadName("il-offcpu-poll");
+            SetThreadName("offcpu-poll");
             while (running_.load()) {
                 int err = ring_buffer__poll(ring_buf_, 100);
                 if (err < 0 && err != -EINTR)

@@ -113,7 +113,8 @@ public:
         if (!running_.exchange(false)) return;
         Wakeup();
         if (thread_.joinable()) thread_.join();
-        IL_INFO("TimerWheel stopped ({} timers fired total)", fires_total_);
+        IL_INFO("TimerWheel stopped ({} timers fired total)",
+                fires_total_.load(std::memory_order_relaxed));
     }
 
     size_t ActiveTimers() const {
@@ -121,11 +122,11 @@ public:
         return heap_.size();
     }
 
-    uint64_t FiresTotal() const { return fires_total_; }
+    uint64_t FiresTotal() const { return fires_total_.load(std::memory_order_relaxed); }
 
 private:
     void Run() {
-        SetThreadName("il-timer");
+        SetThreadName("timer-wheel");
         struct epoll_event events[2];
 
         while (running_.load(std::memory_order_acquire)) {
@@ -162,7 +163,7 @@ private:
 
         for (auto& entry : fired) {
             entry.callback();
-            fires_total_++;
+            fires_total_.fetch_add(1, std::memory_order_relaxed);
 
             if (entry.repeating && running_.load(std::memory_order_relaxed)) {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -220,7 +221,7 @@ private:
     std::atomic<bool> running_{false};
     std::thread thread_;
     uint32_t next_id_{0};
-    uint64_t fires_total_{0};
+    std::atomic<uint64_t> fires_total_{0};
     std::vector<uint32_t> cancelled_;
 
     int epoll_fd_ = -1;

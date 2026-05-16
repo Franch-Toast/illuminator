@@ -187,7 +187,7 @@ public:
             }
             running_.store(true);
             poll_thread_ = std::thread([this] {
-                SetThreadName("il-sched-poll");
+                SetThreadName("sched-poll");
                 while (running_.load())
                     ring_buffer__poll(ring_buf_, 100);
             });

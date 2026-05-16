@@ -56,7 +56,11 @@ class PipelineController;
 // ============================================================================
 class Pipeline {
 public:
-    explicit Pipeline(const std::string& name) : name_(name) {}
+    explicit Pipeline(const std::string& name,
+                      DropPolicy drop_policy = DropPolicy::kDropNewest,
+                      double bp_high = 0.8, double bp_low = 0.2)
+        : name_(name),
+          ingest_channel_(drop_policy, bp_high, bp_low) {}
     ~Pipeline() { Stop(); }
 
     Pipeline(const Pipeline&) = delete;
@@ -112,7 +116,7 @@ public:
         running_.store(true, std::memory_order_release);
 
         process_thread_ = std::thread([this] {
-            SetThreadName("il-" + name_.substr(0, 10) + "-p");
+            SetThreadName(name_.substr(0, 15));
             ProcessLoop();
         });
 
@@ -363,7 +367,7 @@ private:
 
     std::thread process_thread_;
 
-    bool last_backpressure_state_ = false;
+    std::atomic<bool> last_backpressure_state_{false};
 
     std::atomic<uint64_t> batches_processed_{0};
     std::atomic<uint64_t> records_processed_{0};
@@ -389,7 +393,7 @@ public:
         if (num_threads == 0) {
             num_threads = std::max(2u, std::thread::hardware_concurrency() / 2);
         }
-        sink_pool_ = std::make_unique<ThreadPool>(num_threads, "il-sink");
+        sink_pool_ = std::make_unique<ThreadPool>(num_threads, "sink-write");
         for (auto& p : pipelines_) {
             p->SetSinkPool(sink_pool_.get());
         }
@@ -398,7 +402,7 @@ public:
 
     void InitCollectPool(size_t num_threads = 0) {
         if (num_threads == 0) num_threads = 2;
-        collect_pool_ = std::make_unique<ThreadPool>(num_threads, "il-collect");
+        collect_pool_ = std::make_unique<ThreadPool>(num_threads, "collecter");
         IL_INFO("CollectPool initialized ({} threads)", num_threads);
     }
 

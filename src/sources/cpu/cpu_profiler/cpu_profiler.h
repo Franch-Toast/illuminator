@@ -340,12 +340,12 @@ public:
                                      "cpu_profiler: ring buffer init failed");
             }
             poll_thread_ = std::thread([this] {
-                SetThreadName("il-cpuprof-pol");
+                SetThreadName("cpuprofiler-poll");
                 StreamPollLoop();
             });
         } else {
             agg_thread_ = std::thread([this] {
-                SetThreadName("il-cpuprof-agg");
+                SetThreadName("cpuprofiler-agg");
                 AggregatedPullLoop();
             });
         }

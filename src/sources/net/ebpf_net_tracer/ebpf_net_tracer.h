@@ -70,7 +70,7 @@ public:
 
         running_ = true;
         poll_thread_ = std::thread([this] {
-            SetThreadName("il-net-poll");
+            SetThreadName("net-poll");
             PollLoop();
         });
         IL_INFO("eBPF net tracer started");

@@ -69,12 +69,12 @@ public:
     void Start() {
         running_.store(true);
         thread_ = std::thread([this] {
-            SetThreadName("il-ws-bcast");
+            SetThreadName("ws-broadcast");
             BroadcastLoop();
         });
         if (ws_fd_ >= 0) {
             accept_thread_ = std::thread([this] {
-                SetThreadName("il-ws-accept");
+                SetThreadName("ws-accept");
                 AcceptLoop();
             });
             IL_INFO("WebSocket server listening on port {}", ws_port_);

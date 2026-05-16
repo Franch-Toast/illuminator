@@ -41,7 +41,7 @@ namespace illuminator {
 class ThreadPool {
 public:
     explicit ThreadPool(size_t num_threads = std::thread::hardware_concurrency(),
-                        const std::string& name_prefix = "il-worker") {
+                        const std::string& name_prefix = "pool-worker") {
         if (num_threads == 0) {
             num_threads = 1;
         }

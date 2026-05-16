@@ -71,8 +71,7 @@ public:
             if (queue_.TryPop(discarded)) {
                 stats_.dropped.fetch_add(1, std::memory_order_relaxed);
             }
-            ChannelItem retry(std::move(batch));
-            if (queue_.TryPush(std::move(retry))) {
+            if (queue_.TryPush(std::move(item))) {
                 stats_.enqueued.fetch_add(1, std::memory_order_relaxed);
                 UpdateBackpressure();
                 return true;
