@@ -16,7 +16,7 @@
 //    - 返回健康检查响应的 JSON 对象
 //
 // 3. fetchMetrics(pipeline, timeRange?)
-//    - 通用指标查询函数，GET /api/v1/metrics?pipeline=xxx&start=...&end=...
+//    - 通用指标查询函数，GET /api/v1/internal_metrics?pipeline=xxx&start=...&end=...
 //    - 用于按管道名称和时间范围获取历史指标数据
 // ============================================================================
 
@@ -54,6 +54,7 @@ export function usePipelines(refreshMs = 2000) {
   const fetch_ = useCallback(async () => {
     try {
       const res = await fetch('/api/v1/pipelines')
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
       const data = await res.json()
       setPipelines(data.pipelines || [])
       setError(null)
@@ -78,7 +79,10 @@ export function useHealth() {
 
   useEffect(() => {
     fetch('/healthz')
-      .then(r => r.json())
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
       .then(setHealth)
       .catch(() => setHealth(null))
   }, [])
@@ -95,6 +99,9 @@ export async function fetchMetrics(pipeline: string, timeRange?: { start: number
     params.set('start', String(timeRange.start))
     params.set('end', String(timeRange.end))
   }
-  const res = await fetch(`/api/v1/metrics?${params}`)
+  const res = await fetch(`/api/v1/internal_metrics?${params}`)
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}: ${res.statusText}`)
+  }
   return res.json()
 }

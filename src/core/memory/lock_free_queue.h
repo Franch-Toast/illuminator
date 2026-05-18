@@ -39,29 +39,38 @@
 
 #include <atomic>
 #include <cstddef>
-#include <optional>
+#include <memory>
 #include <new>
 #include <type_traits>
 #include <utility>
 
 namespace illuminator {
 
-template <typename T, size_t Capacity = 4096>
-class LockFreeQueue {
-    // 编译期保证 Capacity 是 2 的幂（位掩码取模的前提）
-    static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be power of 2");
+namespace detail {
+inline size_t RoundUpPow2(size_t v) {
+    if (v == 0) return 1;
+    --v;
+    v |= v >> 1;  v |= v >> 2;  v |= v >> 4;
+    v |= v >> 8;  v |= v >> 16; v |= v >> 32;
+    return v + 1;
+}
+}  // namespace detail
 
+template <typename T>
+class LockFreeQueue {
 public:
-    LockFreeQueue() : head_(0), tail_(0) {
-        // 初始化每个 Cell 的序列号为位置索引
-        // 这使得初次 Push/Pop 时序列号与位置匹配
-        for (size_t i = 0; i < Capacity; ++i) {
+    explicit LockFreeQueue(size_t requested_capacity = 4096)
+        : capacity_(detail::RoundUpPow2(requested_capacity)),
+          mask_(capacity_ - 1),
+          head_(0),
+          tail_(0),
+          cells_(std::make_unique<Cell[]>(capacity_)) {
+        for (size_t i = 0; i < capacity_; ++i) {
             cells_[i].sequence.store(i, std::memory_order_relaxed);
         }
     }
 
     ~LockFreeQueue() {
-        // 安全退出：消费完所有剩余元素
         T tmp;
         while (TryPop(tmp)) {}
     }
@@ -69,28 +78,22 @@ public:
     LockFreeQueue(const LockFreeQueue&) = delete;
     LockFreeQueue& operator=(const LockFreeQueue&) = delete;
 
-    // ---- 入队 ----
-    // 尝试推入元素（拷贝或移动），成功返回 true，队列满返回 false
     template <typename U>
     bool TryPush(U&& value) {
         Cell* cell;
         size_t pos = head_.load(std::memory_order_relaxed);
         for (;;) {
-            cell = &cells_[pos & kMask];  // 位掩码取模
+            cell = &cells_[pos & mask_];
             size_t seq = cell->sequence.load(std::memory_order_acquire);
             intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
 
             if (diff == 0) {
-                // 序列号匹配：该 Cell 可以写入
-                // CAS 尝试获取 head_ 的所有权
                 if (head_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    break;  // 获取成功
+                    break;
                 }
             } else if (diff < 0) {
-                // 序列号小于位置：队列已满（消费者落后太多）
                 return false;
             } else {
-                // 其他生产者正在写入，重新加载 head_ 重试
                 pos = head_.load(std::memory_order_relaxed);
             }
         }
@@ -99,37 +102,29 @@ public:
         return true;
     }
 
-    // ---- 出队 ----
-    // 仅限单消费者调用（MPSC 中的 Single Consumer）。
-    // 成功返回 true 并通过引用参数传出数据，队列空返回 false。
     bool TryPop(T& value) {
         Cell* cell;
         size_t pos = tail_.load(std::memory_order_relaxed);
         for (;;) {
-            cell = &cells_[pos & kMask];
+            cell = &cells_[pos & mask_];
             size_t seq = cell->sequence.load(std::memory_order_acquire);
             intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
 
             if (diff == 0) {
-                // 序列号匹配：该 Cell 有数据可以读取
                 if (tail_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) {
-                    break;  // 获取读取权成功
+                    break;
                 }
             } else if (diff < 0) {
-                // 序列号小于 pos+1：队列为空
                 return false;
             } else {
                 pos = tail_.load(std::memory_order_relaxed);
             }
         }
         value = std::move(cell->data);
-        // 将序列号前移 Capacity，表示该位置可被生产者重新使用
-        cell->sequence.store(pos + Capacity, std::memory_order_release);
+        cell->sequence.store(pos + capacity_, std::memory_order_release);
         return true;
     }
 
-    // ---- 状态查询 ----
-    // 近似大小（可能略有不准确，无锁读取）
     size_t SizeApprox() const noexcept {
         size_t h = head_.load(std::memory_order_relaxed);
         size_t t = tail_.load(std::memory_order_relaxed);
@@ -137,34 +132,28 @@ public:
     }
 
     bool Empty() const noexcept { return SizeApprox() == 0; }
-    static constexpr size_t capacity() noexcept { return Capacity; }
+    size_t capacity() const noexcept { return capacity_; }
 
-    // ---- 水位线查询 ----
-    // 高水位：默认 80%，用于触发反压
     bool AboveHighWatermark(double ratio = 0.8) const noexcept {
-        return SizeApprox() > static_cast<size_t>(Capacity * ratio);
+        return SizeApprox() > static_cast<size_t>(capacity_ * ratio);
     }
 
-    // 低水位：默认 20%，用于解除反压
     bool BelowLowWatermark(double ratio = 0.2) const noexcept {
-        return SizeApprox() < static_cast<size_t>(Capacity * ratio);
+        return SizeApprox() < static_cast<size_t>(capacity_ * ratio);
     }
 
 private:
-    static constexpr size_t kMask = Capacity - 1;  // 位掩码（因为 Capacity 是 2 的幂）
+    const size_t capacity_;
+    const size_t mask_;
 
-    // 队列中的每个槽位
     struct Cell {
-        std::atomic<size_t> sequence;  // 当前序列号（用于无锁协调）
-        T data;                        // 存储的数据
+        std::atomic<size_t> sequence;
+        T data;
     };
 
-    // head_ 和 tail_ 各占 64 字节对齐，避免伪共享（False Sharing）
-    // 伪共享：当两个不相关的变量在同一缓存行时，一个 CPU 修改会导致
-    //         另一个 CPU 的缓存行失效，造成不必要的性能损失
-    alignas(64) std::atomic<size_t> head_;   // 生产者索引
-    alignas(64) std::atomic<size_t> tail_;   // 消费者索引
-    Cell cells_[Capacity];                    // 环形缓冲区
+    alignas(64) std::atomic<size_t> head_;
+    alignas(64) std::atomic<size_t> tail_;
+    std::unique_ptr<Cell[]> cells_;
 };
 
 }  // namespace illuminator

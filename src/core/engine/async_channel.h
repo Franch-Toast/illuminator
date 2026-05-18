@@ -43,7 +43,6 @@ enum class DropPolicy : uint8_t {
     kDropOldest,
 };
 
-template <size_t Capacity = 4096>
 class AsyncChannel {
 public:
     struct Stats {
@@ -54,9 +53,11 @@ public:
         std::atomic<uint64_t> backpressure_events{0};
     };
 
-    explicit AsyncChannel(DropPolicy policy = DropPolicy::kDropNewest,
+    explicit AsyncChannel(size_t capacity = 4096,
+                          DropPolicy policy = DropPolicy::kDropNewest,
                           double high_wm = 0.8, double low_wm = 0.2)
-        : drop_policy_(policy), high_wm_(high_wm), low_wm_(low_wm) {}
+        : queue_(capacity), drop_policy_(policy),
+          high_wm_(high_wm), low_wm_(low_wm) {}
 
     bool TryEnqueue(DataBatchPtr batch) {
         ChannelItem item(std::move(batch));
@@ -104,7 +105,8 @@ public:
     std::optional<ChannelItem> Dequeue(std::chrono::milliseconds timeout) {
         ChannelItem result;
 
-        for (int i = 0; i < 100; ++i) {
+        // Phase 1: spin (快路径，低延迟场景)
+        for (int i = 0; i < 16; ++i) {
             if (queue_.TryPop(result)) {
                 stats_.dequeued.fetch_add(1, std::memory_order_relaxed);
                 UpdateBackpressure();
@@ -112,6 +114,17 @@ public:
             }
         }
 
+        // Phase 2: yield (让出 CPU 时间片)
+        for (int i = 0; i < 8; ++i) {
+            std::this_thread::yield();
+            if (queue_.TryPop(result)) {
+                stats_.dequeued.fetch_add(1, std::memory_order_relaxed);
+                UpdateBackpressure();
+                return result;
+            }
+        }
+
+        // Phase 3: sleep (低频场景，节省 CPU)
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
             if (queue_.TryPop(result)) {
@@ -140,7 +153,7 @@ public:
     }
 
     size_t SizeApprox() const { return queue_.SizeApprox(); }
-    static constexpr size_t capacity() { return Capacity; }
+    size_t capacity() const { return queue_.capacity(); }
 
     const Stats& stats() const { return stats_; }
 
@@ -157,7 +170,7 @@ private:
         }
     }
 
-    LockFreeQueue<ChannelItem, Capacity> queue_;
+    LockFreeQueue<ChannelItem> queue_;
     Stats stats_;
     std::atomic<bool> backpressured_{false};
     DropPolicy drop_policy_;

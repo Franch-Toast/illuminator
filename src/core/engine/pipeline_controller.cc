@@ -10,13 +10,21 @@ namespace illuminator {
 Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
     auto& registry = PluginRegistry::Instance();
 
+    auto resolve_capacity = [](const std::string& size) -> size_t {
+        if (size == "small")  return 1024;
+        if (size == "large")  return 16384;
+        return 4096;  // "medium" or default
+    };
+
     for (auto& pc : config.pipelines) {
         DropPolicy dp = DropPolicy::kDropNewest;
         if (config.engine.channel.drop_policy == "drop_oldest") {
             dp = DropPolicy::kDropOldest;
         }
         auto pipeline = std::make_unique<Pipeline>(
-            pc.name, dp,
+            pc.name,
+            resolve_capacity(config.engine.channel.size),
+            dp,
             config.engine.channel.backpressure_high,
             config.engine.channel.backpressure_low);
 

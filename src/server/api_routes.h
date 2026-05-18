@@ -62,36 +62,6 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // Generic collect endpoint: /api/v1/pipelines/:name/collect
-    auto collect_handler = [&controller](const httplib::Request& req,
-                                         httplib::Response& res) {
-        auto name = req.path_params.at("name");
-        auto* pipe = controller.GetPipeline(name);
-        if (!pipe) {
-            JsonError(res, "pipeline '" + name + "' not found", 404);
-            return;
-        }
-        auto* source = pipe->GetSource();
-        if (!source) {
-            JsonError(res, "pipeline '" + name + "' has no source");
-            return;
-        }
-        auto result = source->Collect();
-        if (!result.ok()) {
-            JsonError(res, result.status().message());
-            return;
-        }
-        auto processed = pipe->RunProcessors(std::move(*result));
-        if (!processed.ok()) {
-            JsonError(res, processed.status().message());
-            return;
-        }
-        res.set_content(BatchToJson(**processed, name) + "\n",
-                        "application/json");
-    };
-    srv.Get("/api/v1/pipelines/:name/collect", collect_handler);
-
-    // Legacy convenience aliases (delegate to the same pipeline names)
     auto pipeline_collect = [&controller](const std::string& pipeline_name,
                                            httplib::Response& res) {
         auto* pipe = controller.GetPipeline(pipeline_name);
@@ -117,6 +87,11 @@ inline void RegisterApiRoutes(httplib::Server& srv,
         res.set_content(BatchToJson(**processed, pipeline_name) + "\n",
                         "application/json");
     };
+
+    srv.Get("/api/v1/pipelines/:name/collect",
+            [pipeline_collect](const httplib::Request& req, httplib::Response& res) {
+                pipeline_collect(req.path_params.at("name"), res);
+            });
 
     srv.Get("/api/v1/cpu/utilization",
             [pipeline_collect](const httplib::Request&, httplib::Response& res) {

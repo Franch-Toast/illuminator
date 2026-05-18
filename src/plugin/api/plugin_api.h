@@ -96,8 +96,12 @@ public:
 // 返回一个指向 IlPluginDescriptor 结构体的指针，描述插件的基本信息。
 extern "C" {
 
+// 主机 Plugin API 版本 — 插件加载时校验此值以确保 ABI 兼容
+#define IL_PLUGIN_API_VERSION 1
+
 // 插件描述符结构体
 struct IlPluginDescriptor {
+    uint32_t api_version;   // 必须等于 IL_PLUGIN_API_VERSION
     const char* name;       // 插件名称
     const char* version;    // 插件版本
     uint32_t type;    // 插件类型（illuminator::PluginType 转为 uint32_t）

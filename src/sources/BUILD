@@ -1,6 +1,26 @@
 # Source plugins — organized by subsystem (cpu, sched, io, net)
 
 # ============================================================================
+# eBPF common base class
+# ============================================================================
+
+cc_library(
+    name = "ebpf_ring_buffer_source",
+    hdrs = ["ebpf_ring_buffer_source.h"],
+    strip_include_prefix = "",
+    include_prefix = "sources",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:common",
+        "//src/core:threading",
+        "//src/ebpf:common_bpf_types",
+        "//src/ebpf:loader",
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+# ============================================================================
 # CPU subsystem
 # ============================================================================
 
@@ -95,6 +115,7 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        ":ebpf_ring_buffer_source",
         "//src/core:common",
         "//src/core:threading",
         "//src/ebpf:common_bpf_types",
@@ -134,6 +155,7 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        ":ebpf_ring_buffer_source",
         "//src/core:common",
         "//src/core:threading",
         "//src/ebpf:common_bpf_types",
@@ -155,6 +177,7 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        ":ebpf_ring_buffer_source",
         "//src/core:common",
         "//src/core:threading",
         "//src/ebpf:common_bpf_types",

@@ -33,6 +33,7 @@
 #pragma once
 
 #include <cassert>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -71,27 +72,40 @@ public:
     static Status Ok() { return Status(); }
 
     // 工厂方法：创建一个错误状态
-    // 参数 msg 使用 string_view 避免不必要的字符串拷贝
     static Status Error(StatusCode code, std::string_view msg) {
         return Status(code, std::string(msg));
     }
 
-    // 判断当前状态是否为成功
+    // 工厂方法：包装内部错误，附加上层上下文信息，形成错误链
+    static Status Wrap(Status inner, std::string_view context) {
+        Status wrapped(inner.code(), std::string(context));
+        wrapped.cause_ = std::make_shared<Status>(std::move(inner));
+        return wrapped;
+    }
+
     [[nodiscard]] bool ok() const { return code_ == StatusCode::kOk; }
-    // 获取错误码
     [[nodiscard]] StatusCode code() const { return code_; }
-    // 获取错误消息（引用以避免拷贝）
     [[nodiscard]] const std::string& message() const { return message_; }
 
-    // 将状态转为可读字符串
+    // 获取导致当前错误的内部错误（如果存在）
+    [[nodiscard]] const Status* cause() const {
+        return cause_ ? cause_.get() : nullptr;
+    }
+
     [[nodiscard]] std::string ToString() const {
         if (ok()) return "OK";
-        return "Error(" + std::to_string(static_cast<int>(code_)) + "): " + message_;
+        std::string result =
+            "Error(" + std::to_string(static_cast<int>(code_)) + "): " + message_;
+        if (cause_) {
+            result += "\n  caused by: " + cause_->ToString();
+        }
+        return result;
     }
 
 private:
-    StatusCode code_;          // 错误码
-    std::string message_;      // 人类可读的错误描述
+    StatusCode code_;
+    std::string message_;
+    std::shared_ptr<Status> cause_;
 };
 
 // ---- StatusOr<T>: Result 类型 ----

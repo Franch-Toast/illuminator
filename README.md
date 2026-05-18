@@ -43,7 +43,7 @@
   │  └──────────────────┬───────────────┬───────────────────────┘   │
   │          ┌──────────▼──────┐  ┌─────▼─────────────────────┐    │
   │          │ CollectPool     │  │ Per Pipeline:              │    │
-  │          │ (M threads)     │  │  AsyncChannel<variant>     │    │
+  │          │ (M threads)     │  │  AsyncChannel(variant)     │    │
   │          │ src.Collect()   │──│  → ProcessThread (1/pipe)  │    │
   │          └─────────────────┘  │    match: Data → Process   │    │
   │   Push: eBPF callback ───────→│    match: Sentinel → Flush │    │
@@ -88,14 +88,15 @@ illuminator/
 ├── README.md
 │
 ├── docs/                       # ===== 设计文档 =====
-│   └── pipeline_v3_design.md   #   Pipeline v3 事件驱动架构设计文档
+│   ├── pipeline_v3_design.md   #   Pipeline v3 事件驱动架构设计文档
+│   └── architecture_audit_v3.md#   全面架构审计报告 (P0-P2 缺陷追踪)
 │
 ├── src/                        # ===== 全部 C++ 源代码 =====
 │   ├── core/                   # 核心引擎
 │   │   ├── common/             #   Status, Logger(spdlog), Config, StringUtil, SelfObservability
 │   │   ├── config/             #   YAML 配置加载器 (yaml-cpp)
 │   │   ├── engine/             #   PipelineController, AsyncChannel, TimerWheel, DataBatch
-│   │   ├── memory/             #   Arena(零拷贝), LockFreeQueue(MPSC 无锁环形缓冲)
+│   │   ├── memory/             #   Arena(零拷贝+OOM 回调), LockFreeQueue(MPSC 无锁环形缓冲,运行时容量)
 │   │   └── threading/          #   ThreadPool, ThreadUtil(线程命名)
 │   │
 │   ├── plugin/                 # 插件框架
@@ -114,6 +115,7 @@ illuminator/
 │   │   └── loader/             #   BpfProgramManager, FeatureProbe, StackTraceUtil
 │   │
 │   ├── sources/                # Source 插件 (按子系统分类)
+│   │   ├── ebpf_ring_buffer_source.h  # eBPF Push Source 公共基类
 │   │   ├── cpu/                #   4 个 CPU 相关源
 │   │   │   ├── cpu_profiler/   #     eBPF perf_event CPU 性能剖析 (Push)
 │   │   │   ├── cpu_utilization/#     CPU 利用率 /proc/stat (Pull, EMA 平滑)
@@ -418,6 +420,7 @@ IL_REGISTER_SOURCE("my_source", MySource);
 
 extern "C" const IlPluginDescriptor* illuminator_plugin_describe() {
     static IlPluginDescriptor desc = {
+        .api_version = IL_PLUGIN_API_VERSION,
         .name = "my_plugin",
         .version = "1.0.0",
         .type = 0,  // SOURCE
@@ -428,6 +431,34 @@ extern "C" const IlPluginDescriptor* illuminator_plugin_describe() {
     return &desc;
 }
 ```
+
+---
+
+## 持续集成 (CI)
+
+项目配置了 GitHub Actions 自动化流水线，位于 `.github/workflows/`。
+
+### CI 流水线 (`ci.yml`)
+
+每次 push 或 PR 自动触发，覆盖后端、前端、eBPF 三条构建链：
+
+| Job | 触发 | 功能 |
+|-----|------|------|
+| **backend-build** | push/PR | `bazel build //src/...` 全量 C++ 编译 |
+| **backend-test** | push/PR | `bazel test //src/...` 运行 21 个单元测试 |
+| **bpf-probes** | push/PR | `bazel build //src/ebpf/probes:all` eBPF 探针编译 |
+| **frontend-build** | push/PR | `npm ci && tsc --noEmit && vite build` 类型检查 + 构建 |
+| **sanitizer-asan** | 仅 PR | AddressSanitizer 内存错误检测 |
+| **sanitizer-tsan** | 仅 PR | ThreadSanitizer 数据竞争检测 |
+| **ci-gate** | 始终 | 汇总门禁，所有必要 job 通过后才允许合并 |
+
+### 安全扫描 (`security.yml`)
+
+| Job | 频率 | 功能 |
+|-----|------|------|
+| **codeql-cpp** | 每周 / 手动 | C++ 安全漏洞分析 (SQL 注入、缓冲区溢出) |
+| **codeql-js** | 每周 / 手动 | JavaScript/TypeScript 安全分析 |
+| **npm-audit** | 每周 + `package*.json` 变更时 | npm 依赖漏洞审计 |
 
 ---
 

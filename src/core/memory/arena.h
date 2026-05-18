@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <string_view>
@@ -148,15 +149,30 @@ private:
         return (offset + alignment - 1) & ~(alignment - 1);
     }
 
-    // 分配一个新的内存块
     void AllocateBlock(size_t size) {
         void* data = std::malloc(size);
         if (!data) {
-            std::abort();
+            if (oom_handler_) {
+                oom_handler_(size);
+                data = std::malloc(size);
+            }
+            if (!data) {
+                std::abort();
+            }
         }
         blocks_.push_back({data, size});
-        current_offset_ = 0;  // 新块从头开始分配
+        current_offset_ = 0;
     }
+
+public:
+    using OomHandler = std::function<void(size_t requested_bytes)>;
+
+    void SetOomHandler(OomHandler handler) {
+        oom_handler_ = std::move(handler);
+    }
+
+private:
+    OomHandler oom_handler_;
 
     std::vector<Block> blocks_;     // 内存块列表
     size_t current_offset_ = 0;     // 当前块内的分配偏移

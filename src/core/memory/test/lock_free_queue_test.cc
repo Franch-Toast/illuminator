@@ -25,7 +25,7 @@ namespace {
 
 // 校验空队列在未入队时应满足 Empty 与近似长度为 0
 TEST(LockFreeQueueTest, EmptyQueue_HasZeroApproxSizeAndIsEmpty) {
-    LockFreeQueue<int, 16> queue;
+    LockFreeQueue<int> queue(16);
     EXPECT_TRUE(queue.Empty());
     EXPECT_EQ(queue.SizeApprox(), 0U);
     EXPECT_FALSE(queue.AboveHighWatermark());
@@ -37,7 +37,7 @@ TEST(LockFreeQueueTest, EmptyQueue_HasZeroApproxSizeAndIsEmpty) {
 
 // 单元素出入队路径：TryPush/TryPop 成功，出队后置空队列
 TEST(LockFreeQueueTest, SinglePushPop_RoundTripPreservesValueAndEmpties) {
-    LockFreeQueue<int, 16> queue;
+    LockFreeQueue<int> queue(16);
     ASSERT_TRUE(queue.TryPush(42));
 
     EXPECT_FALSE(queue.Empty());
@@ -53,7 +53,7 @@ TEST(LockFreeQueueTest, SinglePushPop_RoundTripPreservesValueAndEmpties) {
 
 // 在未出队前提下持续入队直至失败，校验满队列后 TryPush 失败且仍可按 FIFO 出队
 TEST(LockFreeQueueTest, SaturateQueue_SubsequentTryPushFailsStillFifo) {
-    LockFreeQueue<int, 64> queue;
+    LockFreeQueue<int> queue(64);
     size_t inserted = 0;
     while (queue.TryPush(static_cast<int>(inserted))) {
         ++inserted;
@@ -73,7 +73,7 @@ TEST(LockFreeQueueTest, SaturateQueue_SubsequentTryPushFailsStillFifo) {
 
 // 串行校验 FIFO：严格按递增序列入队并按相同顺序弹出
 TEST(LockFreeQueueTest, Fifo_OrderPreservedUnderSerialPushPop) {
-    LockFreeQueue<int, 128> queue;
+    LockFreeQueue<int> queue(128);
     const int kCount = 100;
     for (int i = 0; i < kCount; ++i) {
         ASSERT_TRUE(queue.TryPush(i));
@@ -86,19 +86,22 @@ TEST(LockFreeQueueTest, Fifo_OrderPreservedUnderSerialPushPop) {
     EXPECT_TRUE(queue.Empty());
 }
 
-// capacity() 在编译期与模板 Capacity 对齐（接口契约）
-TEST(LockFreeQueueTest, Capacity_MatchesTemplateParameter) {
-    LockFreeQueue<int, 1024> q1024;
+// capacity() 应与构造参数一致（向上取整到 2 的幂）
+TEST(LockFreeQueueTest, Capacity_MatchesConstructorParameter) {
+    LockFreeQueue<int> q1024(1024);
     EXPECT_EQ(q1024.capacity(), 1024U);
 
-    LockFreeQueue<int, 8> q8;
+    LockFreeQueue<int> q8(8);
     EXPECT_EQ(q8.capacity(), 8U);
+
+    LockFreeQueue<int> q7(7);
+    EXPECT_EQ(q7.capacity(), 8U);
 }
 
 // 水位线：AboveHighWatermark / BelowLowWatermark 与近似长度的一致性（默认 80% / 20%）
 TEST(LockFreeQueueTest, Watermarks_ReflectApproxFillLevel) {
     constexpr size_t kCap = 32;
-    LockFreeQueue<int, kCap> queue;
+    LockFreeQueue<int> queue(kCap);
 
     // 填入 13 条：Ceil(13/32)>0.8 阈值使用严格大于比较，等价于近似长度跨过 80%×Capacity
     const size_t kHighFill = static_cast<size_t>(kCap * 0.8) + 1;
@@ -130,7 +133,7 @@ TEST(LockFreeQueueTest, ConcurrentProducers_AllValuesReceivedSingleConsumerDrain
     constexpr int kPushesPerThread = 250;
     constexpr int kExpectedTotal = kThreads * kPushesPerThread;
 
-    LockFreeQueue<int, kCapacity> queue;
+    LockFreeQueue<int> queue(kCapacity);
 
     std::vector<std::thread> producers;
     producers.reserve(kThreads);
@@ -168,7 +171,7 @@ TEST(LockFreeQueueTest, ConcurrentProducers_AllValuesReceivedSingleConsumerDrain
 
 // 大量 push/pop 交错后队列应回到空且 TryPop 失败
 TEST(LockFreeQueueTest, HeavyChurn_EndsEmptyAndConsistent) {
-    LockFreeQueue<int, 256> queue;
+    LockFreeQueue<int> queue(256);
     const int kCycles = 5000;
     for (int c = 0; c < kCycles; ++c) {
         ASSERT_TRUE(queue.TryPush(c));
@@ -183,7 +186,7 @@ TEST(LockFreeQueueTest, HeavyChurn_EndsEmptyAndConsistent) {
 
 // 只可移动类型：std::unique_ptr 走移动路径，确保无法拷贝时仍可工作
 TEST(LockFreeQueueTest, MoveOnly_UniquePtrPushPop) {
-    LockFreeQueue<std::unique_ptr<int>, 16> queue;
+    LockFreeQueue<std::unique_ptr<int>> queue(16);
     auto p = std::make_unique<int>(7);
     ASSERT_TRUE(queue.TryPush(std::move(p)));
     EXPECT_EQ(p, nullptr);
@@ -206,7 +209,7 @@ TEST(LockFreeQueueTest, Destructor_DrainsRemainingElements) {
 
     destroyed.store(0, std::memory_order_relaxed);
     {
-        LockFreeQueue<std::unique_ptr<CounterNode>, 8> queue;
+        LockFreeQueue<std::unique_ptr<CounterNode>> queue(8);
         ASSERT_TRUE(queue.TryPush(std::make_unique<CounterNode>(&destroyed)));
         ASSERT_TRUE(queue.TryPush(std::make_unique<CounterNode>(&destroyed)));
         ASSERT_TRUE(queue.TryPush(std::make_unique<CounterNode>(&destroyed)));

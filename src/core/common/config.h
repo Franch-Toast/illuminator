@@ -107,6 +107,29 @@ public:
         return it->second == "true" || it->second == "1";
     }
 
+    // 读取为字符串列表（从索引化存储 "0","1",... 中恢复）
+    [[nodiscard]] std::vector<std::string> AsList() const {
+        auto size_it = values_.find("_size");
+        if (size_it == values_.end()) {
+            auto scalar = values_.find("");
+            if (scalar != values_.end() && !scalar->second.empty()) {
+                return {scalar->second};
+            }
+            return {};
+        }
+        size_t n = 0;
+        try { n = std::stoull(size_it->second); } catch (...) { return {}; }
+        std::vector<std::string> result;
+        result.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            auto it = values_.find(std::to_string(i));
+            if (it != values_.end()) {
+                result.push_back(it->second);
+            }
+        }
+        return result;
+    }
+
     // 获取原始映射表（用于遍历）
     [[nodiscard]] const std::unordered_map<std::string, std::string>& Raw() const {
         return values_;
@@ -154,6 +177,9 @@ struct EngineConfig {
 struct GlobalConfig {
     // 全局设置
     std::string log_level = "info";
+    std::string log_file;                          // 日志文件路径（空 = 仅控制台）
+    size_t log_max_size = 10 * 1024 * 1024;        // 单文件最大 10MB
+    size_t log_max_files = 3;                      // 轮转文件数
     std::string data_dir = "/var/lib/illuminator";
     std::vector<std::string> plugin_dirs;
 

@@ -24,6 +24,9 @@
 # ---- 全局设置 ----
 global:
   log_level: info                     # trace | debug | info | warn | error
+  log_file: ""                        # 日志文件路径（空 = 仅控制台输出）
+  log_max_size: 10485760              # 单文件最大字节数（默认 10MB）
+  log_max_files: 3                    # 轮转保留文件数
   data_dir: /var/lib/illuminator      # 持久化数据目录
   plugin_dirs:                        # 外部插件搜索路径
     - /etc/illuminator/plugins

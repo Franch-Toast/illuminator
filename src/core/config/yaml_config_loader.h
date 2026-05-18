@@ -33,6 +33,7 @@
 #pragma once
 
 #include <fstream>
+#include <set>
 #include <string>
 
 #include <yaml-cpp/yaml.h>
@@ -50,21 +51,24 @@ public:
     // 返回: StatusOr<GlobalConfig>，失败时返回 YAML 解析错误
     static StatusOr<GlobalConfig> LoadFromFile(const std::string& path) {
         try {
-            YAML::Node root = YAML::LoadFile(path);  // yaml-cpp 自动处理文件读取
-            return ParseConfig(root);                 // 递归解析为 GlobalConfig
+            YAML::Node root = YAML::LoadFile(path);
+            auto config = ParseConfig(root);
+            auto valid = ValidateConfig(config);
+            if (!valid.ok()) return valid;
+            return config;
         } catch (const YAML::Exception& e) {
-            // 捕获 YAML 语法错误，返回明确的错误消息
             return Status::Error(StatusCode::kInvalidArgument,
                 std::string("YAML parse error: ") + e.what());
         }
     }
 
-    // ---- 从 YAML 字符串加载配置 ----
-    // 用于测试、内联配置或 API 动态传入配置的场景
     static StatusOr<GlobalConfig> LoadFromString(const std::string& yaml_str) {
         try {
             YAML::Node root = YAML::Load(yaml_str);
-            return ParseConfig(root);
+            auto config = ParseConfig(root);
+            auto valid = ValidateConfig(config);
+            if (!valid.ok()) return valid;
+            return config;
         } catch (const YAML::Exception& e) {
             return Status::Error(StatusCode::kInvalidArgument,
                 std::string("YAML parse error: ") + e.what());
@@ -72,8 +76,63 @@ public:
     }
 
 private:
+    // ---- 语义校验：检查配置的合法性 ----
+    static Status ValidateConfig(const GlobalConfig& cfg) {
+        static const std::set<std::string> kValidLogLevels =
+            {"trace", "debug", "info", "warn", "error"};
+        if (!kValidLogLevels.count(cfg.log_level)) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                "Invalid log_level '" + cfg.log_level +
+                "'; valid: trace, debug, info, warn, error");
+        }
+
+        static const std::set<std::string> kValidChannelSizes =
+            {"small", "medium", "large"};
+        if (!kValidChannelSizes.count(cfg.engine.channel.size)) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                "Invalid channel.size '" + cfg.engine.channel.size +
+                "'; valid: small, medium, large");
+        }
+
+        static const std::set<std::string> kValidDropPolicies =
+            {"drop_newest", "drop_oldest"};
+        if (!kValidDropPolicies.count(cfg.engine.channel.drop_policy)) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                "Invalid channel.drop_policy '" + cfg.engine.channel.drop_policy +
+                "'; valid: drop_newest, drop_oldest");
+        }
+
+        if (cfg.engine.channel.backpressure_high <=
+            cfg.engine.channel.backpressure_low) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                "backpressure_high must be > backpressure_low");
+        }
+
+        if (cfg.engine.channel.backpressure_high > 1.0 ||
+            cfg.engine.channel.backpressure_low < 0.0) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                "backpressure thresholds must be in [0.0, 1.0]");
+        }
+
+        for (const auto& p : cfg.pipelines) {
+            if (p.name.empty()) {
+                return Status::Error(StatusCode::kInvalidArgument,
+                    "Pipeline name cannot be empty");
+            }
+            if (p.source.type.empty()) {
+                return Status::Error(StatusCode::kInvalidArgument,
+                    "Pipeline '" + p.name + "' has no source type");
+            }
+            if (p.sinks.empty()) {
+                return Status::Error(StatusCode::kInvalidArgument,
+                    "Pipeline '" + p.name + "' has no sinks");
+            }
+        }
+
+        return Status::Ok();
+    }
+
     // ---- 解析根节点为 GlobalConfig ----
-    // 遍历 YAML 树的各个顶层节点，填充 GlobalConfig 的各字段
     static GlobalConfig ParseConfig(const YAML::Node& root) {
         GlobalConfig config;
 
@@ -81,9 +140,14 @@ private:
         if (auto global = root["global"]) {
             if (global["log_level"])
                 config.log_level = global["log_level"].as<std::string>();
+            if (global["log_file"])
+                config.log_file = global["log_file"].as<std::string>();
+            if (global["log_max_size"])
+                config.log_max_size = global["log_max_size"].as<size_t>(10485760);
+            if (global["log_max_files"])
+                config.log_max_files = global["log_max_files"].as<size_t>(3);
             if (global["data_dir"])
                 config.data_dir = global["data_dir"].as<std::string>();
-            // plugin_dirs 是一个数组，遍历解析
             if (global["plugin_dirs"]) {
                 for (const auto& dir : global["plugin_dirs"])
                     config.plugin_dirs.push_back(dir.as<std::string>());
@@ -203,21 +267,15 @@ private:
     //   - Sequence: 用逗号连接后存储
     static ConfigValue ParseConfigValue(const YAML::Node& node) {
         ConfigValue cv;
-        if (!node || node.IsNull()) return cv;  // 空节点返回空配置
+        if (!node || node.IsNull()) return cv;
 
         if (node.IsMap()) {
-            // 处理嵌套映射：递归转换为扁平结构
             for (auto it = node.begin(); it != node.end(); ++it) {
                 auto key = it->first.as<std::string>();
                 if (it->second.IsScalar()) {
                     cv.Set(key, it->second.as<std::string>());
                 } else if (it->second.IsSequence()) {
-                    std::string joined;
-                    for (size_t i = 0; i < it->second.size(); ++i) {
-                        if (i > 0) joined += ",";
-                        joined += it->second[i].as<std::string>();
-                    }
-                    cv.Set(key, joined);
+                    ParseSequenceInto(cv, key, it->second);
                 } else if (it->second.IsMap()) {
                     auto nested = ParseConfigValue(it->second);
                     for (auto& [nk, nv] : nested.Raw()) {
@@ -228,9 +286,46 @@ private:
             }
         } else if (node.IsScalar()) {
             cv.Set("", node.as<std::string>());
+        } else if (node.IsSequence()) {
+            ParseSequenceInto(cv, "", node);
         }
 
         return cv;
+    }
+
+    // 将 YAML 序列解析为索引化键值存储，同时保留逗号连接的标量兼容格式
+    static void ParseSequenceInto(ConfigValue& cv,
+                                  const std::string& prefix,
+                                  const YAML::Node& seq) {
+        std::string joined;
+        bool all_scalar = true;
+        for (size_t i = 0; i < seq.size(); ++i) {
+            std::string idx = prefix.empty()
+                ? std::to_string(i)
+                : prefix + "." + std::to_string(i);
+            if (seq[i].IsScalar()) {
+                cv.Set(idx, seq[i].as<std::string>());
+                if (i > 0) joined += ",";
+                joined += seq[i].as<std::string>();
+            } else if (seq[i].IsMap()) {
+                all_scalar = false;
+                auto nested = ParseConfigValue(seq[i]);
+                for (auto& [nk, nv] : nested.Raw()) {
+                    std::string full = nk.empty() ? idx : idx + "." + nk;
+                    cv.Set(full, nv);
+                }
+            } else if (seq[i].IsSequence()) {
+                all_scalar = false;
+                ParseSequenceInto(cv, idx, seq[i]);
+            }
+        }
+        std::string size_key = prefix.empty()
+            ? "_size" : prefix + "._size";
+        cv.Set(size_key, std::to_string(seq.size()));
+
+        if (all_scalar && !prefix.empty()) {
+            cv.Set(prefix, joined);
+        }
     }
 };
 

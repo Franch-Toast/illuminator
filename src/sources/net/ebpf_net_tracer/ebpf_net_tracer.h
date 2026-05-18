@@ -18,87 +18,38 @@
 
 #pragma once
 
-#include <arpa/inet.h>           // inet_ntop
+#include <arpa/inet.h>
 #include <cstring>
-#include <string>
-#include <thread>
 
-#include "core/common/logging.h"
-#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
-#include "ebpf/loader/bpf_program_manager.h"
-#include "plugin/api/source_plugin.h"
+#include "sources/ebpf_ring_buffer_source.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
-class EbpfNetTracer : public SourcePlugin {
+class EbpfNetTracer : public EbpfRingBufferSource {
 public:
     const char* Name() const override { return "ebpf_net_tracer"; }
     const char* Version() const override { return "0.1.0"; }
-    bool IsPushMode() const override { return true; }
-    bool IsStub() const override { return stub_mode_; }
 
-    Status Init(const ConfigValue& config) override {
-        bpf_obj_path_ = config["bpf_object"].AsString("");
-        return Status::Ok();
+protected:
+    EbpfSourceBpfConfig BpfConfig() const override {
+        return {"net_tracer",
+                {"trace_inet_sock_set_state"},
+                "net_events",
+                "net-poll"};
     }
 
-    Status Start() override {
-        if (bpf_obj_path_.empty()) {
-            IL_WARN("ebpf_net_tracer: no BPF object, idle mode");
-            stub_mode_ = true;
-            return StartProcFallback();
-        }
+    ring_buffer_sample_fn EventCallback() const override {
+        return HandleEvent;
+    }
 
-        auto status = bpf_mgr_.LoadObject("net_tracer", bpf_obj_path_);
-        if (!status.ok()) return status;
-
-        // 挂载 inet_sock_set_state tracepoint BPF 程序
-        status = bpf_mgr_.AttachProgram("net_tracer", "trace_inet_sock_set_state");
-        if (!status.ok()) return status;
-
-        int map_fd = bpf_mgr_.GetMapFd("net_tracer", "net_events");
-        if (map_fd < 0) {
-            return Status::Error(StatusCode::kInternal, "net_events map not found");
-        }
-
-        ring_buf_ = bpf_mgr_.CreateRingBuffer(map_fd, HandleEvent, this);
-        if (!ring_buf_) {
-            return Status::Error(StatusCode::kInternal, "Failed to create ring buffer");
-        }
-
+    Status OnStubStart() override {
         running_ = true;
-        poll_thread_ = std::thread([this] {
-            SetThreadName("net-poll");
-            PollLoop();
-        });
-        IL_INFO("eBPF net tracer started");
-        return Status::Ok();
-    }
-
-    Status Stop() override {
-        running_ = false;
-        if (poll_thread_.joinable()) poll_thread_.join();
-        if (ring_buf_) { ring_buffer__free(ring_buf_); ring_buf_ = nullptr; }
-        bpf_mgr_.DetachAll();
         return Status::Ok();
     }
 
 private:
-    // /proc/net/tcp 备选启动（当前仅设置状态）
-    Status StartProcFallback() {
-        running_ = true;
-        return Status::Ok();
-    }
-
-    void PollLoop() {
-        while (running_) {
-            ring_buffer__poll(ring_buf_, 100 /* ms */);
-        }
-    }
-
-    // Ring Buffer 事件回调：将 BPF 事件转为 DataBatch Record
     static int HandleEvent(void* ctx, void* data, size_t size) {
         auto* self = static_cast<EbpfNetTracer*>(ctx);
         if (size < sizeof(il_net_event)) return 0;
@@ -132,12 +83,7 @@ private:
         return 0;
     }
 
-    std::string bpf_obj_path_;
-    bool running_ = false;
-    bool stub_mode_ = false;
-    BpfProgramManager bpf_mgr_;
-    struct ring_buffer* ring_buf_ = nullptr;
-    std::thread poll_thread_;
+    // Members inherited from EbpfRingBufferSource
 };
 
 IL_REGISTER_SOURCE("ebpf_net_tracer", EbpfNetTracer);

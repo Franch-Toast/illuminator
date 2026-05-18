@@ -154,6 +154,7 @@ export default function Timeline() {
   const fetchSummary = useCallback(async () => {
     try {
       const pipeRes = await fetch('/api/v1/pipelines')
+      if (!pipeRes.ok) return
       const pipeData = await pipeRes.json()
       const schedPipeline = (pipeData.pipelines || []).find((p: any) => p.name === 'sched_analysis')
       setStub(schedPipeline?.stub === true)

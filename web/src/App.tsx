@@ -65,7 +65,11 @@ const navItems = [
 export default function App() {
   const [version, setVersion] = useState('...')
   useEffect(() => {
-    fetch('/healthz').then(r => r.json())
+    fetch('/healthz')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        return r.json()
+      })
       .then(d => setVersion(d.version ?? '?'))
       .catch(() => setVersion('?'))
   }, [])

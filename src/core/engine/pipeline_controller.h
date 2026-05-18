@@ -10,7 +10,7 @@
 //
 // 数据流:
 //   Push Source → channel.TryEnqueue(DataBatch)  ─┐
-//   TimerWheel → CollectPool → src.Collect()     ─┤→ AsyncChannel<ChannelItem>
+//   TimerWheel → CollectPool → src.Collect()     ─┤→ AsyncChannel(ChannelItem)
 //   TimerWheel → channel.InjectFlush()           ─┘        │
 //                                                          ▼
 //                                                   ProcessThread
@@ -57,10 +57,11 @@ class PipelineController;
 class Pipeline {
 public:
     explicit Pipeline(const std::string& name,
+                      size_t channel_capacity = 4096,
                       DropPolicy drop_policy = DropPolicy::kDropNewest,
                       double bp_high = 0.8, double bp_low = 0.2)
         : name_(name),
-          ingest_channel_(drop_policy, bp_high, bp_low) {}
+          ingest_channel_(channel_capacity, drop_policy, bp_high, bp_low) {}
     ~Pipeline() { Stop(); }
 
     Pipeline(const Pipeline&) = delete;
@@ -362,7 +363,7 @@ private:
     std::unique_ptr<AggregatorPlugin> aggregator_;
     std::vector<std::unique_ptr<SinkPlugin>> sinks_;
 
-    AsyncChannel<4096> ingest_channel_;
+    AsyncChannel ingest_channel_;
     ThreadPool* sink_pool_ = nullptr;
 
     std::thread process_thread_;

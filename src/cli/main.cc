@@ -165,6 +165,9 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         }
         config = result.value();
         if (!config.log_level.empty()) SetLogLevel(config.log_level);
+        if (!config.log_file.empty())
+            illuminator::ConfigureFileLogging(
+                config.log_file, config.log_max_size, config.log_max_files);
     } else {
         IL_INFO("No config file specified, using built-in demo configuration");
         config = BuildDemoConfig();
@@ -232,8 +235,18 @@ static int RunCollect(int duration_sec, const std::string& log_level) {
     illuminator::RegisterBuiltinPlugins();
     auto config = BuildDemoConfig();
     illuminator::PipelineController controller;
-    controller.BuildFromConfig(config);
-    controller.StartAll();
+
+    auto build_st = controller.BuildFromConfig(config);
+    if (!build_st.ok()) {
+        IL_ERROR("Failed to build pipelines: {}", build_st.message());
+        return 1;
+    }
+
+    auto start_st = controller.StartAll();
+    if (!start_st.ok()) {
+        IL_ERROR("Failed to start pipelines: {}", start_st.message());
+        return 1;
+    }
 
     std::this_thread::sleep_for(std::chrono::seconds(duration_sec));
 

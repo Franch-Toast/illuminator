@@ -16,7 +16,7 @@ using namespace std::chrono_literals;
 
 // 空 channel：近似大小为 0，未处于反压状态。
 TEST(AsyncChannelTest, EmptyChannelHasExpectedInitialState) {
-    AsyncChannel<64> ch(DropPolicy::kDropNewest, 0.8, 0.2);
+    AsyncChannel ch(64, DropPolicy::kDropNewest, 0.8, 0.2);
     EXPECT_EQ(ch.SizeApprox(), 0u);
     EXPECT_FALSE(ch.IsBackpressured());
     EXPECT_EQ(ch.stats().enqueued.load(std::memory_order_relaxed), 0u);
@@ -27,7 +27,7 @@ TEST(AsyncChannelTest, EmptyChannelHasExpectedInitialState) {
 
 // 入队成功后 Dequeue 能取回同一批次的原始指针。
 TEST(AsyncChannelTest, EnqueueThenDequeueYieldsSameBatch) {
-    AsyncChannel<64> ch;
+    AsyncChannel ch(64);
 
     auto batch = std::make_shared<DataBatch>();
     DataBatch* raw = batch.get();
@@ -45,7 +45,7 @@ TEST(AsyncChannelTest, EnqueueThenDequeueYieldsSameBatch) {
 
 // InjectFlush：队列中出现 FlushSentinel 事件。
 TEST(AsyncChannelTest, InjectFlushEnqueuesFlushSentinel) {
-    AsyncChannel<64> ch;
+    AsyncChannel ch(64);
 
     ASSERT_TRUE(ch.InjectFlush());
     auto opt = ch.TryDequeue();
@@ -56,7 +56,7 @@ TEST(AsyncChannelTest, InjectFlushEnqueuesFlushSentinel) {
 
 // std::variant 派发：区分数据批次与控制哨兵。
 TEST(AsyncChannelTest, VariantDispatchDistinguishesDataAndFlush) {
-    AsyncChannel<64> ch;
+    AsyncChannel ch(64);
 
     auto batch = std::make_shared<DataBatch>();
     ASSERT_TRUE(ch.TryEnqueue(batch));
@@ -84,7 +84,7 @@ TEST(AsyncChannelTest, VariantDispatchDistinguishesDataAndFlush) {
 
 // DropNewest：队列满时新数据被拒收并计数 dropped。
 TEST(AsyncChannelTest, DropNewestDropsNewElementWhenFull) {
-    AsyncChannel<16> ch(DropPolicy::kDropNewest, 0.99, 0.01);  // 降低反压噪声，聚焦满队列行为
+    AsyncChannel ch(16, DropPolicy::kDropNewest, 0.99, 0.01);
 
     for (size_t i = 0;; ++i) {
         auto b = std::make_shared<DataBatch>();
@@ -102,7 +102,7 @@ TEST(AsyncChannelTest, DropNewestDropsNewElementWhenFull) {
 
 // DropOldest：队列满时会丢弃队头再接受新元素。
 TEST(AsyncChannelTest, DropOldestEvictsOldestWhenFull) {
-    AsyncChannel<16> ch(DropPolicy::kDropOldest, 0.99, 0.01);
+    AsyncChannel ch(16, DropPolicy::kDropOldest, 0.99, 0.01);
 
     auto oldest = std::make_shared<DataBatch>();
     ASSERT_TRUE(ch.TryEnqueue(oldest));
@@ -131,7 +131,7 @@ TEST(AsyncChannelTest, DropOldestEvictsOldestWhenFull) {
 
 // 反压：高水位触发、低水位解除（使用较小容量与高/低阈值便于逼近边界）。
 TEST(AsyncChannelTest, BackpressureSignalsHighAndClearsNearLowWatermark) {
-    AsyncChannel<64> ch(DropPolicy::kDropNewest, 0.8, 0.2);
+    AsyncChannel ch(64, DropPolicy::kDropNewest, 0.8, 0.2);
 
     ASSERT_FALSE(ch.IsBackpressured());
     auto target = static_cast<size_t>(64 * 0.8) + 2;
@@ -152,7 +152,7 @@ TEST(AsyncChannelTest, BackpressureSignalsHighAndClearsNearLowWatermark) {
 
 // 统计数据：enqueue/drop/dequeue/flush 计数与实际行为一致。
 TEST(AsyncChannelTest, StatsCountersTrackOperations) {
-    AsyncChannel<64> ch(DropPolicy::kDropNewest, 0.99, 0.01);
+    AsyncChannel ch(64, DropPolicy::kDropNewest, 0.99, 0.01);
 
     ASSERT_TRUE(ch.TryEnqueue(std::make_shared<DataBatch>()));
     ASSERT_TRUE(ch.InjectFlush());
@@ -166,7 +166,7 @@ TEST(AsyncChannelTest, StatsCountersTrackOperations) {
     EXPECT_EQ(ch.stats().flush_injected.load(std::memory_order_relaxed), 1u);
     EXPECT_EQ(ch.stats().dequeued.load(std::memory_order_relaxed), 3u);
 
-    AsyncChannel<4> tiny(DropPolicy::kDropNewest, 0.99, 0.01);
+    AsyncChannel tiny(4, DropPolicy::kDropNewest, 0.99, 0.01);
     for (size_t i = 0; i < tiny.capacity(); ++i) {
         ASSERT_TRUE(tiny.TryEnqueue(std::make_shared<DataBatch>()));
     }
@@ -177,7 +177,7 @@ TEST(AsyncChannelTest, StatsCountersTrackOperations) {
 
 // Dequeue 超时：空闲时应返回 std::nullopt。
 TEST(AsyncChannelTest, DequeueReturnsNulloptOnTimeoutWhenEmpty) {
-    AsyncChannel<32> ch;
+    AsyncChannel ch(32);
     auto dead = std::chrono::steady_clock::now();
     auto res = ch.Dequeue(80ms);
     EXPECT_FALSE(res.has_value());
@@ -187,7 +187,7 @@ TEST(AsyncChannelTest, DequeueReturnsNulloptOnTimeoutWhenEmpty) {
 
 // 队列满时 InjectFlush 通过丢弃一个槽位仍可优先注入 FlushSentinel。
 TEST(AsyncChannelTest, InjectFlushUsesPrioritySlotWhenFull) {
-    AsyncChannel<8> ch(DropPolicy::kDropNewest, 0.99, 0.01);
+    AsyncChannel ch(8, DropPolicy::kDropNewest, 0.99, 0.01);
 
     for (size_t i = 0; i < ch.capacity(); ++i) {
         ASSERT_TRUE(ch.TryEnqueue(std::make_shared<DataBatch>()));

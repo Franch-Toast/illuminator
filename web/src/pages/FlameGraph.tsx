@@ -35,6 +35,9 @@ async function fetchFlameGraphData(profileType: string): Promise<FetchResult> {
   try {
     // Check pipeline stub status first
     const pipeRes = await fetch('/api/v1/pipelines')
+    if (!pipeRes.ok) {
+      return { data: null, stub: false, errorMsg: `HTTP ${pipeRes.status}` }
+    }
     const pipeData = await pipeRes.json()
     const profilePipeline = (pipeData.pipelines || []).find(
       (p: any) => p.name === (profileType === 'offcpu' ? 'offcpu_analysis' : 'cpu_profile'),
