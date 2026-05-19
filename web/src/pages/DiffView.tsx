@@ -91,6 +91,94 @@ function computeDiff(base: FlameNode, comp: FlameNode): DiffEntry[] {
   }))
 }
 
+interface DiffFlameNode extends FlameNode {
+  delta?: number
+  children?: DiffFlameNode[]
+}
+
+function buildDiffFlame(base: FlameNode, comp: FlameNode): DiffFlameNode {
+  const baseMap = aggregateFunctions(base)
+  const compMap = aggregateFunctions(comp)
+
+  function annotate(node: FlameNode): DiffFlameNode {
+    const bv = baseMap.get(node.name) || 0
+    const cv = compMap.get(node.name) || 0
+    const delta = bv > 0 ? (cv - bv) / bv : (cv > 0 ? 1 : 0)
+    return {
+      name: node.name,
+      value: node.value,
+      delta,
+      children: node.children?.map(annotate),
+    }
+  }
+
+  const merged: DiffFlameNode = {
+    name: 'root', value: 0, delta: 0,
+    children: [...(comp.children || [])].map(annotate),
+  }
+  merged.value = merged.children?.reduce((s, c) => s + c.value, 0) || 0
+  return merged
+}
+
+function diffColor(d: any): string {
+  const delta = d.data?.delta ?? 0
+  if (Math.abs(delta) < 0.05) return '#6b7280'
+  if (delta > 0) {
+    const intensity = Math.min(1, delta)
+    const r = Math.round(127 + 128 * intensity)
+    const g = Math.round(60 * (1 - intensity))
+    return `rgb(${r},${g},${g})`
+  }
+  const intensity = Math.min(1, -delta)
+  const g = Math.round(127 + 128 * intensity)
+  const r = Math.round(60 * (1 - intensity))
+  return `rgb(${r},${g},${r})`
+}
+
+function DiffFlameGraph({ base, comp }: { base: FlameNode; comp: FlameNode }) {
+  const diffChartRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!diffChartRef.current) return
+    const el = diffChartRef.current
+    el.innerHTML = ''
+
+    const diffData = buildDiffFlame(base, comp)
+    const width = el.clientWidth || 900
+    const chart = flamegraph()
+      .width(width)
+      .cellHeight(18)
+      .minFrameSize(1)
+      .transitionDuration(300)
+      .inverted(true)
+      .selfValue(false)
+      .setColorMapper(diffColor)
+
+    select(el).datum(diffData).call(chart as any)
+  }, [base, comp])
+
+  return (
+    <div style={{ ...card, marginBottom: 16 }}>
+      <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 600 }}>Differential Flame Graph</h3>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 8, fontSize: 11, alignItems: 'center' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 2, background: 'rgb(180,30,30)' }} />
+          Regression (increased)
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 2, background: '#6b7280' }} />
+          Unchanged
+        </span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 2, background: 'rgb(30,180,30)' }} />
+          Improvement (decreased)
+        </span>
+      </div>
+      <div ref={diffChartRef} style={{ overflowX: 'auto' }} />
+    </div>
+  )
+}
+
 type ProfileSource = 'oncpu' | 'offcpu'
 
 const card: React.CSSProperties = {
@@ -253,6 +341,11 @@ export default function DiffView() {
             <div style={{ fontSize: 22, fontWeight: 700, color: '#888' }}>{summary.removed}</div>
           </div>
         </div>
+      )}
+
+      {/* Differential Flame Graph */}
+      {baseProfile && compProfile && (
+        <DiffFlameGraph base={baseProfile} comp={compProfile} />
       )}
 
       {/* Diff Table */}

@@ -301,7 +301,7 @@ export default function Timeline() {
         />
       )}
       {activeTab === 'timeseries' && <TimeSeriesTab history={history} />}
-      {activeTab === 'migrations' && <MigrationsTab events={events} />}
+      {activeTab === 'migrations' && <MigrationsTab events={events} summaries={sorted} />}
       {activeTab === 'wakeups' && <WakeupsTab wakeups={wakeups} />}
     </div>
   )
@@ -553,10 +553,13 @@ function TimeSeriesTab({ history }: { history: HistoryPoint[] }) {
   )
 }
 
-function MigrationsTab({ events }: { events: SchedEvent[] }) {
-  const migrateEvents = useMemo(() =>
-    events.filter(e => e.event_type === 'migrate')
-  , [events])
+interface GanttBlock {
+  cpu: number; comm: string; pid: number
+  start: number; end: number
+}
+
+function MigrationsTab({ events, summaries }: { events: SchedEvent[]; summaries?: SchedSummary[] }) {
+  const [viewMode, setViewMode] = useState<'gantt' | 'scatter'>('gantt')
 
   const cpuSet = useMemo(() => {
     const s = new Set<number>()
@@ -564,76 +567,182 @@ function MigrationsTab({ events }: { events: SchedEvent[] }) {
     return [...s].sort((a, b) => a - b)
   }, [events])
 
+  const ganttBlocks = useMemo(() => {
+    const blocks: GanttBlock[] = []
+    const switchEvents = events.filter(e => e.event_type === 'switch')
+    const cpuState = new Map<number, { comm: string; pid: number; start: number }>()
+
+    for (const e of switchEvents) {
+      const prev = cpuState.get(e.cpu)
+      if (prev && prev.pid !== 0) {
+        blocks.push({
+          cpu: e.cpu, comm: prev.comm, pid: prev.pid,
+          start: prev.start, end: e.timestamp_ms,
+        })
+      }
+      cpuState.set(e.cpu, { comm: e.next_comm, pid: e.next_pid, start: e.timestamp_ms })
+    }
+    return blocks
+  }, [events])
+
   const commColors = useMemo(() => {
-    const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#a855f7', '#ec4899', '#06b6d4', '#84cc16']
+    const palette = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#a855f7', '#ec4899', '#06b6d4', '#84cc16',
+      '#f97316', '#14b8a6', '#8b5cf6', '#e11d48', '#0ea5e9', '#65a30d']
     const map = new Map<string, string>()
     const comms = new Set<string>()
-    for (const e of migrateEvents) {
+    for (const b of ganttBlocks) comms.add(b.comm)
+    for (const e of events.filter(e => e.event_type === 'migrate')) {
       comms.add(e.next_comm || e.prev_comm)
     }
     let i = 0
     for (const c of comms) {
-      map.set(c, colors[i % colors.length]!)
+      map.set(c, palette[i % palette.length]!)
       i++
     }
     return map
-  }, [migrateEvents])
+  }, [ganttBlocks, events])
 
-  if (migrateEvents.length === 0) {
+  const migrationSummaries = useMemo(() =>
+    (summaries || []).filter(s => s.migrate_count > 0).sort((a, b) => b.migrate_count - a.migrate_count)
+  , [summaries])
+
+  if (events.length === 0) {
     return (
       <div style={card}>
-        <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>CPU Migration Events</h3>
-        <p style={{ color: '#888', fontSize: 14, textAlign: 'center', padding: 40 }}>
-          No migration events captured yet. Enable detailed_mode and track_migrations in sched_analysis.
-        </p>
+        <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>Scheduler Gantt Chart</h3>
+        {migrationSummaries.length > 0 ? (
+          <>
+            <p style={{ color: '#888', fontSize: 13, marginBottom: 12 }}>
+              Aggregated mode — enable <code style={{ color: '#60a5fa' }}>detailed_mode: true</code> for per-event Gantt. Showing migration summary:
+            </p>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid #2a2d35' }}>
+                    <th style={{ textAlign: 'left', padding: '6px 8px', color: '#888', fontWeight: 500 }}>PROCESS</th>
+                    <th style={{ textAlign: 'right', padding: '6px 8px', color: '#888', fontWeight: 500 }}>PID</th>
+                    <th style={{ textAlign: 'right', padding: '6px 8px', color: '#888', fontWeight: 500 }}>MIGRATIONS</th>
+                    <th style={{ textAlign: 'right', padding: '6px 8px', color: '#888', fontWeight: 500 }}>CTX SWITCHES</th>
+                    <th style={{ padding: '6px 8px', color: '#888', fontWeight: 500 }}>MIGRATION BAR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {migrationSummaries.slice(0, 30).map(s => {
+                    const maxMig = migrationSummaries[0]?.migrate_count || 1
+                    return (
+                      <tr key={s.pid} style={{ borderBottom: '1px solid #1a1d23' }}>
+                        <td style={{ padding: '5px 8px', fontFamily: 'monospace' }}>{s.comm}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'right' }}>{s.pid}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'right', color: '#f59e0b' }}>{s.migrate_count}</td>
+                        <td style={{ padding: '5px 8px', textAlign: 'right' }}>{s.switch_count}</td>
+                        <td style={{ padding: '5px 8px' }}>
+                          <div style={{
+                            width: `${(s.migrate_count / maxMig) * 100}%`, minWidth: 4,
+                            height: 12, borderRadius: 3, background: '#f59e0b', opacity: 0.7,
+                          }} />
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        ) : (
+          <p style={{ color: '#888', fontSize: 14, textAlign: 'center', padding: 40 }}>
+            No scheduling events captured. Enable <code style={{ color: '#60a5fa' }}>detailed_mode: true</code> in sched_analysis for per-event Gantt chart.
+          </p>
+        )}
       </div>
     )
   }
 
-  const timeMin = migrateEvents.length > 0 ? migrateEvents[0]!.timestamp_ms : 0
-  const timeMax = migrateEvents.length > 0 ? migrateEvents[migrateEvents.length - 1]!.timestamp_ms : 1
+  const timeMin = events[0]!.timestamp_ms
+  const timeMax = events[events.length - 1]!.timestamp_ms
   const timeRange = Math.max(timeMax - timeMin, 1)
-  const svgWidth = 800
-  const svgHeight = Math.max(120, cpuSet.length * 40 + 40)
-  const laneH = 30
+  const svgWidth = 900
+  const labelW = 50
+  const chartW = svgWidth - labelW - 10
+  const laneH = 24
+  const svgHeight = Math.max(120, cpuSet.length * (laneH + 4) + 30)
 
   return (
     <div style={card}>
-      <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>CPU Migration Swimlane ({migrateEvents.length} events)</h3>
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-        {[...commColors.entries()].map(([comm, color]) => (
-          <span key={comm} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#b0b0b0' }}>
-            <span style={{ width: 10, height: 10, borderRadius: 2, background: color, display: 'inline-block' }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <h3 style={{ margin: 0, fontSize: 16 }}>
+          {viewMode === 'gantt' ? 'CPU Scheduling Gantt Chart' : 'CPU Migration Scatter'}
+          <span style={{ fontSize: 12, color: '#888', marginLeft: 8 }}>({events.length} events)</span>
+        </h3>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button onClick={() => setViewMode('gantt')} style={{
+            padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+            border: `1px solid ${viewMode === 'gantt' ? '#60a5fa' : '#2a2d35'}`,
+            background: viewMode === 'gantt' ? '#252830' : 'transparent',
+            color: viewMode === 'gantt' ? '#60a5fa' : '#b0b0b0',
+          }}>Gantt</button>
+          <button onClick={() => setViewMode('scatter')} style={{
+            padding: '4px 10px', borderRadius: 4, fontSize: 11, cursor: 'pointer',
+            border: `1px solid ${viewMode === 'scatter' ? '#60a5fa' : '#2a2d35'}`,
+            background: viewMode === 'scatter' ? '#252830' : 'transparent',
+            color: viewMode === 'scatter' ? '#60a5fa' : '#b0b0b0',
+          }}>Scatter</button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
+        {[...commColors.entries()].slice(0, 12).map(([comm, color]) => (
+          <span key={comm} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#b0b0b0' }}>
+            <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: 'inline-block' }} />
             {comm}
           </span>
         ))}
+        {commColors.size > 12 && (
+          <span style={{ fontSize: 10, color: '#666' }}>+{commColors.size - 12} more</span>
+        )}
       </div>
+
       <div style={{ overflowX: 'auto' }}>
         <svg width={svgWidth} height={svgHeight} style={{ display: 'block' }}>
           {cpuSet.map((cpu, i) => {
-            const y = 20 + i * 40
+            const y = 8 + i * (laneH + 4)
             return (
               <g key={cpu}>
-                <text x={0} y={y + laneH / 2 + 4} fill="#888" fontSize={11} fontFamily="monospace">cpu{cpu}</text>
-                <rect x={50} y={y} width={svgWidth - 60} height={laneH} rx={4} fill="#1f2228" stroke="#2a2d35" strokeWidth={0.5} />
+                <text x={0} y={y + laneH / 2 + 3} fill="#888" fontSize={10} fontFamily="monospace">cpu{cpu}</text>
+                <rect x={labelW} y={y} width={chartW} height={laneH} rx={3} fill="#1a1d23" stroke="#2a2d35" strokeWidth={0.5} />
               </g>
             )
           })}
-          {migrateEvents.map((e, i) => {
-            const cpuIdx = cpuSet.indexOf(e.cpu)
-            if (cpuIdx < 0) return null
-            const x = 50 + ((e.timestamp_ms - timeMin) / timeRange) * (svgWidth - 60)
-            const y = 20 + cpuIdx * 40 + laneH / 2
-            const comm = e.next_comm || e.prev_comm
-            const color = commColors.get(comm) || '#888'
-            return (
-              <g key={i}>
-                <circle cx={x} cy={y} r={4} fill={color} opacity={0.8}>
+
+          {viewMode === 'gantt' ? (
+            ganttBlocks.map((b, i) => {
+              const cpuIdx = cpuSet.indexOf(b.cpu)
+              if (cpuIdx < 0) return null
+              const x = labelW + ((b.start - timeMin) / timeRange) * chartW
+              const w = Math.max(1, ((b.end - b.start) / timeRange) * chartW)
+              const y = 8 + cpuIdx * (laneH + 4) + 2
+              const color = commColors.get(b.comm) || '#888'
+              return (
+                <rect key={i} x={x} y={y} width={w} height={laneH - 4} rx={2}
+                  fill={color} opacity={0.8}>
+                  <title>{b.comm} (pid {b.pid}) on cpu{b.cpu}: {(b.end - b.start).toFixed(0)}ms</title>
+                </rect>
+              )
+            })
+          ) : (
+            events.filter(e => e.event_type === 'migrate').map((e, i) => {
+              const cpuIdx = cpuSet.indexOf(e.cpu)
+              if (cpuIdx < 0) return null
+              const x = labelW + ((e.timestamp_ms - timeMin) / timeRange) * chartW
+              const y = 8 + cpuIdx * (laneH + 4) + laneH / 2
+              const comm = e.next_comm || e.prev_comm
+              const color = commColors.get(comm) || '#888'
+              return (
+                <circle key={i} cx={x} cy={y} r={3} fill={color} opacity={0.8}>
                   <title>{comm} (pid {e.next_pid}) → cpu{e.cpu} @{new Date(e.timestamp_ms).toLocaleTimeString()}</title>
                 </circle>
-              </g>
-            )
-          })}
+              )
+            })
+          )}
         </svg>
       </div>
     </div>

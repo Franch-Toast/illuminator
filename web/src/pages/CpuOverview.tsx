@@ -132,7 +132,8 @@ export default function CpuOverview() {
       setData(parsed)
       setError(null)
       if (parsed.total) {
-        timeSeriesStore.append('cpu.total', Date.now(), {
+        const now = Date.now()
+        timeSeriesStore.append('cpu.total', now, {
           user: parsed.total.user_pct,
           system: parsed.total.system_pct,
           iowait: parsed.total.iowait_pct,
@@ -140,6 +141,11 @@ export default function CpuOverview() {
           steal: parsed.total.steal_pct,
           idle: parsed.total.idle_pct,
         })
+        for (const core of parsed.cores) {
+          timeSeriesStore.append(`cpu.core.${core.cpu}`, now, {
+            busy: core.busy_pct,
+          })
+        }
       }
     } catch (e: any) {
       setError(e.message)
@@ -252,6 +258,11 @@ export default function CpuOverview() {
         </div>
       </div>
 
+      {/* CPU Core Heatmap Timeline */}
+      {sortedCores.length > 0 && (
+        <CoreHeatmapTimeline coreNames={sortedCores.map(c => c.cpu)} range={range} />
+      )}
+
       {/* Stats Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
         <StatCard label="Load 1m" value={data.loadavg?.load_1m.toFixed(2)} />
@@ -282,6 +293,100 @@ function StatCard({ label, value, small }: { label: string; value?: string; smal
       </div>
       <div style={{ fontSize: small ? 20 : 24, fontWeight: 700, color: value ? colors.accent : '#555' }}>
         {value ?? '—'}
+      </div>
+    </div>
+  )
+}
+
+function CoreHeatmapTimeline({ coreNames, range }: {
+  coreNames: string[]
+  range: { start: number; end: number }
+}) {
+  const [heatData, setHeatData] = useState<Map<string, DataPoint[]>>(new Map())
+
+  useEffect(() => {
+    const update = () => {
+      const map = new Map<string, DataPoint[]>()
+      for (const name of coreNames) {
+        map.set(name, timeSeriesStore.query(`cpu.core.${name}`, range.start, range.end))
+      }
+      setHeatData(map)
+    }
+    update()
+    const unsubs = coreNames.map(n =>
+      timeSeriesStore.subscribe(`cpu.core.${n}`, update)
+    )
+    return () => unsubs.forEach(fn => fn())
+  }, [coreNames, range.start, range.end])
+
+  const maxCols = 60
+  const allTimes = new Set<number>()
+  for (const [, points] of heatData) {
+    for (const p of points) allTimes.add(p.time)
+  }
+  const sortedTimes = Array.from(allTimes).sort((a, b) => a - b)
+  const step = Math.max(1, Math.ceil(sortedTimes.length / maxCols))
+  const sampledTimes = sortedTimes.filter((_, i) => i % step === 0)
+
+  if (sampledTimes.length < 2) return null
+
+  const cellW = Math.max(4, Math.min(14, Math.floor(600 / sampledTimes.length)))
+  const cellH = 14
+  const labelW = 50
+  const svgW = labelW + sampledTimes.length * (cellW + 1)
+  const svgH = coreNames.length * (cellH + 1) + 20
+
+  return (
+    <div style={{ ...card, marginBottom: 16 }}>
+      <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>Core Activity Timeline</h3>
+      <div style={{ overflowX: 'auto' }}>
+        <svg width={svgW} height={svgH} style={{ display: 'block' }}>
+          {coreNames.map((name, row) => {
+            const points = heatData.get(name) || []
+            const byTime = new Map<number, number>()
+            for (const p of points) byTime.set(p.time, p.busy ?? 0)
+
+            return (
+              <g key={name}>
+                <text x={0} y={row * (cellH + 1) + cellH - 2} fill="#888"
+                  fontSize={9} fontFamily="monospace">{name}</text>
+                {sampledTimes.map((t, col) => {
+                  let closest = 0
+                  let minDist = Infinity
+                  for (const p of points) {
+                    const d = Math.abs(p.time - t)
+                    if (d < minDist) { minDist = d; closest = p.busy ?? 0 }
+                  }
+                  return (
+                    <rect key={col}
+                      x={labelW + col * (cellW + 1)}
+                      y={row * (cellH + 1)}
+                      width={cellW} height={cellH}
+                      rx={2}
+                      fill={busyHeatColor(closest)}
+                      opacity={0.9}
+                    >
+                      <title>{name} @ {new Date(t).toLocaleTimeString()}: {closest.toFixed(1)}%</title>
+                    </rect>
+                  )
+                })}
+              </g>
+            )
+          })}
+          {/* Time axis */}
+          {sampledTimes.filter((_, i) => i % Math.max(1, Math.floor(sampledTimes.length / 6)) === 0).map((t, i) => {
+            const col = sampledTimes.indexOf(t)
+            return (
+              <text key={i}
+                x={labelW + col * (cellW + 1)}
+                y={svgH - 2}
+                fill="#666" fontSize={8}
+              >
+                {new Date(t).toLocaleTimeString(undefined, { minute: '2-digit', second: '2-digit' })}
+              </text>
+            )
+          })}
+        </svg>
       </div>
     </div>
   )

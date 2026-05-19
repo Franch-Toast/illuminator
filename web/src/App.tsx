@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import TimeControls from './components/TimeControls/TimeControls'
 import StatusBar from './components/Layout/StatusBar'
 import { usePipelinePolling } from './hooks/usePipelinePolling'
+import { useTimeStore } from './stores/useTimeStore'
 import CpuOverview from './pages/CpuOverview'
 import ProcessExplorer from './pages/ProcessExplorer'
 import FlameGraph from './pages/FlameGraph'
@@ -47,9 +48,36 @@ const navItems = [
   { path: '/system', label: 'System', icon: '⚙️' },
 ]
 
+const WINDOW_PRESETS = [30_000, 60_000, 300_000, 900_000]
+
 export default function App() {
   const [version, setVersion] = useState('...')
+  const [showShortcuts, setShowShortcuts] = useState(false)
   usePipelinePolling(3000)
+
+  const togglePause = useTimeStore(s => s.togglePause)
+  const setWindowMs = useTimeStore(s => s.setWindowMs)
+  const windowMs = useTimeStore(s => s.windowMs)
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    const tag = (e.target as HTMLElement)?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+    if (e.key === ' ') {
+      e.preventDefault()
+      togglePause()
+    } else if (e.key === 't' || e.key === 'T') {
+      const idx = WINDOW_PRESETS.indexOf(windowMs)
+      const next = WINDOW_PRESETS[(idx + 1) % WINDOW_PRESETS.length]!
+      setWindowMs(next)
+    } else if (e.key === '?') {
+      setShowShortcuts(prev => !prev)
+    }
+  }, [togglePause, setWindowMs, windowMs])
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [handleKeyDown])
 
   useEffect(() => {
     fetch('/healthz')
@@ -119,6 +147,33 @@ export default function App() {
 
         <StatusBar />
       </div>
+
+      {showShortcuts && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }} onClick={() => setShowShortcuts(false)}>
+          <div style={{
+            background: '#1e2028', border: '1px solid #2a2d35', borderRadius: 12,
+            padding: 24, minWidth: 300,
+          }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 16px', fontSize: 16, color: '#60a5fa' }}>Keyboard Shortcuts</h3>
+            {[
+              ['Space', 'Toggle Live / Pause'],
+              ['T', 'Cycle time window (30s → 1m → 5m → 15m)'],
+              ['?', 'Show / hide this help'],
+            ].map(([key, desc]) => (
+              <div key={key} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: 13 }}>
+                <kbd style={{
+                  background: '#252830', border: '1px solid #3a3d45', borderRadius: 4,
+                  padding: '2px 8px', fontFamily: 'monospace', fontSize: 12,
+                }}>{key}</kbd>
+                <span style={{ color: '#b0b0b0' }}>{desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

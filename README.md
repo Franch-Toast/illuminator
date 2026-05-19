@@ -16,8 +16,11 @@
   - **WASM**（沙箱）：多语言编写，内存隔离
 - **存储抽象层**：可插拔后端（SQLite 默认）
 - **多格式导出**：pprof、OTLP、Prometheus、JSON
-- **Web 可视化平台**：实时仪表盘、火焰图（On-CPU/Off-CPU）、调度器时间线、对比分析
-- **WebSocket 实时推送**：独立端口（默认 9528），前端自动重连
+- **Web 可视化平台**：实时仪表盘、火焰图（On-CPU/Off-CPU）、调度器分析、差异火焰图、SQL 查询控制台、系统健康监控
+  - **全局时间控制**：LIVE/PAUSED 模式切换、30s/1m/5m/15m 时间窗口、键盘快捷键（Space/T/?）
+  - **Zustand 状态管理**：全局时间、管道状态、过滤器三大 Store
+  - **TimeSeriesStore**：前端 RingBuffer 时间序列缓存，支持按时间范围查询和订阅通知
+- **WebSocket 实时推送**：独立端口（默认 9528），前端 WsManager 单例自动重连
 - **自观测能力**：内部指标（Counter/Gauge/Histogram）、健康检查、RSS 资源限制器
 
 ---
@@ -59,8 +62,9 @@
   └──────────────────────┬─────────────────────────────────────────┘
                          │ HTTP (cpp-httplib) / WebSocket (独立端口)
   ┌──────────────────────▼─────────────────────────────────────────┐
-  │              Web 可视化平台 (React + TypeScript)                 │
-  │  Dashboard │ Flame Graph │ Timeline │ Diff View │ Query Console │
+  │              Web 可视化平台 (React + TypeScript + Zustand)         │
+  │  TimeControls │ Dashboard │ Profiler │ Scheduler │ Compare       │
+  │  Query Console │ System │ StatusBar │ Keyboard Shortcuts          │
   └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -89,7 +93,10 @@ illuminator/
 │
 ├── docs/                       # ===== 设计文档 =====
 │   ├── pipeline_v3_design.md   #   Pipeline v3 事件驱动架构设计文档
-│   └── architecture_audit_v3.md#   全面架构审计报告 (P0-P2 缺陷追踪)
+│   ├── architecture_audit_v4.md#   全面架构审计报告 (P0-P2 缺陷追踪)
+│   ├── frontend_architecture_design.md  # 前端架构设计方案
+│   ├── frontend_implementation_report.md# 前端实施报告
+│   └── onboarding_guide.md     #   新人入门指南
 │
 ├── src/                        # ===== 全部 C++ 源代码 =====
 │   ├── core/                   # 核心引擎
@@ -167,24 +174,37 @@ illuminator/
 ├── third_party/                # ===== 第三方库 (vendored) =====
 │   └── cpp-httplib/            #   cpp-httplib (单头文件 HTTP 服务器)
 │
-└── web/                        # ===== Web 前端 (React + TypeScript) =====
-    ├── package.json            #   npm 依赖
+└── web/                        # ===== Web 前端 (React + TypeScript + Zustand) =====
+    ├── package.json            #   npm 依赖 (含 zustand, date-fns)
     ├── vite.config.ts          #   Vite 构建配置 (含 API 代理)
     ├── src/
-    │   ├── App.tsx             #   路由: / /processes /flamegraph /timeline /diff /query
-    │   ├── hooks/
-    │   │   ├── useApi.ts       #     REST API hooks (pipelines, CPU, sched 等)
+    │   ├── App.tsx             #   路由 + 全局键盘快捷键 (Space/T/?) + 快捷键帮助
+    │   ├── stores/             #   Zustand 全局状态管理
+    │   │   ├── useTimeStore.ts #     全局时间 (LIVE/PAUSED, 时间窗口, 游标)
+    │   │   ├── usePipelineStore.ts#  管道状态
+    │   │   └── useFilterStore.ts#    全局过滤器 (PID, comm, CPU)
+    │   ├── services/           #   数据服务层
+    │   │   ├── apiClient.ts    #     统一 REST API 客户端 (类型安全)
+    │   │   ├── wsManager.ts    #     WebSocket 单例管理器 (自动重连)
+    │   │   └── timeSeriesStore.ts#   前端 RingBuffer 时间序列缓存
+    │   ├── components/         #   共享 UI 组件
+    │   │   ├── TimeControls/   #     全局时间控制器 (LIVE/PAUSED, 窗口选择)
+    │   │   └── Layout/         #     StatusBar (管道状态, WS 连接)
+    │   ├── hooks/              #   自定义 hooks
+    │   │   ├── usePolling.ts   #     通用轮询 hook (响应全局时间模式)
+    │   │   ├── usePipelinePolling.ts# 管道状态轮询
     │   │   ├── useCpuMetrics.ts#     CPU 指标专用 hook
     │   │   └── useWebSocket.ts #     WebSocket 自动重连 hook
     │   ├── styles/
     │   │   └── theme.ts        #     设计令牌 (颜色、间距、字体)
-    │   └── pages/              #   6 个页面组件
-    │       ├── CpuOverview.tsx  #     CPU 概览 (利用率/核心热力图/Pipeline Channels)
+    │   └── pages/              #   7 个页面组件
+    │       ├── CpuOverview.tsx  #     Dashboard (利用率/热力图/Core Timeline/Pipeline Health)
     │       ├── ProcessExplorer.tsx#   进程/线程浏览器 (Top-N, 排序/过滤)
-    │       ├── FlameGraph.tsx   #     火焰图 (On-CPU / Off-CPU, SVG 导出)
-    │       ├── Timeline.tsx     #     调度器分析 (时序/迁移/Wakeup/延迟分布)
-    │       ├── DiffView.tsx     #     Profile 对比分析
-    │       └── QueryConsole.tsx #     SQL 查询控制台 (WIP)
+    │       ├── FlameGraph.tsx   #     Profiler (On-CPU/Off-CPU, 快照缓存, SVG 导出)
+    │       ├── Timeline.tsx     #     Scheduler (Overview/TimeSeries/Gantt/Wakeups)
+    │       ├── DiffView.tsx     #     Compare (双 Profile 捕获, 差异火焰图, Diff 表格)
+    │       ├── QueryConsole.tsx #     SQL 查询控制台
+    │       └── SystemPage.tsx   #     System (健康状态, 管道详情, 内部指标)
     └── dist/                   #   前端构建产物
 ```
 
@@ -219,7 +239,9 @@ illuminator/
 | React 18 | UI 框架 |
 | react-router-dom | 路由 |
 | Recharts | 图表组件 |
-| d3-flame-graph | 火焰图渲染 |
+| d3-flame-graph | 火焰图渲染（含差异火焰图） |
+| Zustand | 全局状态管理 |
+| date-fns | 日期格式化工具 |
 | Vite 5 | 构建工具 |
 
 ---
@@ -307,6 +329,7 @@ sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 - `GET /api/v1/cpu/sched/history` — 调度历史
 - `GET /api/v1/cpu/sched/events` — 调度事件
 - `GET /api/v1/cpu/sched/wakeups` — Wakeup 链
+- `POST /api/v1/query` — SQL 查询（只读 SELECT，返回 JSON 行数据）
 - `GET /api/v1/internal_metrics` — 内部指标（JSON）
 
 **WebSocket**
@@ -520,6 +543,30 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Aggregators** | cpu_stats_aggregator | 1 | 窗口聚合、avg/min/max/p50/p99、Flush 清空 |
 | **Sinks** | console, file, local_storage, otlp, pprof, prometheus, websocket | 7 | I/O 写入、格式化、缓冲淘汰、pipeline 隔离 |
 | **总计** | | **21** | |
+
+---
+
+## Web 前端功能
+
+### 全局交互
+
+| 功能 | 说明 |
+|------|------|
+| **TimeControls** | 顶部工具栏，LIVE/PAUSED 模式切换，30s/1m/5m/15m 时间窗口选择 |
+| **StatusBar** | 底部状态栏，显示运行管道数和 WebSocket 连接状态 |
+| **键盘快捷键** | `Space` 暂停/恢复、`T` 切换时间窗口、`?` 显示帮助 |
+
+### 页面功能
+
+| 页面 | 路由 | 核心功能 |
+|------|------|----------|
+| **Dashboard** | `/` | CPU 利用率趋势图、Per-core 热力图、**Core Activity Timeline**（per-core 历史热力图）、Stats Cards、Pipeline Health 表格 |
+| **Processes** | `/processes` | 进程/线程 CPU 排行（Top-N）、排序/过滤 |
+| **Profiler** | `/profiler` | On-CPU / Off-CPU 火焰图（d3-flame-graph）、函数搜索、SVG 导出、快照缓存 |
+| **Scheduler** | `/scheduler` | Overview（延迟分布/Top 进程/统计表格）、Time Series（趋势图）、**Gantt Chart**（CPU 泳道甘特图/散点图双模式）、Wakeups |
+| **Compare** | `/compare` | 双 Profile 捕获（Base/Compare，On-CPU/Off-CPU）、**差异火焰图**（红/灰/绿色映射）、Function Diff 表格（1000+ 函数对比） |
+| **Query** | `/query` | SQL 查询控制台（只读 SELECT）、示例查询、执行耗时统计 |
+| **System** | `/system` | 系统健康状态、聚合统计、管道详情表格、内部指标 JSON |
 
 ---
 
