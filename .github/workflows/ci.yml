@@ -1,0 +1,267 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, infra_optimize]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BAZEL_CACHE_DIR: ~/.cache/bazel
+
+jobs:
+  # ===========================================================
+  # Layer 1 — Fast Gate (every push, < 5 min)
+  # ===========================================================
+
+  backend-build:
+    name: "C++ Backend Build"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+          key: bazel-build-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
+          restore-keys: |
+            bazel-build-${{ runner.os }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Build all targets
+        run: bazel build //src/...
+
+  backend-test:
+    name: "C++ Unit Tests"
+    needs: backend-build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+          key: bazel-test-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
+          restore-keys: |
+            bazel-test-${{ runner.os }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Run all tests
+        run: bazel test //src/... --test_output=errors --test_summary=detailed
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-test-logs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          retention-days: 7
+
+  bpf-probes:
+    name: "eBPF Probe Compilation"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+          key: bazel-bpf-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'src/ebpf/**') }}
+          restore-keys: |
+            bazel-bpf-${{ runner.os }}-
+
+      - name: Install clang for BPF compilation
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends clang
+
+      - name: Compile all BPF probes
+        run: bazel build //src/ebpf/probes:all
+
+  frontend-build:
+    name: "Frontend Build + TypeCheck"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Vite production build
+        run: npx vite build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist/
+          retention-days: 3
+
+  # ===========================================================
+  # Layer 2 — Deep Checks (PR only)
+  # ===========================================================
+
+  sanitizer-asan:
+    name: "AddressSanitizer"
+    if: github.event_name == 'pull_request'
+    needs: backend-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+          key: bazel-asan-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
+          restore-keys: |
+            bazel-asan-${{ runner.os }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Run tests with AddressSanitizer
+        run: bazel test //src/... --config=asan --test_output=errors
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+
+      - name: Upload ASAN logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-logs
+          path: bazel-testlogs/**/test.log
+          retention-days: 7
+
+  sanitizer-tsan:
+    name: "ThreadSanitizer"
+    if: github.event_name == 'pull_request'
+    needs: backend-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mount Bazel cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel
+          key: bazel-tsan-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
+          restore-keys: |
+            bazel-tsan-${{ runner.os }}-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Run tests with ThreadSanitizer
+        run: bazel test //src/... --config=tsan --test_output=errors
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+
+      - name: Upload TSAN logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-logs
+          path: bazel-testlogs/**/test.log
+          retention-days: 7
+
+  # ===========================================================
+  # Gate — All checks must pass before merge
+  # ===========================================================
+
+  ci-gate:
+    name: "CI Gate"
+    if: always()
+    needs:
+      - backend-build
+      - backend-test
+      - bpf-probes
+      - frontend-build
+      - sanitizer-asan
+      - sanitizer-tsan
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check all required jobs
+        run: |
+          echo "backend-build: ${{ needs.backend-build.result }}"
+          echo "backend-test:  ${{ needs.backend-test.result }}"
+          echo "bpf-probes:    ${{ needs.bpf-probes.result }}"
+          echo "frontend-build:${{ needs.frontend-build.result }}"
+          echo "sanitizer-asan:${{ needs.sanitizer-asan.result }}"
+          echo "sanitizer-tsan:${{ needs.sanitizer-tsan.result }}"
+
+          # Layer-1 jobs must succeed
+          if [[ "${{ needs.backend-build.result }}" != "success" ]] || \
+             [[ "${{ needs.backend-test.result }}" != "success" ]] || \
+             [[ "${{ needs.bpf-probes.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-build.result }}" != "success" ]]; then
+            echo "::error::One or more required CI jobs failed"
+            exit 1
+          fi
+
+          # Layer-2 jobs: must succeed or be skipped (push events skip them)
+          for job in sanitizer-asan sanitizer-tsan; do
+            result="${{ needs[job].result || 'skipped' }}"
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "::error::$job failed"
+              exit 1
+            fi
+          done
+
+          echo "All CI checks passed"

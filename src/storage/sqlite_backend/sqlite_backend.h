@@ -309,6 +309,63 @@ public:
         }
     }
 
+    StatusOr<std::string> ExecuteRawQuery(const std::string& sql) override {
+        if (!db_) return Status::Error(StatusCode::kInternal, "DB not open");
+
+        sqlite3_stmt* stmt = nullptr;
+        int prc = PrepareOrLog(&stmt, sql.c_str(), "ExecuteRawQuery");
+        if (prc != SQLITE_OK || !stmt) {
+            return Status::Error(StatusCode::kInternal,
+                std::string("SQL prepare failed: ") + sqlite3_errmsg(db_));
+        }
+
+        nlohmann::json rows = nlohmann::json::array();
+        int col_count = sqlite3_column_count(stmt);
+
+        std::vector<std::string> col_names;
+        for (int i = 0; i < col_count; ++i) {
+            col_names.push_back(sqlite3_column_name(stmt, i));
+        }
+
+        int row_limit = 1000;
+        int rc = sqlite3_step(stmt);
+        while (rc == SQLITE_ROW && row_limit-- > 0) {
+            nlohmann::json row = nlohmann::json::object();
+            for (int i = 0; i < col_count; ++i) {
+                int type = sqlite3_column_type(stmt, i);
+                switch (type) {
+                    case SQLITE_INTEGER:
+                        row[col_names[i]] = sqlite3_column_int64(stmt, i);
+                        break;
+                    case SQLITE_FLOAT:
+                        row[col_names[i]] = sqlite3_column_double(stmt, i);
+                        break;
+                    case SQLITE_TEXT:
+                        row[col_names[i]] = reinterpret_cast<const char*>(
+                            sqlite3_column_text(stmt, i));
+                        break;
+                    case SQLITE_NULL:
+                        row[col_names[i]] = nullptr;
+                        break;
+                    default:
+                        row[col_names[i]] = "[blob]";
+                        break;
+                }
+            }
+            rows.push_back(std::move(row));
+            rc = sqlite3_step(stmt);
+        }
+
+        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+            sqlite3_finalize(stmt);
+            return Status::Error(StatusCode::kInternal,
+                std::string("SQL execution failed: ") + sqlite3_errmsg(db_));
+        }
+
+        sqlite3_finalize(stmt);
+        return nlohmann::json{{"rows", std::move(rows)}}.dump();
+    }
+
 private:
     // ---- 建表 + 索引 ----
     Status CreateTables() {

@@ -116,6 +116,12 @@ public:
 
     // 磁盘占用（字节），默认返回 0
     virtual uint64_t DiskUsageBytes() const { return 0; }
+
+    // 执行原始只读 SQL 查询，返回 JSON 字符串
+    virtual StatusOr<std::string> ExecuteRawQuery(const std::string& sql) {
+        return Status::Error(StatusCode::kUnimplemented,
+                             "ExecuteRawQuery not supported by this backend");
+    }
 };
 
 // ============================================================================

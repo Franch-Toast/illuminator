@@ -1,303 +1,360 @@
-import React, { useMemo, useState } from 'react'
+import React, { useMemo, useCallback, useEffect, useState, useRef } from 'react'
 import {
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
+  ResponsiveContainer, AreaChart, Area, XAxis, YAxis,
+  CartesianGrid, Tooltip, Legend,
 } from 'recharts'
-import { useCpuUtilization } from '../hooks/useCpuMetrics'
-import { usePipelines } from '../hooks/useApi'
-import { card as themeCard, colors } from '../styles/theme'
+import { useTimeStore } from '../stores/useTimeStore'
+import { usePipelineStore } from '../stores/usePipelineStore'
+import { useFilterStore } from '../stores/useFilterStore'
+import { timeSeriesStore, type DataPoint } from '../services/timeSeriesStore'
+import { api } from '../services/apiClient'
+import { colors, card as themeCard } from '../styles/theme'
 
 const card: React.CSSProperties = {
-  background: '#1a1d23',
-  borderRadius: 8,
-  padding: 20,
-  border: '1px solid #2a2d35',
+  background: colors.cardBg, borderRadius: 8, padding: 20,
+  border: `1px solid ${colors.cardBorder}`,
 }
 
-const COLORS = {
-  user: '#3b82f6',
-  system: '#ef4444',
-  iowait: '#f59e0b',
-  irq: '#a855f7',
-  steal: '#6b7280',
+const CPU_COLORS = {
+  user: '#3b82f6', system: '#ef4444', iowait: '#f59e0b',
+  irq: '#a855f7', steal: '#6b7280',
 }
 
 function busyHeatColor(busyPct: number): string {
   const x = Math.max(0, Math.min(100, busyPct)) / 100
-  let r: number
-  let g: number
-  let b: number
   if (x < 0.5) {
     const t = x * 2
-    r = Math.round(34 + (234 - 34) * t)
-    g = Math.round(197 + (179 - 197) * t)
-    b = Math.round(94 + (8 - 94) * t)
-  } else {
-    const t = (x - 0.5) * 2
-    r = Math.round(234 + (239 - 234) * t)
-    g = Math.round(179 + (68 - 179) * t)
-    b = Math.round(8 + (68 - 8) * t)
+    return `rgb(${Math.round(34 + 200 * t)},${Math.round(197 - 18 * t)},${Math.round(94 - 86 * t)})`
   }
-  return `rgb(${r},${g},${b})`
+  const t = (x - 0.5) * 2
+  return `rgb(${Math.round(234 + 5 * t)},${Math.round(179 - 111 * t)},${Math.round(8 + 60 * t)})`
 }
 
 function coreSortKey(cpu: string): number {
   const m = cpu.match(/\d+/g)
-  if (!m?.length) return 0
-  return parseInt(m[m.length - 1]!, 10)
+  return m?.length ? parseInt(m[m.length - 1]!, 10) : 0
+}
+
+interface CpuCoreMetrics {
+  cpu: string; type: string; busy_pct: number
+  user_pct: number; system_pct: number; nice_pct: number
+  idle_pct: number; iowait_pct: number; irq_pct: number
+  softirq_pct: number; steal_pct: number
+  user_pct_ema?: number; system_pct_ema?: number; busy_pct_ema?: number
+}
+
+function normalizeLabels(raw: unknown): Record<string, string> {
+  if (!raw) return {}
+  if (Array.isArray(raw)) {
+    const out: Record<string, string> = {}
+    for (const item of raw) {
+      if (item && typeof item === 'object') {
+        const o = item as Record<string, unknown>
+        const key = o.key ?? o.name
+        const val = o.value ?? o.val
+        if (key != null) out[String(key)] = val != null ? String(val) : ''
+      }
+    }
+    return out
+  }
+  if (typeof raw === 'object') {
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+      out[k] = v != null ? String(v) : ''
+    }
+    return out
+  }
+  return {}
+}
+
+function parseUtilization(data: unknown) {
+  const result = {
+    cores: [] as CpuCoreMetrics[],
+    total: null as CpuCoreMetrics | null,
+    counters: null as { context_switches_per_sec: number; interrupts_per_sec: number } | null,
+    loadavg: null as { load_1m: number; load_5m: number; load_15m: number } | null,
+    runqueue: null as { procs_running: number; procs_blocked: number } | null,
+  }
+  const d = data as { records?: any[] } | null
+  if (!d?.records) return result
+
+  for (const rec of d.records) {
+    const labels = normalizeLabels(rec.labels)
+    const fields = rec.fields || {}
+    const type = labels.type || ''
+
+    if (type === 'cpu_total' || type === 'cpu_core') {
+      const core: CpuCoreMetrics = {
+        cpu: labels.cpu || '', type,
+        user_pct: fields.user_pct ?? 0, system_pct: fields.system_pct ?? 0,
+        nice_pct: fields.nice_pct ?? 0, idle_pct: fields.idle_pct ?? 0,
+        iowait_pct: fields.iowait_pct ?? 0, irq_pct: fields.irq_pct ?? 0,
+        softirq_pct: fields.softirq_pct ?? 0, steal_pct: fields.steal_pct ?? 0,
+        busy_pct: fields.busy_pct ?? 0,
+        user_pct_ema: fields.user_pct_ema, system_pct_ema: fields.system_pct_ema,
+        busy_pct_ema: fields.busy_pct_ema,
+      }
+      if (type === 'cpu_total') result.total = core
+      else result.cores.push(core)
+    } else if (type === 'system_counters') {
+      result.counters = {
+        context_switches_per_sec: fields.context_switches_per_sec ?? 0,
+        interrupts_per_sec: fields.interrupts_per_sec ?? 0,
+      }
+    } else if (type === 'loadavg') {
+      result.loadavg = {
+        load_1m: fields.load_1m ?? 0, load_5m: fields.load_5m ?? 0,
+        load_15m: fields.load_15m ?? 0,
+      }
+    } else if (type === 'runqueue') {
+      result.runqueue = {
+        procs_running: fields.procs_running ?? 0,
+        procs_blocked: fields.procs_blocked ?? 0,
+      }
+    }
+  }
+  return result
 }
 
 export default function CpuOverview() {
-  const { data, history, error } = useCpuUtilization(1000)
-  const [rangeMinutes, setRangeMinutes] = useState<1 | 5 | 15>(1)
+  const { mode, range } = useTimeStore()
+  const [data, setData] = useState<ReturnType<typeof parseUtilization>>({
+    cores: [], total: null, counters: null, loadavg: null, runqueue: null,
+  })
+  const [tsData, setTsData] = useState<DataPoint[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const intervalRef = useRef<ReturnType<typeof setInterval>>()
 
-  const chartData = useMemo(() => {
-    if (history.length === 0) return []
-    const latest = history[history.length - 1]!.time
-    const cutoff = latest - rangeMinutes * 60 * 1000
-    return history.filter((h) => h.time >= cutoff)
-  }, [history, rangeMinutes])
+  const fetchData = useCallback(async () => {
+    try {
+      const json = await api.cpuUtilization()
+      const parsed = parseUtilization(json)
+      setData(parsed)
+      setError(null)
+      if (parsed.total) {
+        timeSeriesStore.append('cpu.total', Date.now(), {
+          user: parsed.total.user_pct,
+          system: parsed.total.system_pct,
+          iowait: parsed.total.iowait_pct,
+          irq: parsed.total.irq_pct + parsed.total.softirq_pct,
+          steal: parsed.total.steal_pct,
+          idle: parsed.total.idle_pct,
+        })
+      }
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }, [])
 
-  const sortedCores = useMemo(() => {
-    return [...data.cores].sort((a, b) => coreSortKey(a.cpu) - coreSortKey(b.cpu))
-  }, [data.cores])
+  useEffect(() => {
+    if (mode === 'paused') return
+    fetchData()
+    intervalRef.current = setInterval(fetchData, 1000)
+    return () => clearInterval(intervalRef.current)
+  }, [fetchData, mode])
 
-  const heatmapWidth = 280
+  useEffect(() => {
+    const update = () => setTsData(timeSeriesStore.query('cpu.total', range.start, range.end))
+    update()
+    return timeSeriesStore.subscribe('cpu.total', update)
+  }, [range.start, range.end])
+
+  const sortedCores = useMemo(
+    () => [...data.cores].sort((a, b) => coreSortKey(a.cpu) - coreSortKey(b.cpu)),
+    [data.cores]
+  )
+
+  const heatmapCols = Math.min(16, Math.max(4, Math.ceil(Math.sqrt(sortedCores.length))))
 
   return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 22 }}>CPU Overview</h2>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 12, color: '#888' }}>Chart range</span>
-          {([1, 5, 15] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setRangeMinutes(m)}
-              style={{
-                padding: '6px 14px',
-                borderRadius: 6,
-                border: `1px solid ${rangeMinutes === m ? '#60a5fa' : '#2a2d35'}`,
-                background: rangeMinutes === m ? '#252830' : '#1a1d23',
-                color: rangeMinutes === m ? '#60a5fa' : '#b0b0b0',
-                cursor: 'pointer',
-                fontSize: 13,
-              }}
-            >
-              {m}m
-            </button>
-          ))}
-        </div>
+    <div style={{ padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <h2 style={{ margin: 0, fontSize: 20 }}>Dashboard</h2>
+        {mode === 'paused' && (
+          <span style={{ fontSize: 12, color: colors.amber, padding: '2px 10px',
+            border: `1px solid ${colors.amber}`, borderRadius: 4 }}>
+            Viewing historical data
+          </span>
+        )}
       </div>
 
       {error && (
-        <div style={{ ...card, marginBottom: 16, borderColor: '#7f1d1d', color: '#f87171' }}>
+        <div style={{ ...card, marginBottom: 16, borderColor: '#7f1d1d', color: '#f87171', fontSize: 13 }}>
           {error}
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 340px', gap: 20, marginBottom: 20, alignItems: 'start' }}>
-        <div style={card}>
-          <h3 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 600, color: '#e0e0e0' }}>
-            System CPU utilization
-          </h3>
-          <div style={{ width: '100%', height: 320 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        {/* CPU Utilization Area Chart */}
+        <div style={{ ...card, gridColumn: '1 / -1' }}>
+          <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>CPU Utilization</h3>
+          <div style={{ width: '100%', height: 280 }}>
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <AreaChart data={tsData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#2a2d35" />
-                <XAxis
-                  dataKey="time"
-                  type="number"
-                  domain={['dataMin', 'dataMax']}
-                  tickFormatter={(ts) => new Date(ts as number).toLocaleTimeString()}
-                  stroke="#888"
-                  tick={{ fill: '#888', fontSize: 11 }}
-                />
-                <YAxis
-                  domain={[0, 100]}
-                  stroke="#888"
-                  tick={{ fill: '#888', fontSize: 11 }}
-                  tickFormatter={(v) => `${v}%`}
-                />
-                <Tooltip
-                  contentStyle={{ background: '#1a1d23', border: '1px solid #2a2d35', borderRadius: 8 }}
-                  labelFormatter={(ts) => new Date(ts as number).toLocaleString()}
-                  formatter={(value: number) => [`${value.toFixed(1)}%`, '']}
-                />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Area type="monotone" dataKey="user" name="User" stackId="1" stroke={COLORS.user} fill={COLORS.user} fillOpacity={0.85} />
-                <Area type="monotone" dataKey="system" name="System" stackId="1" stroke={COLORS.system} fill={COLORS.system} fillOpacity={0.85} />
-                <Area type="monotone" dataKey="iowait" name="IO wait" stackId="1" stroke={COLORS.iowait} fill={COLORS.iowait} fillOpacity={0.85} />
-                <Area type="monotone" dataKey="irq" name="IRQ" stackId="1" stroke={COLORS.irq} fill={COLORS.irq} fillOpacity={0.85} />
-                <Area type="monotone" dataKey="steal" name="Steal" stackId="1" stroke={COLORS.steal} fill={COLORS.steal} fillOpacity={0.85} />
+                <XAxis dataKey="time" type="number" domain={['dataMin', 'dataMax']}
+                  tickFormatter={ts => new Date(ts).toLocaleTimeString()}
+                  stroke="#555" tick={{ fill: '#888', fontSize: 10 }} />
+                <YAxis domain={[0, 100]} stroke="#555" tick={{ fill: '#888', fontSize: 10 }}
+                  tickFormatter={v => `${v}%`} />
+                <Tooltip contentStyle={{ background: '#1a1d23', border: '1px solid #2a2d35', borderRadius: 8, fontSize: 12 }}
+                  labelFormatter={ts => new Date(ts as number).toLocaleString()}
+                  formatter={(v: number) => [`${v.toFixed(1)}%`, '']} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Area type="monotone" dataKey="user" name="User" stackId="1" stroke={CPU_COLORS.user} fill={CPU_COLORS.user} fillOpacity={0.85} />
+                <Area type="monotone" dataKey="system" name="System" stackId="1" stroke={CPU_COLORS.system} fill={CPU_COLORS.system} fillOpacity={0.85} />
+                <Area type="monotone" dataKey="iowait" name="IO Wait" stackId="1" stroke={CPU_COLORS.iowait} fill={CPU_COLORS.iowait} fillOpacity={0.85} />
+                <Area type="monotone" dataKey="irq" name="IRQ" stackId="1" stroke={CPU_COLORS.irq} fill={CPU_COLORS.irq} fillOpacity={0.85} />
+                <Area type="monotone" dataKey="steal" name="Steal" stackId="1" stroke={CPU_COLORS.steal} fill={CPU_COLORS.steal} fillOpacity={0.85} />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
+      </div>
 
-        <div style={card}>
-          <h3 style={{ margin: '0 0 16px', fontSize: 15, fontWeight: 600 }}>Per-core busy %</h3>
-          {sortedCores.length === 0 ? (
-            <p style={{ margin: 0, color: '#666', fontSize: 13 }}>No core metrics yet.</p>
-          ) : (
-            <svg width="100%" height={Math.max(120, sortedCores.length * 28 + 24)} style={{ display: 'block' }}>
-              {sortedCores.map((core, i) => {
-                const y = 12 + i * 28
-                const w = (heatmapWidth * Math.min(100, core.busy_pct)) / 100
-                const fill = busyHeatColor(core.busy_pct)
-                return (
-                  <g key={`${core.cpu}-${i}`}>
-                    <text x={0} y={y + 14} fill="#b0b0b0" fontSize={11} style={{ fontFamily: 'monospace' }}>
-                      {core.cpu || `cpu${i}`}
-                    </text>
-                    <rect x={72} y={y} width={heatmapWidth} height={18} rx={4} fill="#252830" stroke="#2a2d35" />
-                    <rect x={72} y={y} width={Math.max(0, w)} height={18} rx={4} fill={fill} opacity={0.95} />
-                    <text x={72 + heatmapWidth + 8} y={y + 14} fill="#e0e0e0" fontSize={11}>
-                      {core.busy_pct.toFixed(1)}%
-                    </text>
-                  </g>
-                )
-              })}
-            </svg>
-          )}
+      {/* CPU Core Heatmap */}
+      <div style={{ ...card, marginBottom: 16 }}>
+        <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>Per-core Heatmap</h3>
+        {sortedCores.length === 0 ? (
+          <p style={{ margin: 0, color: '#666', fontSize: 13 }}>No core metrics yet.</p>
+        ) : (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: `repeat(${heatmapCols}, 1fr)`,
+            gap: 4,
+          }}>
+            {sortedCores.map((core, i) => (
+              <div key={`${core.cpu}-${i}`}
+                style={{
+                  background: busyHeatColor(core.busy_pct),
+                  borderRadius: 4, padding: '6px 4px',
+                  textAlign: 'center', fontSize: 10,
+                  color: core.busy_pct > 60 ? '#fff' : '#222',
+                  fontWeight: 600, cursor: 'default',
+                  minHeight: 36, display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center',
+                }}
+                title={`${core.cpu}: ${core.busy_pct.toFixed(1)}% busy`}
+              >
+                <div>{core.cpu}</div>
+                <div>{core.busy_pct.toFixed(0)}%</div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 4, marginTop: 8, alignItems: 'center', fontSize: 10, color: '#888' }}>
+          <span>0%</span>
+          <div style={{
+            flex: 1, height: 8, borderRadius: 4,
+            background: 'linear-gradient(to right, rgb(34,197,94), rgb(234,179,8), rgb(239,68,68))',
+          }} />
+          <span>100%</span>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 16 }}>
-        <div style={card}>
-          <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Load 1m</div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: '#60a5fa' }}>{data.loadavg ? data.loadavg.load_1m.toFixed(2) : '—'}</div>
-        </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Load 5m</div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: '#60a5fa' }}>{data.loadavg ? data.loadavg.load_5m.toFixed(2) : '—'}</div>
-        </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Load 15m</div>
-          <div style={{ fontSize: 26, fontWeight: 700, color: '#60a5fa' }}>{data.loadavg ? data.loadavg.load_15m.toFixed(2) : '—'}</div>
-        </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Ctx switches / s</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: '#e0e0e0' }}>
-            {data.counters ? Math.round(data.counters.context_switches_per_sec).toLocaleString() : '—'}
-          </div>
-        </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Interrupts / s</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: '#e0e0e0' }}>
-            {data.counters ? Math.round(data.counters.interrupts_per_sec).toLocaleString() : '—'}
-          </div>
-        </div>
-        <div style={card}>
-          <div style={{ fontSize: 11, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Running / blocked</div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: '#e0e0e0' }}>
-            {data.runqueue ? `${data.runqueue.procs_running} / ${data.runqueue.procs_blocked}` : '—'}
-          </div>
-        </div>
+      {/* Stats Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+        <StatCard label="Load 1m" value={data.loadavg?.load_1m.toFixed(2)} />
+        <StatCard label="Load 5m" value={data.loadavg?.load_5m.toFixed(2)} />
+        <StatCard label="Load 15m" value={data.loadavg?.load_15m.toFixed(2)} />
+        <StatCard label="Ctx Switches/s"
+          value={data.counters ? Math.round(data.counters.context_switches_per_sec).toLocaleString() : undefined}
+          small />
+        <StatCard label="Interrupts/s"
+          value={data.counters ? Math.round(data.counters.interrupts_per_sec).toLocaleString() : undefined}
+          small />
+        <StatCard label="Running / Blocked"
+          value={data.runqueue ? `${data.runqueue.procs_running} / ${data.runqueue.procs_blocked}` : undefined}
+          small />
       </div>
 
-      {/* Pipeline Channel 状态面板 */}
-      <ChannelStatsPanel />
+      {/* Pipeline Health */}
+      <PipelineHealth />
     </div>
   )
 }
 
-function ChannelStatsPanel() {
-  const { pipelines } = usePipelines(3000)
-  const withChannel = pipelines.filter(p => p.channel)
+function StatCard({ label, value, small }: { label: string; value?: string; small?: boolean }) {
+  return (
+    <div style={card}>
+      <div style={{ fontSize: 10, color: '#888', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: small ? 20 : 24, fontWeight: 700, color: value ? colors.accent : '#555' }}>
+        {value ?? '—'}
+      </div>
+    </div>
+  )
+}
 
-  if (withChannel.length === 0) return null
+function PipelineHealth() {
+  const { pipelines } = usePipelineStore()
+  if (pipelines.length === 0) return null
 
   return (
-    <div style={{ marginTop: 20 }}>
-      <h3 style={{ margin: '0 0 12px', fontSize: 15, fontWeight: 600, color: colors.textPrimary }}>
-        Pipeline Channels
-      </h3>
+    <div style={card}>
+      <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 600 }}>Pipeline Health</h3>
       <div style={{ overflowX: 'auto' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
-              {['Pipeline', 'Capacity', 'Queue', 'Utilization', 'Enqueued', 'Dequeued',
-                'Dropped', 'Backpressure'].map(h => (
+              {['Pipeline', 'Status', 'Queue', 'Throughput', 'Drops', 'Backpressure'].map(h => (
                 <th key={h} style={{
-                  padding: '8px 12px', textAlign: 'left',
-                  color: colors.textMuted, fontWeight: 500, fontSize: 11,
-                  textTransform: 'uppercase', letterSpacing: '0.05em',
+                  padding: '6px 10px', textAlign: 'left', color: '#888',
+                  fontWeight: 500, fontSize: 10, textTransform: 'uppercase',
                 }}>{h}</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {withChannel.map(p => {
-              const ch = p.channel!
-              const utilPct = ch.capacity > 0
-                ? (ch.size / ch.capacity) * 100 : 0
-              const barColor = utilPct > 80 ? colors.danger
-                : utilPct > 50 ? colors.amber : colors.success
+            {pipelines.map(p => {
+              const ch = p.channel
+              const utilPct = ch && ch.capacity > 0 ? (ch.size / ch.capacity) * 100 : 0
+              const barColor = utilPct > 80 ? colors.danger : utilPct > 50 ? colors.amber : colors.success
               return (
                 <tr key={p.name} style={{ borderBottom: `1px solid ${colors.cardBorder}` }}>
-                  <td style={{ padding: '8px 12px', fontWeight: 600 }}>{p.name}</td>
-                  <td style={{ padding: '8px 12px', color: colors.textSecondary }}>
-                    {ch.capacity.toLocaleString()}
+                  <td style={{ padding: '6px 10px', fontWeight: 600, fontSize: 12 }}>{p.name}</td>
+                  <td style={{ padding: '6px 10px' }}>
+                    <span style={{
+                      padding: '2px 8px', borderRadius: 4, fontSize: 10,
+                      background: p.running ? 'rgba(74,222,128,0.15)' : 'rgba(107,114,128,0.15)',
+                      color: p.running ? '#4ade80' : '#888',
+                    }}>
+                      {p.running ? 'RUNNING' : p.stub ? 'STUB' : 'STOPPED'}
+                    </span>
                   </td>
-                  <td style={{ padding: '8px 12px', color: colors.textSecondary }}>
-                    {ch.size.toLocaleString()}
-                  </td>
-                  <td style={{ padding: '8px 12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <div style={{
-                        width: 80, height: 6, background: colors.cardBorder,
-                        borderRadius: 3, overflow: 'hidden',
-                      }}>
-                        <div style={{
-                          width: `${Math.min(100, utilPct)}%`, height: '100%',
-                          background: barColor, borderRadius: 3,
-                          transition: 'width 0.3s',
-                        }} />
+                  <td style={{ padding: '6px 10px' }}>
+                    {ch && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ width: 60, height: 5, background: colors.cardBorder, borderRadius: 3 }}>
+                          <div style={{
+                            width: `${Math.min(100, utilPct)}%`, height: '100%',
+                            background: barColor, borderRadius: 3, transition: 'width 0.3s',
+                          }} />
+                        </div>
+                        <span style={{ fontSize: 10, color: '#888' }}>{utilPct.toFixed(0)}%</span>
                       </div>
-                      <span style={{ fontSize: 11, color: colors.textMuted }}>
-                        {utilPct.toFixed(1)}%
-                      </span>
-                    </div>
+                    )}
                   </td>
-                  <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: colors.textSecondary }}>
-                    {ch.enqueued.toLocaleString()}
-                  </td>
-                  <td style={{ padding: '8px 12px', fontFamily: 'monospace', color: colors.textSecondary }}>
-                    {ch.dequeued.toLocaleString()}
+                  <td style={{ padding: '6px 10px', fontFamily: 'monospace', fontSize: 11, color: '#b0b0b0' }}>
+                    {ch ? `${ch.enqueued.toLocaleString()} / ${ch.dequeued.toLocaleString()}` : '—'}
                   </td>
                   <td style={{
-                    padding: '8px 12px', fontFamily: 'monospace',
-                    color: ch.dropped > 0 ? colors.danger : colors.textSecondary,
-                    fontWeight: ch.dropped > 0 ? 700 : 400,
+                    padding: '6px 10px', fontFamily: 'monospace', fontSize: 11,
+                    color: ch && ch.dropped > 0 ? colors.danger : '#888',
+                    fontWeight: ch && ch.dropped > 0 ? 700 : 400,
                   }}>
-                    {ch.dropped.toLocaleString()}
+                    {ch ? ch.dropped.toLocaleString() : '—'}
                   </td>
-                  <td style={{ padding: '8px 12px' }}>
-                    {ch.backpressured ? (
+                  <td style={{ padding: '6px 10px' }}>
+                    {ch?.backpressured ? (
                       <span style={{
-                        padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                        background: colors.dangerBg, color: colors.danger,
-                        border: `1px solid ${colors.dangerBorder}`,
-                      }}>ACTIVE</span>
+                        padding: '2px 6px', borderRadius: 4, fontSize: 10,
+                        background: 'rgba(248,113,113,0.15)', color: '#f87171',
+                      }}>ACTIVE ({ch.backpressure_events}x)</span>
                     ) : (
-                      <span style={{
-                        padding: '2px 8px', borderRadius: 4, fontSize: 11,
-                        color: colors.textMuted,
-                      }}>—</span>
-                    )}
-                    {ch.backpressure_events > 0 && (
-                      <span style={{ marginLeft: 6, fontSize: 11, color: colors.textMuted }}>
-                        ({ch.backpressure_events}x)
+                      <span style={{ fontSize: 10, color: '#555' }}>
+                        {ch && ch.backpressure_events > 0 ? `${ch.backpressure_events}x` : '—'}
                       </span>
                     )}
                   </td>

@@ -14,6 +14,7 @@
 #include "core/common/self_observability.h"
 #include "core/engine/pipeline_controller.h"
 #include "serialization/json_serializer.h"
+#include "storage/storage_backend.h"
 
 namespace illuminator {
 
@@ -166,6 +167,42 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 res.set_content(
                     json{{"channels", std::move(arr)}}.dump() + "\n",
                     "application/json");
+            });
+
+    // SQL Query endpoint — executes read-only SQL against the storage backend
+    srv.Post("/api/v1/query",
+            [&controller](const httplib::Request& req, httplib::Response& res) {
+                try {
+                    auto body = json::parse(req.body);
+                    std::string sql = body.value("query", "");
+                    if (sql.empty()) {
+                        JsonError(res, "missing 'query' field", 400);
+                        return;
+                    }
+                    // Basic safety: only allow SELECT queries
+                    std::string upper;
+                    for (size_t i = 0; i < sql.size() && i < 20; ++i)
+                        upper += static_cast<char>(std::toupper(sql[i]));
+                    if (upper.find("SELECT") == std::string::npos &&
+                        upper.find("PRAGMA") == std::string::npos) {
+                        JsonError(res, "only SELECT queries are allowed", 403);
+                        return;
+                    }
+
+                    auto* storage = controller.GetStorageBackend();
+                    if (!storage) {
+                        JsonError(res, "no storage backend available");
+                        return;
+                    }
+                    auto result = storage->ExecuteRawQuery(sql);
+                    if (!result.ok()) {
+                        JsonError(res, result.status().message());
+                        return;
+                    }
+                    res.set_content(*result + "\n", "application/json");
+                } catch (const std::exception& e) {
+                    JsonError(res, std::string("query parse error: ") + e.what(), 400);
+                }
             });
 
     // Metrics endpoints

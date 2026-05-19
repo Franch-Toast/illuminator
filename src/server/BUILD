@@ -32,6 +32,7 @@ cc_library(
         "//src/core:common",
         "//src/core:engine",
         "//src/serialization:json_serializer",
+        "//src/storage:storage",
         "//third_party/cpp-httplib",
     ],
 )

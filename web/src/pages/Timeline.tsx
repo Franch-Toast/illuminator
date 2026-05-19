@@ -11,7 +11,11 @@ import {
   Tooltip,
   Legend,
 } from 'recharts'
-import { useWebSocket, ConnectionState } from '../hooks/useWebSocket'
+import { useWebSocket, type ConnectionState } from '../hooks/useWebSocket'
+import { useTimeStore } from '../stores/useTimeStore'
+import { useFilterStore } from '../stores/useFilterStore'
+import { timeSeriesStore } from '../services/timeSeriesStore'
+import { colors } from '../styles/theme'
 
 interface SchedSummary {
   pid: number
@@ -129,6 +133,8 @@ function buildLatencyHistogram(summaries: SchedSummary[]): LatencyBucket[] {
 type TabKey = 'overview' | 'timeseries' | 'migrations' | 'wakeups'
 
 export default function Timeline() {
+  const { mode } = useTimeStore()
+  const { pid: globalPid } = useFilterStore()
   const [summaries, setSummaries] = useState<SchedSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [stub, setStub] = useState(false)
@@ -140,6 +146,10 @@ export default function Timeline() {
   const [wakeups, setWakeups] = useState<WakeupEntry[]>([])
   const [detailEvents, setDetailEvents] = useState<SchedEvent[]>([])
   const intervalRef = useRef<number>()
+
+  useEffect(() => {
+    if (globalPid !== null) setSelectedPid(globalPid)
+  }, [globalPid])
 
   const handleWsMessage = useCallback((msg: any) => {
     const parsed = parseSchedData(msg)

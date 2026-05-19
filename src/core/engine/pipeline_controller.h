@@ -49,6 +49,8 @@
 
 namespace illuminator {
 
+class StorageBackend;
+
 class PipelineController;
 
 // ============================================================================
@@ -363,6 +365,12 @@ private:
     std::unique_ptr<AggregatorPlugin> aggregator_;
     std::vector<std::unique_ptr<SinkPlugin>> sinks_;
 
+public:
+    const std::vector<std::unique_ptr<SinkPlugin>>& GetSinks() const {
+        return sinks_;
+    }
+
+private:
     AsyncChannel ingest_channel_;
     ThreadPool* sink_pool_ = nullptr;
 
@@ -409,7 +417,16 @@ public:
 
     TimerWheel& GetTimerWheel() { return timer_; }
 
+    void SetStorageBackend(StorageBackend* backend) {
+        storage_backend_ = backend;
+    }
+
+    StorageBackend* GetStorageBackend() const {
+        return storage_backend_;
+    }
+
 private:
+    StorageBackend* storage_backend_ = nullptr;
     std::vector<std::unique_ptr<Pipeline>> pipelines_;
     std::unique_ptr<ThreadPool> sink_pool_;
     std::unique_ptr<ThreadPool> collect_pool_;

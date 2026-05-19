@@ -21,6 +21,7 @@
 #include "server/api_routes.h"
 #include "server/websocket_manager.h"
 #include "storage/storage_backend.h"
+#include "sinks/local_storage/local_storage_sink.h"
 #include "serialization/json_serializer.h"
 
 static std::atomic<bool> g_running{true};
@@ -194,6 +195,20 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         IL_ERROR("Failed to start pipelines: {}", status.message());
         return 1;
     }
+
+    // Expose the first storage backend for the query API
+    for (auto& p : controller.Pipelines()) {
+        for (auto& sink : p->GetSinks()) {
+            if (auto* ls = dynamic_cast<illuminator::LocalStorageSink*>(sink.get())) {
+                if (ls->GetBackend()) {
+                    controller.SetStorageBackend(ls->GetBackend());
+                    IL_INFO("Query API using storage from pipeline '{}'", p->name());
+                    goto storage_found;
+                }
+            }
+        }
+    }
+    storage_found:
 
     illuminator::WebSocketManager ws_manager;
     ws_manager.SetBroadcastInterval(1000);
