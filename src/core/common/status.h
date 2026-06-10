@@ -32,6 +32,8 @@
 
 #pragma once
 
+#include <cassert>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -70,27 +72,40 @@ public:
     static Status Ok() { return Status(); }
 
     // 工厂方法：创建一个错误状态
-    // 参数 msg 使用 string_view 避免不必要的字符串拷贝
     static Status Error(StatusCode code, std::string_view msg) {
         return Status(code, std::string(msg));
     }
 
-    // 判断当前状态是否为成功
-    bool ok() const { return code_ == StatusCode::kOk; }
-    // 获取错误码
-    StatusCode code() const { return code_; }
-    // 获取错误消息（引用以避免拷贝）
-    const std::string& message() const { return message_; }
+    // 工厂方法：包装内部错误，附加上层上下文信息，形成错误链
+    static Status Wrap(Status inner, std::string_view context) {
+        Status wrapped(inner.code(), std::string(context));
+        wrapped.cause_ = std::make_shared<Status>(std::move(inner));
+        return wrapped;
+    }
 
-    // 将状态转为可读字符串
-    std::string ToString() const {
+    [[nodiscard]] bool ok() const { return code_ == StatusCode::kOk; }
+    [[nodiscard]] StatusCode code() const { return code_; }
+    [[nodiscard]] const std::string& message() const { return message_; }
+
+    // 获取导致当前错误的内部错误（如果存在）
+    [[nodiscard]] const Status* cause() const {
+        return cause_ ? cause_.get() : nullptr;
+    }
+
+    [[nodiscard]] std::string ToString() const {
         if (ok()) return "OK";
-        return "Error(" + std::to_string(static_cast<int>(code_)) + "): " + message_;
+        std::string result =
+            "Error(" + std::to_string(static_cast<int>(code_)) + "): " + message_;
+        if (cause_) {
+            result += "\n  caused by: " + cause_->ToString();
+        }
+        return result;
     }
 
 private:
-    StatusCode code_;          // 错误码
-    std::string message_;      // 人类可读的错误描述
+    StatusCode code_;
+    std::string message_;
+    std::shared_ptr<Status> cause_;
 };
 
 // ---- StatusOr<T>: Result 类型 ----
@@ -105,21 +120,30 @@ public:
     StatusOr(Status status) : data_(std::move(status)) {}
 
     // 判断是否为成功状态（即持有 T 类型的值）
-    bool ok() const { return std::holds_alternative<T>(data_); }
+    [[nodiscard]] bool ok() const { return std::holds_alternative<T>(data_); }
 
     // ---- 获取成功值 ----
     // 提供 const 左值、左值、右值引用三个重载，支持各种使用场景
 
-    const T& value() const& { return std::get<T>(data_); }
-    T& value() & { return std::get<T>(data_); }
-    T&& value() && { return std::get<T>(std::move(data_)); }
+    [[nodiscard]] const T& value() const& {
+        assert(ok() && "StatusOr::value() called on error");
+        return std::get<T>(data_);
+    }
+    [[nodiscard]] T& value() & {
+        assert(ok() && "StatusOr::value() called on error");
+        return std::get<T>(data_);
+    }
+    [[nodiscard]] T&& value() && {
+        assert(ok() && "StatusOr::value() called on error");
+        return std::get<T>(std::move(data_));
+    }
 
     // 获取错误状态（仅在失败时调用有意义）
-    const Status& status() const { return std::get<Status>(data_); }
+    [[nodiscard]] const Status& status() const { return std::get<Status>(data_); }
 
     // operator* 简化访问：使 StatusOr 可像指针一样解引用
-    const T& operator*() const& { return value(); }
-    T& operator*() & { return value(); }
+    [[nodiscard]] const T& operator*() const& { return value(); }
+    [[nodiscard]] T& operator*() & { return value(); }
 
 private:
     // variant 内部存储要么是成功的 T，要么是失败的 Status

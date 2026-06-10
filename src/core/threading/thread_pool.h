@@ -23,6 +23,7 @@
 #pragma once
 
 #include <cstddef>
+#include <exception>
 #include <functional>        // std::function
 #include <future>            // std::future, std::packaged_task
 #include <memory>            // std::make_shared
@@ -33,14 +34,22 @@
 #include <condition_variable>
 #include <type_traits>
 
+#include "core/threading/thread_util.h"
+
 namespace illuminator {
 
 class ThreadPool {
 public:
-    // 构造函数：创建指定数量的工作线程，每个工作线程进入 WorkerLoop 等待任务
-    explicit ThreadPool(size_t num_threads = std::thread::hardware_concurrency()) {
+    explicit ThreadPool(size_t num_threads = std::thread::hardware_concurrency(),
+                        const std::string& name_prefix = "pool-worker") {
+        if (num_threads == 0) {
+            num_threads = 1;
+        }
         for (size_t i = 0; i < num_threads; ++i) {
-            workers_.emplace_back([this] { WorkerLoop(); });
+            workers_.emplace_back([this, name_prefix, i] {
+                SetThreadName(name_prefix + "-" + std::to_string(i));
+                WorkerLoop();
+            });
         }
     }
 
@@ -91,7 +100,7 @@ public:
     }
 
     // 工作线程总数
-    size_t NumThreads() const { return workers_.size(); }
+    size_t NumThreads() const noexcept { return workers_.size(); }
 
 private:
     // ---- 工作线程主循环 ----
@@ -113,7 +122,13 @@ private:
                 tasks_.pop();
             }
             // 执行任务（锁已释放，不阻塞其他线程取任务）
-            task();
+            try {
+                task();
+            } catch (const std::exception&) {
+                // packaged_task 会把异常存进 future；继续工作避免线程退出
+            } catch (...) {
+                // 未知异常 — 继续执行
+            }
         }
     }
 

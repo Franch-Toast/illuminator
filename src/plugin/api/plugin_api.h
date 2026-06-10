@@ -76,13 +76,12 @@ public:
     virtual PluginType Type() const = 0;
 
     // ---- 生命周期方法 ----
-
-    // 初始化 — 传入配置参数，完成插件内部状态设置
     virtual Status Init(const ConfigValue& config) { return Status::Ok(); }
-    // 启动 — 开始工作（如打开文件、启动线程、挂载 eBPF 探针）
     virtual Status Start() { return Status::Ok(); }
-    // 停止 — 停止工作并释放资源
     virtual Status Stop() { return Status::Ok(); }
+
+    // True when plugin started in idle/degraded mode (e.g. missing BPF object).
+    virtual bool IsStub() const { return false; }
 };
 
 }  // namespace illuminator
@@ -97,8 +96,12 @@ public:
 // 返回一个指向 IlPluginDescriptor 结构体的指针，描述插件的基本信息。
 extern "C" {
 
+// 主机 Plugin API 版本 — 插件加载时校验此值以确保 ABI 兼容
+#define IL_PLUGIN_API_VERSION 1
+
 // 插件描述符结构体
 struct IlPluginDescriptor {
+    uint32_t api_version;   // 必须等于 IL_PLUGIN_API_VERSION
     const char* name;       // 插件名称
     const char* version;    // 插件版本
     uint32_t type;    // 插件类型（illuminator::PluginType 转为 uint32_t）

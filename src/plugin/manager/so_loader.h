@@ -25,6 +25,8 @@
 #pragma once
 
 #include <dlfcn.h>
+#include <climits>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -36,18 +38,23 @@ namespace illuminator {
 
 class SoLoader {
 public:
-    // 析构时释放所有加载的共享库
     ~SoLoader() {
         for (auto* handle : handles_) {
             if (handle) dlclose(handle);
         }
     }
 
-    // ---- 加载单个 .so 插件 ----
-    // 参数: path — .so 文件的完整路径
-    // 返回: 成功返回 Ok，失败返回详细错误信息
+    void SetAllowedDirs(std::vector<std::string> dirs) {
+        allowed_dirs_ = std::move(dirs);
+    }
+
     Status LoadPlugin(const std::string& path) {
-        // 第一步：打开共享库
+        if (!IsPathAllowed(path)) {
+            return Status::Error(StatusCode::kPermissionDenied,
+                "Plugin path '" + path +
+                "' is not under any allowed plugin directory");
+        }
+
         void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!handle) {
             return Status::Error(StatusCode::kInternal,
@@ -66,14 +73,23 @@ public:
         // 第三步：调用 describe 函数获取插件描述符
         const IlPluginDescriptor* desc = describe_fn();
         if (!desc) {
-            dlclose(handle);  // 描述符为空，立即释放
+            dlclose(handle);
             return Status::Error(StatusCode::kInternal,
                 "Plugin describe() returned null");
         }
 
-        // 加载成功，记录信息
-        IL_INFO("Loaded SO plugin: %s v%s (type=%u) from %s",
-                desc->name, desc->version, desc->type, path.c_str());
+        // 第四步：校验 API 版本兼容性
+        if (desc->api_version != IL_PLUGIN_API_VERSION) {
+            dlclose(handle);
+            return Status::Error(StatusCode::kInvalidArgument,
+                std::string("Plugin '") + desc->name +
+                "' API version " + std::to_string(desc->api_version) +
+                " != host version " + std::to_string(IL_PLUGIN_API_VERSION));
+        }
+
+        IL_INFO("Loaded SO plugin: {} v{} (type={}, api_v={}) from {}",
+                desc->name, desc->version, desc->type,
+                desc->api_version, path);
 
         handles_.push_back(handle);         // 保存 handle 供后续释放
         descriptors_.push_back(desc);       // 保存描述符
@@ -86,8 +102,28 @@ public:
     }
 
 private:
-    std::vector<void*> handles_;                          // dlopen 返回的句柄列表
-    std::vector<const IlPluginDescriptor*> descriptors_;  // 插件描述符列表
+    bool IsPathAllowed(const std::string& path) const {
+        if (allowed_dirs_.empty()) return true;
+
+        char resolved[PATH_MAX];
+        if (!realpath(path.c_str(), resolved)) return false;
+        std::string abs_path(resolved);
+
+        for (auto& dir : allowed_dirs_) {
+            char dir_resolved[PATH_MAX];
+            if (!realpath(dir.c_str(), dir_resolved)) continue;
+            std::string abs_dir(dir_resolved);
+            if (abs_dir.back() != '/') abs_dir += '/';
+            if (abs_path.compare(0, abs_dir.size(), abs_dir) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::vector<void*> handles_;
+    std::vector<const IlPluginDescriptor*> descriptors_;
+    std::vector<std::string> allowed_dirs_;
 };
 
 }  // namespace illuminator

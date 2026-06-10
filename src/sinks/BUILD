@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 cc_library(
     name = "console_output",
     hdrs = ["console_output/console_sink.h"],
@@ -8,6 +10,7 @@ cc_library(
     deps = [
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/serialization:json_serializer",
     ],
 )
 
@@ -21,6 +24,7 @@ cc_library(
     deps = [
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/serialization:json_serializer",
     ],
 )
 

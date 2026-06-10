@@ -23,6 +23,7 @@
 #include <fstream>
 #include <cinttypes>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -305,8 +306,8 @@ public:
         if (kernel_symbols_) {
             auto st = kernel_resolver_.Load();
             if (!st.ok())
-                IL_WARN("stack_symbolizer: kernel symbols unavailable: %s",
-                        st.message().c_str());
+                IL_WARN("stack_symbolizer: kernel symbols unavailable: {}",
+                        st.message());
         }
         return Status::Ok();
     }
@@ -320,6 +321,7 @@ public:
         if (!input)
             return input;
 
+        std::lock_guard<std::mutex> lock(mu_);
         const auto now = std::chrono::steady_clock::now();
         // 在每次处理前清理过期缓存
         PurgeExpiredMapsCaches(now);
@@ -508,6 +510,8 @@ private:
     bool kernel_symbols_ = true;    // 是否解析内核符号
     uint32_t cache_ttl_sec_ = 30;   // maps 缓存过期时间（秒）
     bool jit_map_ = false;          // JIT 映射开关（预留）
+
+    mutable std::mutex mu_;  // guards maps_cache_, elf_cache_, kernel_resolver_ in Process()
 
     KernelSymbolResolver kernel_resolver_;                           // 内核符号解析器实例
     std::unordered_map<std::string, ElfSymbolCache> elf_cache_;      // ELF 文件符号缓存（按路径索引）

@@ -1,101 +1,181 @@
-// ============================================================================
-// Illuminator Web 前端 — 应用路由和导航布局
-// ============================================================================
-//
-// App.tsx 是 Illuminator Web 前端的根组件，负责：
-// 1. 定义整体布局（左侧导航栏 + 右侧主内容区）
-// 2. 配置所有页面的路由规则
-// 3. 管理深色主题的 UI 样式
-//
-// 页面路由：
-// ==========
-// /            → CpuOverview     — CPU 利用率仪表盘（面积图 + 核心热力图）
-// /processes   → ProcessExplorer — 进程浏览器（可排序表格 + 线程展开）
-// /flamegraph  → FlameGraph      — 火焰图（d3-flame-graph 可视化 + 搜索）
-// /timeline    → Timeline        — 调度器分析（运行队列延迟 + 迁移统计）
-// /diff        → DiffView        — 对比分析（基准 vs 比较，变化百分比）
-// /query       → QueryConsole   — SQL 查询控制台（直查 SQLite 存储）
-// ============================================================================
-
-import React from 'react'
+import React, { useEffect, useState, useCallback } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
+import TimeControls from './components/TimeControls/TimeControls'
+import StatusBar from './components/Layout/StatusBar'
+import { usePipelinePolling } from './hooks/usePipelinePolling'
+import { useTimeStore } from './stores/useTimeStore'
 import CpuOverview from './pages/CpuOverview'
 import ProcessExplorer from './pages/ProcessExplorer'
 import FlameGraph from './pages/FlameGraph'
 import Timeline from './pages/Timeline'
 import DiffView from './pages/DiffView'
 import QueryConsole from './pages/QueryConsole'
+import SystemPage from './pages/SystemPage'
 
-// 导航项配置：路径、标签和图标
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) { return { error } }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding: 40, color: '#f87171' }}>
+          <h2>Something went wrong</h2>
+          <pre style={{ fontSize: 13, whiteSpace: 'pre-wrap' }}>
+            {this.state.error.message}
+          </pre>
+          <button onClick={() => this.setState({ error: null })}
+            style={{ marginTop: 12, padding: '8px 16px', background: '#2563eb',
+                     color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer' }}>
+            Retry
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 const navItems = [
-  { path: '/', label: 'CPU Overview', icon: '📊' },
+  { path: '/', label: 'Dashboard', icon: '📊' },
   { path: '/processes', label: 'Processes', icon: '📋' },
-  { path: '/flamegraph', label: 'Flame Graph', icon: '🔥' },
-  { path: '/timeline', label: 'Timeline', icon: '📈' },
-  { path: '/diff', label: 'Diff View', icon: '🔀' },
+  { path: '/profiler', label: 'Profiler', icon: '🔥' },
+  { path: '/scheduler', label: 'Scheduler', icon: '📈' },
+  { path: '/compare', label: 'Compare', icon: '🔀' },
   { path: '/query', label: 'Query', icon: '🔍' },
+  { path: '/system', label: 'System', icon: '⚙️' },
 ]
 
-export default function App() {
-  return (
-    // 根布局：左侧导航 + 右侧内容
-    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+const WINDOW_PRESETS = [30_000, 60_000, 300_000, 900_000]
 
-      {/* ======== 左侧导航栏 ======== */}
+export default function App() {
+  const [version, setVersion] = useState('...')
+  const [showShortcuts, setShowShortcuts] = useState(false)
+  usePipelinePolling(3000)
+
+  const togglePause = useTimeStore(s => s.togglePause)
+  const setWindowMs = useTimeStore(s => s.setWindowMs)
+  const windowMs = useTimeStore(s => s.windowMs)
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    const tag = (e.target as HTMLElement)?.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+    if (e.key === ' ') {
+      e.preventDefault()
+      togglePause()
+    } else if (e.key === 't' || e.key === 'T') {
+      const idx = WINDOW_PRESETS.indexOf(windowMs)
+      const next = WINDOW_PRESETS[(idx + 1) % WINDOW_PRESETS.length]!
+      setWindowMs(next)
+    } else if (e.key === '?') {
+      setShowShortcuts(prev => !prev)
+    }
+  }, [togglePause, setWindowMs, windowMs])
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [handleKeyDown])
+
+  useEffect(() => {
+    fetch('/healthz')
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
+      .then(d => setVersion(d.version ?? __APP_VERSION__))
+      .catch(() => setVersion(__APP_VERSION__))
+  }, [])
+
+  return (
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
       <nav style={{
-        width: 220, background: '#1a1d23', color: '#e0e0e0',
+        width: 200, background: '#1a1d23', color: '#e0e0e0',
         display: 'flex', flexDirection: 'column', padding: '16px 0',
-        borderRight: '1px solid #2a2d35',
+        borderRight: '1px solid #2a2d35', flexShrink: 0,
       }}>
-        {/* 品牌标识 */}
         <div style={{
-          padding: '0 20px 20px', borderBottom: '1px solid #2a2d35',
-          marginBottom: 8
+          padding: '0 16px 16px', borderBottom: '1px solid #2a2d35',
+          marginBottom: 8,
         }}>
-          <h1 style={{ fontSize: 20, margin: 0, color: '#60a5fa', fontWeight: 700 }}>
-            Illuminator
-          </h1>
-          <span style={{ fontSize: 11, color: '#888' }}>Observability Platform</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+            <h1 style={{ fontSize: 18, margin: 0, color: '#60a5fa', fontWeight: 700 }}>
+              Illuminator
+            </h1>
+            <span style={{ fontSize: 10, color: '#6b7280', fontFamily: 'monospace' }}>
+              v{version}
+            </span>
+          </div>
+          <span style={{ fontSize: 10, color: '#888' }}>Performance Observatory</span>
         </div>
 
-        {/* 导航链接 — NavLink 自动高亮当前路由 */}
         {navItems.map(item => (
           <NavLink
             key={item.path}
             to={item.path}
-            end={item.path === '/'}  // 精确匹配首页路径
+            end={item.path === '/'}
             style={({ isActive }) => ({
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '10px 20px', textDecoration: 'none',
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '9px 16px', textDecoration: 'none',
               color: isActive ? '#60a5fa' : '#b0b0b0',
               background: isActive ? '#252830' : 'transparent',
               borderLeft: isActive ? '3px solid #60a5fa' : '3px solid transparent',
-              fontSize: 14, transition: 'all 0.15s',
+              fontSize: 13, transition: 'all 0.15s',
             })}
           >
-            <span>{item.icon}</span>
+            <span style={{ fontSize: 14 }}>{item.icon}</span>
             <span>{item.label}</span>
           </NavLink>
         ))}
 
-        {/* 底部版本信息 */}
         <div style={{ flex: 1 }} />
-        <div style={{ padding: '12px 20px', fontSize: 11, color: '#666' }}>
-          v0.1.0 · C++ eBPF Engine
-        </div>
       </nav>
 
-      {/* ======== 右侧主内容区 ======== */}
-      <main style={{ flex: 1, background: '#0f1117', color: '#e0e0e0', overflow: 'auto' }}>
-        <Routes>
-          <Route path="/" element={<CpuOverview />} />
-          <Route path="/processes" element={<ProcessExplorer />} />
-          <Route path="/flamegraph" element={<FlameGraph />} />
-          <Route path="/timeline" element={<Timeline />} />
-          <Route path="/diff" element={<DiffView />} />
-          <Route path="/query" element={<QueryConsole />} />
-        </Routes>
-      </main>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        <TimeControls />
+
+        <main style={{ flex: 1, background: '#0f1117', color: '#e0e0e0', overflow: 'auto' }}>
+          <ErrorBoundary>
+            <Routes>
+              <Route path="/" element={<CpuOverview />} />
+              <Route path="/processes" element={<ProcessExplorer />} />
+              <Route path="/profiler" element={<FlameGraph />} />
+              <Route path="/scheduler" element={<Timeline />} />
+              <Route path="/compare" element={<DiffView />} />
+              <Route path="/query" element={<QueryConsole />} />
+              <Route path="/system" element={<SystemPage />} />
+            </Routes>
+          </ErrorBoundary>
+        </main>
+
+        <StatusBar />
+      </div>
+
+      {showShortcuts && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }} onClick={() => setShowShortcuts(false)}>
+          <div style={{
+            background: '#1e2028', border: '1px solid #2a2d35', borderRadius: 12,
+            padding: 24, minWidth: 300,
+          }} onClick={e => e.stopPropagation()}>
+            <h3 style={{ margin: '0 0 16px', fontSize: 16, color: '#60a5fa' }}>Keyboard Shortcuts</h3>
+            {[
+              ['Space', 'Toggle Live / Pause'],
+              ['T', 'Cycle time window (30s → 1m → 5m → 15m)'],
+              ['?', 'Show / hide this help'],
+            ].map(([key, desc]) => (
+              <div key={key} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', fontSize: 13 }}>
+                <kbd style={{
+                  background: '#252830', border: '1px solid #3a3d45', borderRadius: 4,
+                  padding: '2px 8px', fontFamily: 'monospace', fontSize: 12,
+                }}>{key}</kbd>
+                <span style={{ color: '#b0b0b0' }}>{desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

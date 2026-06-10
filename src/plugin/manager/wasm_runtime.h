@@ -96,7 +96,7 @@ public:
 
         // 存储模块字节码（后续由 WASM VM 解释执行）
         modules_[name] = std::move(bytes);
-        IL_INFO("Loaded WASM module: %s (%zu bytes)", name.c_str(),
+        IL_INFO("Loaded WASM module: {} ({} bytes)", name,
                 modules_[name].size());
         return Status::Ok();
     }
@@ -149,7 +149,7 @@ public:
             return Status::Error(StatusCode::kNotFound,
                 "WASM module not loaded: " + module_name_);
         }
-        IL_INFO("WASM processor '%s' initialized", module_name_.c_str());
+        IL_INFO("WASM processor '{}' initialized", module_name_);
         return Status::Ok();
     }
 

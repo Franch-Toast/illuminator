@@ -184,6 +184,7 @@ export function useCpuUtilization(refreshMs = 1000) {
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch('/api/v1/cpu/utilization')
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
       const json = (await res.json()) as unknown
       const parsed = parseUtilizationResponse(json)
       setData(parsed)
@@ -211,9 +212,10 @@ export function useCpuUtilization(refreshMs = 1000) {
   }, [])
 
   useEffect(() => {
-    fetchData()
+    const initTimer = window.setTimeout(fetchData, 0)
     intervalRef.current = window.setInterval(fetchData, refreshMs)
     return () => {
+      clearTimeout(initTimer)
       if (intervalRef.current !== undefined) clearInterval(intervalRef.current)
     }
   }, [fetchData, refreshMs])
@@ -306,6 +308,7 @@ export function useProcessCpu(refreshMs = 2000) {
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch('/api/v1/cpu/processes')
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`)
       const json = (await res.json()) as unknown
       setProcesses(parseProcessResponse(json))
       setError(null)
@@ -315,9 +318,10 @@ export function useProcessCpu(refreshMs = 2000) {
   }, [])
 
   useEffect(() => {
-    fetchData()
+    const initTimer = window.setTimeout(fetchData, 0)
     intervalRef.current = window.setInterval(fetchData, refreshMs)
     return () => {
+      clearTimeout(initTimer)
       if (intervalRef.current !== undefined) clearInterval(intervalRef.current)
     }
   }, [fetchData, refreshMs])

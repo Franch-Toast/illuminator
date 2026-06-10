@@ -1,0 +1,96 @@
+name: Security Scan
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
+  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'web/package*.json'
+
+jobs:
+  codeql-cpp:
+    name: "CodeQL C++ Analysis"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          queries: +security-extended
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: security-codeql
+          repository-cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Build for CodeQL analysis
+        run: bazel build //src/...
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:cpp"
+
+  codeql-js:
+    name: "CodeQL JavaScript Analysis"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: +security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
+
+  npm-audit:
+    name: "npm Dependency Audit"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --production --audit-level=high
+        continue-on-error: true
+
+      - name: Audit all dependencies
+        run: npm audit --audit-level=critical

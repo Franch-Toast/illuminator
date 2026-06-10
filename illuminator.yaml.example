@@ -1,43 +1,101 @@
+# ============================================================================
+# Illuminator — 全功能配置文件
+# ============================================================================
+#
+# 架构: Pipeline v3 事件驱动异步管道
+#   TimerWheel (1 thread)   → 全局定时调度 (timerfd + epoll)
+#   CollectPool (M threads) → 并行执行 Source::Collect()
+#   ProcessThread (1/pipe)  → 纯事件处理器 (variant dispatch)
+#   SinkPool (K threads)    → 并行执行 Sink::Write()
+#
+# 数据流:
+#   Source → [AsyncChannel] → Processor chain → Aggregator → Sink(s)
+#
+# 可用插件:
+#   Sources:     cpu_utilization, process_cpu, cpu_profiler,
+#                sched_analyzer, ebpf_sched_tracer, offcpu_profiler,
+#                ebpf_io_monitor, ebpf_net_tracer
+#   Processors:  passthrough, filter, stack_symbolizer, stack_merger
+#   Aggregators: cpu_stats_aggregator
+#   Sinks:       console, file_export, local_storage, pprof_export,
+#                prometheus, otlp_export, websocket_sink
+# ============================================================================
+
+# ---- 全局设置 ----
 global:
-  log_level: info
-  data_dir: /var/lib/illuminator
-  plugin_dirs:
+  log_level: info                     # trace | debug | info | warn | error
+  log_file: ""                        # 日志文件路径（空 = 仅控制台输出）
+  log_max_size: 10485760              # 单文件最大字节数（默认 10MB）
+  log_max_files: 3                    # 轮转保留文件数
+  data_dir: /var/lib/illuminator      # 持久化数据目录
+  plugin_dirs:                        # 外部插件搜索路径
     - /etc/illuminator/plugins
     - ./plugins
 
+# ---- HTTP/WebSocket 服务器 ----
 server:
   http:
     enabled: true
-    listen: "0.0.0.0:9527"
+    listen: "127.0.0.1:9527"          # REST API + Prometheus /metrics (默认仅本机)
+    # listen: "0.0.0.0:9527"          # 如需外部访问取消此注释
   websocket:
-    enabled: true
+    enabled: true                     # 实时数据推送到前端
+  # auth_token: ""                    # Bearer Token 认证（空 = 不启用认证）
+  #                                   # 启用后所有 /api/* 请求需携带 Authorization: Bearer <token>
+  #                                   # /healthz 和 /metrics 端点免认证
 
+# ---- 管道引擎配置 (v3) ----
+engine:
+  collect_pool_threads: 2             # CollectPool 线程数 (0=auto: 2)
+  sink_pool_threads: 4                # SinkPool 线程数 (0=auto: CPU/2)
+  channel:
+    size: medium                      # small(1024) | medium(4096) | large(16384)
+    drop_policy: drop_newest          # drop_newest | drop_oldest
+    backpressure_high: 0.8            # 触发反压的水位线
+    backpressure_low: 0.2             # 解除反压的水位线
+
+# ---- 存储与数据保留 ----
+storage:
+  backend: sqlite                     # 存储后端 (sqlite)
+  retention_minutes: 30               # 数据保留时长（分钟），0=永不清理
+  prune_interval_sec: 60              # 自动清理间隔（秒）
+  # 注意：保留时间过短会影响历史查询；过长会增加磁盘和内存占用
+  # 建议：车端部署 30-60 分钟，开发测试 5-10 分钟
+
+# ---- 数据管道 ----
 pipelines:
-  # System CPU utilization - /proc/stat based, very low overhead
+
+  # ===========================================================================
+  # CPU 利用率监控 — 基于 /proc/stat, 极低开销 (Pull)
+  # ===========================================================================
   cpu_utilization:
     source:
       type: cpu_utilization
       config:
-        interval_ms: 1000
-        collect_per_core: true
-        collect_frequency: true
-        ema_alpha: 0.3
+        interval_ms: 1000             # 采集间隔
+        collect_per_core: true        # 分核统计
+        collect_frequency: true       # 采集 CPU 频率
+        ema_alpha: 0.3                # 指数移动平均平滑系数
     sinks:
       - type: local_storage
         config:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_utilization
-      - type: websocket_sink
+      - type: websocket_sink          # 实时推送到前端仪表盘
+        config:
+          max_buffer_size: 30           # 内存中保留的最大批次数 (默认 30)
 
-  # Per-process/thread CPU monitoring
+  # ===========================================================================
+  # 进程/线程级 CPU 监控 — 基于 /proc/[pid]/stat (Pull)
+  # ===========================================================================
   cpu_processes:
     source:
       type: process_cpu
       config:
         interval_ms: 2000
-        top_n: 50
-        thread_detail_threshold_pct: 3.0
+        top_n: 50                     # 只报告 Top N 进程
+        thread_detail_threshold_pct: 3.0  # CPU > 3% 的线程展示详情
         # include_comm_regex: "planning|perception|map_engine"
         # exclude_comm_regex: ""
     sinks:
@@ -48,33 +106,35 @@ pipelines:
           pipeline: cpu_processes
       - type: websocket_sink
 
-  # On-CPU profiling with stack traces and flame graph support
+  # ===========================================================================
+  # On-CPU 性能剖析 — eBPF perf_event 采样 + 火焰图 (Push)
+  # ===========================================================================
   cpu_profile:
     source:
       type: cpu_profiler
       config:
-        frequency_hz: 49
-        mode: aggregated
-        stack_depth: 128
-        user_stacks: true
-        kernel_stacks: true
-        # target_pids: "1234,5678"
-        # target_comms: "planning,perception"
-        bpf_object: build/bpf/cpu_profiler.bpf.o
+        frequency_hz: 49              # 采样频率 (素数避免与周期性任务共振)
+        mode: aggregated              # aggregated | streaming
+        stack_depth: 128              # 最大堆栈深度
+        user_stacks: true             # 采集用户态堆栈
+        kernel_stacks: true           # 采集内核态堆栈
+        # target_pids: "1234,5678"    # 仅采集指定 PID
+        # target_comms: "planning,perception"  # 仅采集指定进程名
+        bpf_object: bazel-bin/src/ebpf/probes/cpu_profiler.bpf.o
     processors:
       - type: stack_symbolizer
         config:
-          demangle: true
-          kernel_symbols: true
-          cache_ttl_sec: 30
+          demangle: true              # C++ name demangling
+          kernel_symbols: true        # 解析内核符号
+          cache_ttl_sec: 30           # 符号缓存 TTL
       - type: stack_merger
         config:
-          group_by: comm
-          include_kernel: true
+          group_by: comm              # 按进程名分组合并
+          include_kernel: true        # 包含内核栈
     aggregator:
       type: cpu_stats_aggregator
       config:
-        window_sec: 30
+        window_sec: 30                # 聚合窗口 (秒)
     sinks:
       - type: local_storage
         config:
@@ -83,17 +143,19 @@ pipelines:
           pipeline: cpu_profile
       - type: pprof_export
         config:
-          path: /tmp/illuminator.folded
+          path: /tmp/illuminator.folded   # FlameGraph 格式输出
 
-  # Scheduler analysis - context switches, wakeup latency, CPU migrations
+  # ===========================================================================
+  # 调度分析 — eBPF 追踪上下文切换/唤醒延迟/CPU 迁移 (Push)
+  # ===========================================================================
   sched_analysis:
     source:
       type: sched_analyzer
       config:
-        detailed_mode: false
-        aggregate_interval_ms: 5000
-        track_migrations: true
-        bpf_object: build/bpf/sched_analyzer.bpf.o
+        detailed_mode: false          # true = 每事件输出, false = 聚合输出
+        aggregate_interval_ms: 5000   # 聚合间隔
+        track_migrations: true        # 追踪 CPU 迁移
+        bpf_object: bazel-bin/src/ebpf/probes/sched_analyzer.bpf.o
     sinks:
       - type: local_storage
         config:
@@ -102,17 +164,19 @@ pipelines:
           pipeline: sched_analysis
       - type: websocket_sink
 
-  # Off-CPU profiling (optional, higher overhead)
-  # Uncomment to enable off-CPU analysis
+  # ===========================================================================
+  # Off-CPU 剖析 — 追踪线程阻塞/等待时间 (Push)
+  # 默认注释: 开启后有额外开销, 按需启用
+  # ===========================================================================
   # offcpu_profile:
   #   source:
   #     type: offcpu_profiler
   #     config:
-  #       min_duration_us: 100
+  #       min_duration_us: 100        # 最小阻塞时长 (微秒)
   #       user_stacks: true
   #       kernel_stacks: true
   #       target_comms: "planning,perception"
-  #       bpf_object: build/bpf/offcpu_profiler.bpf.o
+  #       bpf_object: bazel-bin/src/ebpf/probes/offcpu_profiler.bpf.o
   #   processors:
   #     - type: stack_symbolizer
   #       config:
@@ -126,3 +190,42 @@ pipelines:
   #         backend: sqlite
   #         path: /tmp/illuminator_data
   #         pipeline: offcpu_profile
+
+  # ===========================================================================
+  # I/O 监控 — eBPF 追踪文件/块设备 I/O (Push)
+  # 默认注释: 按需启用
+  # ===========================================================================
+  # io_monitor:
+  #   source:
+  #     type: ebpf_io_monitor
+  #     config:
+  #       bpf_object: bazel-bin/src/ebpf/probes/bio_latency.bpf.o
+  #       track_file_io: true
+  #       track_block_io: true
+  #       min_latency_us: 100
+  #   sinks:
+  #     - type: local_storage
+  #       config:
+  #         backend: sqlite
+  #         path: /tmp/illuminator_data
+  #         pipeline: io_monitor
+  #     - type: websocket_sink
+
+  # ===========================================================================
+  # 网络追踪 — eBPF 追踪 TCP/UDP 连接和流量 (Push)
+  # 默认注释: 按需启用
+  # ===========================================================================
+  # net_tracer:
+  #   source:
+  #     type: ebpf_net_tracer
+  #     config:
+  #       bpf_object: bazel-bin/src/ebpf/probes/net_tracer.bpf.o
+  #       track_tcp: true
+  #       track_udp: false
+  #   sinks:
+  #     - type: local_storage
+  #       config:
+  #         backend: sqlite
+  #         path: /tmp/illuminator_data
+  #         pipeline: net_tracer
+  #     - type: websocket_sink

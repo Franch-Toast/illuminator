@@ -98,11 +98,13 @@ public:
         return Status::Ok();
     }
 
+    StorageBackend* GetBackend() const { return backend_.get(); }
+
 private:
-    std::string backend_name_;                           // 存储后端类型名
-    std::string data_dir_;                               // 数据目录
-    std::string pipeline_name_;                          // 流水线名称（用于命名空间隔离）
-    std::unique_ptr<StorageBackend> backend_;            // 存储后端实例
+    std::string backend_name_;
+    std::string data_dir_;
+    std::string pipeline_name_;
+    std::unique_ptr<StorageBackend> backend_;
 };
 
 // 在插件注册表中注册该 Sink

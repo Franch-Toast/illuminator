@@ -34,73 +34,52 @@ namespace illuminator {
 //   server.http.listen → {"server.http.listen": "0.0.0.0:9527"}
 //
 // 支持方便的读写操作：
-// - config["key"] = value;                  写入标量值
+// - config.Set("key", value);               写入标量值
 // - auto sub = config["parent"];             读取子值（带点号前缀解析）
 // - config["key"].AsInt(default);           读取并转换类型
 class ConfigValue {
 public:
     ConfigValue() = default;
 
-    // 从整数值构造（存储为 "" → "123"）
     ConfigValue(int64_t v) { values_[""] = std::to_string(v); }
-    // 从字符串构造
     ConfigValue(const char* v) { values_[""] = v; }
     ConfigValue(std::string v) { values_[""] = std::move(v); }
 
-    // 设置指定键的值
     void Set(const std::string& key, const std::string& value) {
         values_[key] = value;
     }
 
-    // ---- 下标运算符：读取子配置 ----
-    // 返回一个新的 ConfigValue，包含以 key 或 "key." 为前缀的所有子值
-    ConfigValue operator[](const std::string& key) const {
+    void Set(const std::string& key, const char* value) {
+        values_[key] = value;
+    }
+
+    void Set(const std::string& key, int64_t value) {
+        values_[key] = std::to_string(value);
+    }
+
+    // ---- 下标运算符：只读取子配置 ----
+    [[nodiscard]] ConfigValue operator[](const std::string& key) const {
         ConfigValue child;
         auto it = values_.find(key);
         if (it != values_.end()) {
-            child.values_[""] = it->second;  // 精确匹配的值
+            child.values_[""] = it->second;
         }
-        // 处理嵌套子键：查找所有 "key.xxx" 形式的入口
         std::string prefix = key + ".";
         for (auto& [k, v] : values_) {
             if (k.substr(0, prefix.size()) == prefix) {
-                child.values_[k.substr(prefix.size())] = v;  // 去掉前缀后存入
+                child.values_[k.substr(prefix.size())] = v;
             }
         }
         return child;
     }
 
-    // ---- 下标运算符：写入配置 ----
-    // 返回引用以支持链式赋值：config["key"] = value;
-    ConfigValue& operator[](const std::string& key) {
-        current_key_ = key;  // 记录键名，供后续赋值运算符使用
-        return *this;
-    }
-
-    // ---- 赋值运算符（覆盖式写入） ----
-
-    ConfigValue& operator=(int64_t v) {
-        values_[current_key_] = std::to_string(v);
-        return *this;
-    }
-
-    ConfigValue& operator=(const std::string& v) {
-        values_[current_key_] = v;
-        return *this;
-    }
-
-    ConfigValue& operator=(const char* v) {
-        values_[current_key_] = v;
-        return *this;
-    }
-
     // ---- 值查询方法 ----
 
     // 判断配置是否为空（无任何键值对）
-    bool IsNull() const { return values_.empty(); }
+    [[nodiscard]] bool IsNull() const { return values_.empty(); }
 
     // 读取为 64 位整数（失败时返回默认值）
-    int64_t AsInt(int64_t def = 0) const {
+    [[nodiscard]] int64_t AsInt(int64_t def = 0) const {
         auto it = values_.find("");
         if (it == values_.end()) return def;
         try { return std::stoll(it->second); }
@@ -108,7 +87,7 @@ public:
     }
 
     // 读取为双精度浮点数
-    double AsDouble(double def = 0.0) const {
+    [[nodiscard]] double AsDouble(double def = 0.0) const {
         auto it = values_.find("");
         if (it == values_.end()) return def;
         try { return std::stod(it->second); }
@@ -116,26 +95,48 @@ public:
     }
 
     // 读取为字符串
-    std::string AsString(const std::string& def = "") const {
+    [[nodiscard]] std::string AsString(const std::string& def = "") const {
         auto it = values_.find("");
         return it != values_.end() ? it->second : def;
     }
 
     // 读取为布尔值（"true" 或 "1" 视作 true）
-    bool AsBool(bool def = false) const {
+    [[nodiscard]] bool AsBool(bool def = false) const {
         auto it = values_.find("");
         if (it == values_.end()) return def;
         return it->second == "true" || it->second == "1";
     }
 
+    // 读取为字符串列表（从索引化存储 "0","1",... 中恢复）
+    [[nodiscard]] std::vector<std::string> AsList() const {
+        auto size_it = values_.find("_size");
+        if (size_it == values_.end()) {
+            auto scalar = values_.find("");
+            if (scalar != values_.end() && !scalar->second.empty()) {
+                return {scalar->second};
+            }
+            return {};
+        }
+        size_t n = 0;
+        try { n = std::stoull(size_it->second); } catch (...) { return {}; }
+        std::vector<std::string> result;
+        result.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            auto it = values_.find(std::to_string(i));
+            if (it != values_.end()) {
+                result.push_back(it->second);
+            }
+        }
+        return result;
+    }
+
     // 获取原始映射表（用于遍历）
-    const std::unordered_map<std::string, std::string>& Raw() const {
+    [[nodiscard]] const std::unordered_map<std::string, std::string>& Raw() const {
         return values_;
     }
 
 private:
     std::unordered_map<std::string, std::string> values_;
-    std::string current_key_;  // 当前正在写入的键名（配合 operator= 使用）
 };
 
 // ---- PipelineConfig: 单条管道配置 ----
@@ -157,21 +158,41 @@ struct PipelineConfig {
     std::vector<StageConfig> sinks;             // 数据出口（至少一个）
 };
 
+// ---- EngineConfig: 管道引擎全局配置 ----
+struct EngineConfig {
+    uint32_t collect_pool_threads = 0;  // CollectPool 线程数（0 = auto: 2）
+    uint32_t sink_pool_threads = 0;     // SinkPool 线程数（0 = auto: CPU核数/2）
+
+    struct ChannelConfig {
+        std::string size = "medium";            // small(1024) | medium(4096) | large(16384)
+        std::string drop_policy = "drop_newest"; // drop_newest | drop_oldest
+        double backpressure_high = 0.8;
+        double backpressure_low = 0.2;
+    } channel;
+};
+
 // ---- GlobalConfig: 全局配置结构 ----
 //
 // 根级配置，包含整个 Illuminator 实例的配置信息
 struct GlobalConfig {
     // 全局设置
-    std::string log_level = "info";                     // 默认日志级别
-    std::string data_dir = "/var/lib/illuminator";      // 默认数据目录
-    std::vector<std::string> plugin_dirs;                // SO 插件搜索路径列表
+    std::string log_level = "info";
+    std::string log_file;                          // 日志文件路径（空 = 仅控制台）
+    size_t log_max_size = 10 * 1024 * 1024;        // 单文件最大 10MB
+    size_t log_max_files = 3;                      // 轮转文件数
+    std::string data_dir = "/var/lib/illuminator";
+    std::vector<std::string> plugin_dirs;
 
     // 服务器配置
     struct ServerConfig {
-        bool http_enabled = true;                       // 是否启用 HTTP 服务
-        std::string http_listen = "0.0.0.0:9527";      // HTTP 监听地址
-        bool ws_enabled = true;                         // 是否启用 WebSocket
+        bool http_enabled = true;
+        std::string http_listen = "127.0.0.1:9527";
+        bool ws_enabled = true;
+        std::string auth_token;
     } server;
+
+    // 管道引擎配置
+    EngineConfig engine;
 
     // 关联的管道配置列表
     std::vector<PipelineConfig> pipelines;

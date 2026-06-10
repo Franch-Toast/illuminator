@@ -1,58 +1,44 @@
 // ============================================================================
-// PipelineController 实现 — 从配置构建并管理多条数据处理管道
-// ============================================================================
-//
-// BuildFromConfig(GlobalConfig):
-//   这是系统初始化的核心方法。遍历配置中的每条管道定义，完成：
-//   1. 从 PluginRegistry 查找并实例化 Source/Processor/Aggregator/Sink 插件
-//   2. 调用每个插件的 Init() 方法，传入配置参数
-//   3. 将各插件按正确顺序组装到 Pipeline 对象中
-//
-//   对于每条管道的四个阶段，处理逻辑如下：
-//   - Source: 必须存在，且管道必须有 Source
-//   - Processor: 可选的多个处理器，按配置顺序串联
-//   - Aggregator: 可选的时间窗口聚合器
-//   - Sink: 至少一个数据出口，每个管道可以配置多个 Sink
-//
-// 示例：一条 CPU Profiling 管道的构建过程：
-//   Pipeline("cpu_profile")
-//     → Source("cpu_profiler")       // eBPF CPU 采样
-//     → Processor("stack_symbolizer") // 符号化堆栈地址
-//     → Processor("stack_merger")     // 合并相同堆栈
-//     → Sink("local_storage")         // 存入 SQLite
-//     → Sink("pprof_export")          // 导出 pprof 格式
+// PipelineController v3 implementation
 // ============================================================================
 
 #include "core/engine/pipeline_controller.h"
 #include "plugin/manager/plugin_registry.h"
+#include "storage/storage_backend.h"
 
 namespace illuminator {
 
 Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
     auto& registry = PluginRegistry::Instance();
 
-    // 遍历配置中的每条管道定义
-    for (auto& pc : config.pipelines) {
-        auto pipeline = std::make_unique<Pipeline>(pc.name);
+    auto resolve_capacity = [](const std::string& size) -> size_t {
+        if (size == "small")  return 1024;
+        if (size == "large")  return 16384;
+        return 4096;  // "medium" or default
+    };
 
-        // ====================================================================
-        // 第一步：创建并配置 Source（数据源）
-        // ====================================================================
+    for (auto& pc : config.pipelines) {
+        DropPolicy dp = DropPolicy::kDropNewest;
+        if (config.engine.channel.drop_policy == "drop_oldest") {
+            dp = DropPolicy::kDropOldest;
+        }
+        auto pipeline = std::make_unique<Pipeline>(
+            pc.name,
+            resolve_capacity(config.engine.channel.size),
+            dp,
+            config.engine.channel.backpressure_high,
+            config.engine.channel.backpressure_low);
+
         auto source = registry.CreateSource(pc.source.type);
         if (!source) {
-            // 如果找不到指定类型的插件，返回明确的错误信息
             return Status::Error(StatusCode::kNotFound,
                 "Source plugin not found: " + pc.source.type +
                 " (pipeline: " + pc.name + ")");
         }
-        // 用配置参数初始化 Source 插件
         auto status = source->Init(pc.source.config);
         if (!status.ok()) return status;
         pipeline->SetSource(std::move(source));
 
-        // ====================================================================
-        // 第二步：创建并配置 Processor 链
-        // ====================================================================
         for (auto& proc_cfg : pc.processors) {
             auto proc = registry.CreateProcessor(proc_cfg.type);
             if (!proc) {
@@ -65,9 +51,6 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
             pipeline->AddProcessor(std::move(proc));
         }
 
-        // ====================================================================
-        // 第三步：创建并配置 Aggregator（可选）
-        // ====================================================================
         if (pc.aggregator.has_value()) {
             auto agg = registry.CreateAggregator(pc.aggregator->type);
             if (!agg) {
@@ -80,9 +63,6 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
             pipeline->SetAggregator(std::move(agg));
         }
 
-        // ====================================================================
-        // 第四步：创建并配置 Sink 列表
-        // ====================================================================
         for (auto& sink_cfg : pc.sinks) {
             auto sink = registry.CreateSink(sink_cfg.type);
             if (!sink) {
@@ -95,47 +75,140 @@ Status PipelineController::BuildFromConfig(const GlobalConfig& config) {
             pipeline->AddSink(std::move(sink));
         }
 
-        IL_INFO("Built pipeline: %s", pc.name.c_str());
+        IL_INFO("Built pipeline: {}", pc.name);
         pipelines_.push_back(std::move(pipeline));
     }
+
+    InitSinkPool(config.engine.sink_pool_threads);
+    InitCollectPool(config.engine.collect_pool_threads);
 
     return Status::Ok();
 }
 
-// ---- 启动所有管道 ----
-// 如果某条管道启动失败，会停止之前已启动的所有管道，
-// 避免留下部分运行的不一致状态。
 Status PipelineController::StartAll() {
     for (auto& pipeline : pipelines_) {
         auto status = pipeline->Start();
         if (!status.ok()) {
-            IL_ERROR("Failed to start pipeline '%s': %s",
-                     pipeline->name().c_str(), status.message().c_str());
-            StopAll();  // 回滚：停止已启动的管道
+            IL_ERROR("Failed to start pipeline '{}': {}",
+                     pipeline->name(), status.message());
+            StopAll();
             return status;
         }
     }
-    IL_INFO("All %zu pipelines started", pipelines_.size());
+
+    // Register Pull-mode sources as TimerWheel collect events
+    for (auto& p : pipelines_) {
+        auto* src = p->GetSource();
+        if (src && !src->IsPushMode()) {
+            auto interval = std::chrono::milliseconds(src->IntervalMs());
+            Pipeline* pipeline_ptr = p.get();
+            SourcePlugin* source_ptr = src;
+
+            timer_.AddRepeating(interval,
+                [this, pipeline_ptr, source_ptr] {
+                    if (!pipeline_ptr->IsRunning()) return;
+                    collect_pool_->Submit(
+                        [pipeline_ptr, source_ptr] {
+                            auto result = source_ptr->Collect();
+                            if (result.ok() && *result && !(*result)->Empty()) {
+                                pipeline_ptr->Enqueue(std::move(*result));
+                            }
+                        }
+                    );
+                }
+            );
+            IL_INFO("Registered Pull source for pipeline '{}' (interval={}ms)",
+                     pipeline_ptr->name(), src->IntervalMs());
+        }
+    }
+
+    // Register Aggregator flush events as TimerWheel sentinel injections
+    for (auto& p : pipelines_) {
+        if (p->HasAggregator()) {
+            auto interval = std::chrono::milliseconds(p->FlushIntervalMs());
+            Pipeline* pipeline_ptr = p.get();
+
+            timer_.AddRepeating(interval,
+                [pipeline_ptr] {
+                    if (pipeline_ptr->IsRunning()) {
+                        pipeline_ptr->InjectFlush();
+                    }
+                }
+            );
+            IL_INFO("Registered Aggregator flush for pipeline '{}' (interval={}ms)",
+                     pipeline_ptr->name(), p->FlushIntervalMs());
+        }
+    }
+
+    // Register periodic metrics sync
+    timer_.AddRepeating(std::chrono::seconds(10),
+        [this] {
+            if (collect_pool_) {
+                collect_pool_->Submit([this] {
+                    auto& m = InternalMetrics::Instance();
+                    m.SetGauge("timer_wheel_fires_total",
+                               static_cast<double>(timer_.FiresTotal()));
+                    m.SetGauge("timer_wheel_timers_active",
+                               static_cast<double>(timer_.ActiveTimers()));
+                    if (collect_pool_) {
+                        m.SetGauge("collect_pool_pending_tasks",
+                                   static_cast<double>(collect_pool_->PendingTasks()));
+                    }
+                    if (sink_pool_) {
+                        m.SetGauge("sink_pool_pending_tasks",
+                                   static_cast<double>(sink_pool_->PendingTasks()));
+                    }
+                });
+            }
+        }
+    );
+
+    // Register periodic data pruning (every 60s, keep last 30 minutes)
+    if (storage_backend_) {
+        static constexpr uint64_t kRetentionNs = 30ULL * 60 * 1000000000ULL;
+        timer_.AddRepeating(std::chrono::seconds(60),
+            [this] {
+                if (sink_pool_) {
+                    sink_pool_->Submit([this] {
+                        storage_backend_->Prune(kRetentionNs);
+                    });
+                }
+            }
+        );
+        IL_INFO("Registered storage data pruning (retention=30min, interval=60s)");
+    }
+
+    timer_.Start();
+
+    IL_INFO("All {} pipelines started (v3: TimerWheel + CollectPool + SinkPool)",
+            pipelines_.size());
     return Status::Ok();
 }
 
-// ---- 停止所有管道 ----
-// 依次调用每条管道的 Stop() 方法
 Status PipelineController::StopAll() {
+    // Phase 1: Stop TimerWheel — no more Collect/Flush events
+    timer_.Stop();
+
+    // Phase 2: Stop CollectPool — wait for in-flight Collects
+    collect_pool_.reset();
+
+    // Phase 3: Stop each pipeline (ProcessThread drains channel)
     for (auto& pipeline : pipelines_) {
         pipeline->Stop();
     }
+
+    // Phase 4: SinkPool destroyed last (ensure last writes complete)
+    // sink_pool_ destroyed in destructor
+
     IL_INFO("All pipelines stopped");
     return Status::Ok();
 }
 
-// ---- 按名称查找管道 ----
-// 线性搜索（管道数量通常很少，n 在个位数到几十之间）
 Pipeline* PipelineController::GetPipeline(const std::string& name) {
     for (auto& p : pipelines_) {
         if (p->name() == name) return p.get();
     }
-    return nullptr;  // 未找到
+    return nullptr;
 }
 
 }  // namespace illuminator

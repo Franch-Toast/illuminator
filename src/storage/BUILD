@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 cc_library(
     name = "storage",
     hdrs = [
@@ -23,5 +25,6 @@ cc_library(
     deps = [
         ":storage",
         "//src/core:common",
+        "@nlohmann_json//:json",
     ],
 )

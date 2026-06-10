@@ -17,6 +17,7 @@
 
 #include "plugin/api/sink_plugin.h"
 #include "plugin/manager/plugin_registry.h"
+#include "serialization/json_serializer.h"
 
 namespace illuminator {
 
@@ -129,50 +130,9 @@ private:
         fprintf(stdout, "\n");
     }
 
-    // 以 JSON 格式输出一条 Record
-    // 格式: {"ts":<timestamp_ns>,"labels":{...},"fields":{...}}
-    // 参数:
-    //   rec - 要输出的 Record
     void WriteRecordJson(const Record& rec) {
-        auto ns = TimestampToNanos(rec.timestamp);
-        fprintf(stdout, "{\"ts\":%lu,\"labels\":{", ns);
-
-        bool first = true;
-        for (auto& label : rec.labels) {
-            if (!first) fprintf(stdout, ",");
-            fprintf(stdout, "\"%.*s\":\"%.*s\"",
-                    static_cast<int>(label.key.size()), label.key.data(),
-                    static_cast<int>(label.value.size()), label.value.data());
-            first = false;
-        }
-
-        fprintf(stdout, "},\"fields\":{");
-        first = true;
-        for (auto& [key, val] : rec.fields) {
-            if (!first) fprintf(stdout, ",");
-            fprintf(stdout, "\"%.*s\":", static_cast<int>(key.size()), key.data());
-            PrintJsonValue(val);
-            first = false;
-        }
-
-        fprintf(stdout, "}}\n");
-    }
-
-    // 将 FieldValue 以 JSON 类型格式输出
-    // 参数:
-    //   val - 要输出的字段值（variant 类型）
-    void PrintJsonValue(const FieldValue& val) {
-        struct Visitor {
-            void operator()(std::monostate) const { fprintf(stdout, "null"); }
-            void operator()(bool v) const { fprintf(stdout, "%s", v ? "true" : "false"); }
-            void operator()(int64_t v) const { fprintf(stdout, "%ld", v); }
-            void operator()(uint64_t v) const { fprintf(stdout, "%lu", v); }
-            void operator()(double v) const { fprintf(stdout, "%.6f", v); }
-            void operator()(std::string_view v) const {
-                fprintf(stdout, "\"%.*s\"", static_cast<int>(v.size()), v.data());
-            }
-        };
-        std::visit(Visitor{}, val);
+        auto s = RecordToJson(rec).dump();
+        fprintf(stdout, "%s\n", s.c_str());
     }
 
     // 输出堆栈采样信息

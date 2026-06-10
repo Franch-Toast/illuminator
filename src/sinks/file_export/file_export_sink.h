@@ -15,6 +15,7 @@
 
 #include "plugin/api/sink_plugin.h"
 #include "plugin/manager/plugin_registry.h"
+#include "serialization/json_serializer.h"
 
 namespace illuminator {
 
@@ -74,29 +75,8 @@ public:
         if (!file_ || !batch) return Status::Ok();
 
         for (auto& rec : batch->records()) {
-            auto ns = TimestampToNanos(rec.timestamp);
-            fprintf(file_, "{\"ts\":%lu,\"labels\":{", ns);
-
-            // 输出标签字典
-            bool first = true;
-            for (auto& label : rec.labels) {
-                if (!first) fprintf(file_, ",");
-                fprintf(file_, "\"%.*s\":\"%.*s\"",
-                        static_cast<int>(label.key.size()), label.key.data(),
-                        static_cast<int>(label.value.size()), label.value.data());
-                first = false;
-            }
-
-            // 输出字段字典
-            fprintf(file_, "},\"fields\":{");
-            first = true;
-            for (auto& [key, val] : rec.fields) {
-                if (!first) fprintf(file_, ",");
-                fprintf(file_, "\"%.*s\":", static_cast<int>(key.size()), key.data());
-                PrintValue(val);
-                first = false;
-            }
-            fprintf(file_, "}}\n");
+            auto s = RecordToJson(rec).dump();
+            fprintf(file_, "%s\n", s.c_str());
         }
 
         return Status::Ok();
@@ -111,26 +91,8 @@ public:
     }
 
 private:
-    // 将 FieldValue 以 JSON 类型格式输出到文件
-    // 参数:
-    //   val - 要输出的字段值
-    void PrintValue(const FieldValue& val) {
-        struct Visitor {
-            FILE* f;
-            void operator()(std::monostate) const { fprintf(f, "null"); }
-            void operator()(bool v) const { fprintf(f, "%s", v ? "true" : "false"); }
-            void operator()(int64_t v) const { fprintf(f, "%ld", v); }
-            void operator()(uint64_t v) const { fprintf(f, "%lu", v); }
-            void operator()(double v) const { fprintf(f, "%.6f", v); }
-            void operator()(std::string_view v) const {
-                fprintf(f, "\"%.*s\"", static_cast<int>(v.size()), v.data());
-            }
-        };
-        std::visit(Visitor{file_}, val);
-    }
-
-    std::string path_;       // 输出文件路径
-    FILE* file_ = nullptr;   // 文件句柄，未打开时为 nullptr
+    std::string path_;
+    FILE* file_ = nullptr;
 };
 
 // 在插件注册表中注册该 Sink
