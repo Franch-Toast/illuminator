@@ -15,13 +15,8 @@ on:
       - 'LICENSE'
   workflow_dispatch:
     inputs:
-      build_docker:
-        description: 'Build and push Docker image'
-        required: false
-        type: boolean
-        default: true
       docker_tag:
-        description: 'Docker image tag (default: git SHA short)'
+        description: 'Docker image tag (留空则使用 git SHA short)'
         required: false
         type: string
         default: ''
@@ -242,32 +237,36 @@ jobs:
     steps:
       - name: Check all required jobs
         run: |
-          echo "backend-build: ${{ needs.backend-build.result }}"
-          echo "backend-test:  ${{ needs.backend-test.result }}"
-          echo "bpf-probes:    ${{ needs.bpf-probes.result }}"
-          echo "frontend-build:${{ needs.frontend-build.result }}"
-          echo "sanitizer-asan:${{ needs.sanitizer-asan.result }}"
-          echo "sanitizer-tsan:${{ needs.sanitizer-tsan.result }}"
+          echo "=== Job Results ==="
+          echo "backend-build:  ${{ needs.backend-build.result }}"
+          echo "backend-test:   ${{ needs.backend-test.result }}"
+          echo "bpf-probes:     ${{ needs.bpf-probes.result }}"
+          echo "frontend-build: ${{ needs.frontend-build.result }}"
+          echo "sanitizer-asan: ${{ needs.sanitizer-asan.result }}"
+          echo "sanitizer-tsan: ${{ needs.sanitizer-tsan.result }}"
 
           # Layer-1 jobs must succeed
           if [[ "${{ needs.backend-build.result }}" != "success" ]] || \
              [[ "${{ needs.backend-test.result }}" != "success" ]] || \
              [[ "${{ needs.bpf-probes.result }}" != "success" ]] || \
              [[ "${{ needs.frontend-build.result }}" != "success" ]]; then
-            echo "::error::One or more required CI jobs failed"
+            echo "::error::One or more Layer-1 CI jobs failed"
             exit 1
           fi
 
-          # Layer-2 jobs: must succeed or be skipped (push events skip them)
-          for job in sanitizer-asan sanitizer-tsan; do
-            result="${{ needs[job].result || 'skipped' }}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
-              echo "::error::$job failed"
-              exit 1
-            fi
-          done
+          # Layer-2 jobs: must succeed or be skipped (non-PR events skip them)
+          ASAN_RESULT="${{ needs.sanitizer-asan.result }}"
+          TSAN_RESULT="${{ needs.sanitizer-tsan.result }}"
+          if [[ "$ASAN_RESULT" != "success" && "$ASAN_RESULT" != "skipped" ]]; then
+            echo "::error::sanitizer-asan failed: $ASAN_RESULT"
+            exit 1
+          fi
+          if [[ "$TSAN_RESULT" != "success" && "$TSAN_RESULT" != "skipped" ]]; then
+            echo "::error::sanitizer-tsan failed: $TSAN_RESULT"
+            exit 1
+          fi
 
-          echo "All CI checks passed"
+          echo "All CI checks passed ✓"
 
   # ===========================================================
   # Layer 3 — Docker Image Build (manual trigger only)
@@ -275,7 +274,8 @@ jobs:
 
   docker-build:
     name: "Docker Image Build"
-    if: github.event_name == 'workflow_dispatch' && inputs.build_docker
+    if: >-
+      github.event_name == 'workflow_dispatch'
     needs: ci-gate
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -288,11 +288,12 @@ jobs:
       - name: Determine image tag
         id: tag
         run: |
-          if [ -n "${{ inputs.docker_tag }}" ]; then
-            echo "tag=${{ inputs.docker_tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          TAG="${{ inputs.docker_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(git rev-parse --short HEAD)"
           fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building image with tag: $TAG"
 
       - name: Build Docker image (no push)
         uses: docker/build-push-action@v6
@@ -306,5 +307,9 @@ jobs:
 
       - name: Image size report
         run: |
+          echo "=== Docker Image ==="
           docker images illuminator:${{ steps.tag.outputs.tag }} \
             --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
+          echo ""
+          echo "To run locally:"
+          echo "  docker run --cap-add CAP_BPF --cap-add CAP_PERFMON -p 9527:9527 illuminator:${{ steps.tag.outputs.tag }}"
