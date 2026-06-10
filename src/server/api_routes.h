@@ -26,6 +26,36 @@ inline void JsonError(httplib::Response& res, const std::string& msg,
     res.set_content(json{{"error", msg}}.dump() + "\n", "application/json");
 }
 
+inline void SetupAuthMiddleware(httplib::Server& srv,
+                                const std::string& auth_token) {
+    if (auth_token.empty()) return;
+
+    srv.set_pre_routing_handler(
+        [auth_token](const httplib::Request& req, httplib::Response& res) {
+            if (req.path == "/healthz" || req.path == "/metrics") {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            if (req.path.find("/api/") != 0) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+            auto it = req.headers.find("Authorization");
+            if (it == req.headers.end()) {
+                res.status = 401;
+                res.set_content(R"({"error":"missing Authorization header"})",
+                                "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            std::string expected = "Bearer " + auth_token;
+            if (it->second != expected) {
+                res.status = 403;
+                res.set_content(R"({"error":"invalid token"})",
+                                "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+            return httplib::Server::HandlerResponse::Unhandled;
+        });
+}
+
 inline void RegisterApiRoutes(httplib::Server& srv,
                               PipelineController& controller) {
     srv.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {

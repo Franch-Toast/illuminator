@@ -104,7 +104,7 @@ public:
     const char* Name() const override { return "sched_analyzer"; }
     const char* Version() const override { return "0.2.0"; }
 
-    bool IsPushMode() const override { return false; }
+    bool IsPushMode() const override { return detailed_mode_; }
     bool IsStub() const override { return stub_mode_; }
 
     uint32_t IntervalMs() const override { return aggregate_interval_ms_; }

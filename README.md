@@ -94,8 +94,8 @@ illuminator/
 ├── docs/                       # ===== 设计文档 =====
 │   ├── pipeline_v3_design.md   #   Pipeline v3 事件驱动架构设计文档
 │   ├── architecture_audit_v4.md#   全面架构审计报告 (P0-P2 缺陷追踪)
-│   ├── frontend_architecture_design.md  # 前端架构设计方案
 │   ├── frontend_implementation_report.md# 前端实施报告
+│   ├── project_review_and_roadmap.md   # 项目全面审阅与未来路线图
 │   └── onboarding_guide.md     #   新人入门指南
 │
 ├── src/                        # ===== 全部 C++ 源代码 =====

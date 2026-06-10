@@ -42,6 +42,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -68,6 +69,8 @@ public:
     uint32_t IntervalMs() const override { return interval_ms_; }
 
     StatusOr<DataBatchPtr> Collect() override {
+        std::lock_guard<std::mutex> lock(collect_mutex_);
+
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
 
         auto cur = proc::ReadCpuSnapshot();
@@ -220,6 +223,7 @@ private:
     bool collect_freq_ = false;
     double ema_alpha_ = 0.0;
 
+    mutable std::mutex collect_mutex_;
     bool has_prev_ = false;
     proc::CpuSnapshot prev_;
     std::vector<EmaState> ema_states_;

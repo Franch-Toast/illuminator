@@ -154,7 +154,6 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     IL_INFO("Illuminator v{} starting...", illuminator::kIlluminatorVersion);
 
     illuminator::RegisterBuiltinPlugins();
-    illuminator::PluginManager::Instance().PrintRegisteredPlugins();
 
     illuminator::GlobalConfig config;
     if (!config_path.empty()) {
@@ -174,8 +173,18 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         config = BuildDemoConfig();
     }
 
-    // B1: Parse HTTP address from config (default "0.0.0.0:9527")
-    std::string http_host = "0.0.0.0";
+    // 加载 .so 外部插件（如果配置了 plugin_dirs）
+    if (!config.plugin_dirs.empty()) {
+        auto pm_status = illuminator::PluginManager::Instance()
+            .LoadPluginsFromDirs(config.plugin_dirs);
+        if (!pm_status.ok()) {
+            IL_WARN("Plugin loading issue: {}", pm_status.message());
+        }
+    }
+    illuminator::PluginManager::Instance().PrintRegisteredPlugins();
+
+    // B1: Parse HTTP address from config (default "127.0.0.1:9527")
+    std::string http_host = "127.0.0.1";
     int http_port = 9527;
     ParseListenAddr(config.server.http_listen, http_host, http_port);
     int ws_port = http_port + 1;
@@ -219,6 +228,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     ws_manager.Listen(http_host, ws_port);
 
     illuminator::HttpServer http_server;
+    illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
     illuminator::RegisterApiRoutes(http_server.server(), controller);
 
     http_server.SetStaticDir("web/dist");

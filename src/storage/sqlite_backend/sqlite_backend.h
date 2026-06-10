@@ -29,8 +29,10 @@
 #include <sqlite3.h>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
@@ -62,6 +64,7 @@ public:
         Execute("PRAGMA journal_mode=WAL");        // WAL 模式提升并发
         Execute("PRAGMA synchronous=NORMAL");      // 降低 fsync 频率
         Execute("PRAGMA cache_size=10000");        // 10MB 缓存
+        sqlite3_busy_timeout(db_, 5000);           // 并发写入时自动等待重试
 
         auto status = CreateTables();
         if (!status.ok()) return status;
@@ -76,6 +79,7 @@ public:
     Status WriteRecords(const std::string& pipeline_name,
                         const std::vector<Record>& records) override {
         if (!db_ || records.empty()) return Status::Ok();
+        std::lock_guard<std::mutex> lock(write_mutex_);
 
         Execute("BEGIN TRANSACTION");  // 批量事务：减少 fsync 开销
 
@@ -122,6 +126,7 @@ public:
     Status WriteStackSamples(const std::string& pipeline_name,
                              const std::vector<StackSample>& samples) override {
         if (!db_ || samples.empty()) return Status::Ok();
+        std::lock_guard<std::mutex> lock(write_mutex_);
 
         Execute("BEGIN TRANSACTION");
 
@@ -171,6 +176,7 @@ public:
     Status WriteProfile(const ProfileMeta& meta,
                         const std::vector<uint8_t>& data) override {
         if (!db_) return Status::Error(StatusCode::kInternal, "DB not open");
+        std::lock_guard<std::mutex> lock(write_mutex_);
 
         const char* sql =
             "INSERT INTO profiles (pipeline, profile_type, start_ns, end_ns, "
@@ -202,9 +208,10 @@ public:
     // ---- 查询历史数据 ----
     StatusOr<QueryResult> Query(const QueryRequest& req) override {
         QueryResult result;
-        if (!db_) return result;
+        if (!db_) {
+            return Status::Error(StatusCode::kInternal, "DB not open");
+        }
 
-        // 构建动态 SQL
         std::ostringstream sql;
         sql << "SELECT timestamp_ns, labels_json, fields_json FROM records "
             << "WHERE pipeline = ?";
@@ -221,15 +228,53 @@ public:
         sqlite3_stmt* stmt = nullptr;
         int prc = PrepareOrLog(&stmt, query.c_str(), "Query");
         if (prc != SQLITE_OK || !stmt) {
-            return result;
+            return Status::Error(StatusCode::kInternal,
+                std::string("Query prepare failed: ") + sqlite3_errmsg(db_));
         }
 
         sqlite3_bind_text(stmt, 1, req.pipeline_name.c_str(), -1, SQLITE_TRANSIENT);
 
-        // TODO: implement column deserialization (labels_json, fields_json → Record)
-        // For now, count matching rows but return empty records.
         int rc = sqlite3_step(stmt);
         while (rc == SQLITE_ROW) {
+            Record rec;
+            rec.timestamp = std::chrono::system_clock::time_point(
+                std::chrono::nanoseconds(sqlite3_column_int64(stmt, 0)));
+
+            const char* labels_str = reinterpret_cast<const char*>(
+                sqlite3_column_text(stmt, 1));
+            const char* fields_str = reinterpret_cast<const char*>(
+                sqlite3_column_text(stmt, 2));
+
+            if (labels_str) {
+                try {
+                    auto lj = nlohmann::json::parse(labels_str);
+                    for (auto& [k, v] : lj.items()) {
+                        auto key_sv = result.Intern(k);
+                        auto val_sv = result.Intern(v.get<std::string>());
+                        rec.labels.push_back({key_sv, val_sv});
+                    }
+                } catch (...) {}
+            }
+            if (fields_str) {
+                try {
+                    auto fj = nlohmann::json::parse(fields_str);
+                    for (auto& [k, v] : fj.items()) {
+                        auto key_sv = result.Intern(k);
+                        if (v.is_number_float())
+                            rec.SetField(key_sv, v.get<double>());
+                        else if (v.is_number_integer())
+                            rec.SetField(key_sv, v.get<int64_t>());
+                        else if (v.is_number_unsigned())
+                            rec.SetField(key_sv, v.get<uint64_t>());
+                        else if (v.is_boolean())
+                            rec.SetField(key_sv, v.get<bool>());
+                        else if (v.is_string())
+                            rec.SetField(key_sv, result.Intern(v.get<std::string>()));
+                    }
+                } catch (...) {}
+            }
+
+            result.records.push_back(std::move(rec));
             result.total_count++;
             rc = sqlite3_step(stmt);
         }
@@ -238,8 +283,6 @@ public:
         }
 
         sqlite3_finalize(stmt);
-        IL_WARN("SqliteBackend::Query: column deserialization not yet implemented; "
-                "returning {} row count only", result.total_count);
         return result;
     }
 
@@ -248,16 +291,25 @@ public:
         const std::string& pipeline_name,
         const TimeRange& range) override {
         std::vector<ProfileMeta> profiles;
-        if (!db_) return profiles;
+        if (!db_) {
+            return Status::Error(StatusCode::kInternal, "DB not open");
+        }
 
-        std::string sql =
-            "SELECT pipeline, profile_type, start_ns, end_ns, sample_count "
-            "FROM profiles WHERE pipeline = ? ORDER BY start_ns DESC";
+        std::ostringstream oss;
+        oss << "SELECT pipeline, profile_type, start_ns, end_ns, sample_count "
+               "FROM profiles WHERE pipeline = ?";
+        if (range.start_ns > 0)
+            oss << " AND end_ns >= " << range.start_ns;
+        if (range.end_ns > 0)
+            oss << " AND start_ns <= " << range.end_ns;
+        oss << " ORDER BY start_ns DESC";
 
+        std::string sql = oss.str();
         sqlite3_stmt* stmt = nullptr;
         int prc = PrepareOrLog(&stmt, sql.c_str(), "ListProfiles");
         if (prc != SQLITE_OK || !stmt) {
-            return profiles;
+            return Status::Error(StatusCode::kInternal,
+                std::string("ListProfiles prepare failed: ") + sqlite3_errmsg(db_));
         }
 
         sqlite3_bind_text(stmt, 1, pipeline_name.c_str(), -1, SQLITE_TRANSIENT);
@@ -312,11 +364,22 @@ public:
     StatusOr<std::string> ExecuteRawQuery(const std::string& sql) override {
         if (!db_) return Status::Error(StatusCode::kInternal, "DB not open");
 
+        if (!IsReadOnlyStatement(sql)) {
+            return Status::Error(StatusCode::kPermissionDenied,
+                "Only SELECT, EXPLAIN and PRAGMA statements are allowed");
+        }
+
         sqlite3_stmt* stmt = nullptr;
         int prc = PrepareOrLog(&stmt, sql.c_str(), "ExecuteRawQuery");
         if (prc != SQLITE_OK || !stmt) {
             return Status::Error(StatusCode::kInternal,
                 std::string("SQL prepare failed: ") + sqlite3_errmsg(db_));
+        }
+
+        if (!sqlite3_stmt_readonly(stmt)) {
+            sqlite3_finalize(stmt);
+            return Status::Error(StatusCode::kPermissionDenied,
+                "Statement classified as non-readonly by SQLite");
         }
 
         nlohmann::json rows = nlohmann::json::array();
@@ -367,6 +430,17 @@ public:
     }
 
 private:
+    static bool IsReadOnlyStatement(const std::string& sql) {
+        auto trimmed = sql;
+        size_t start = trimmed.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) return false;
+        std::string prefix = trimmed.substr(start, 7);
+        for (auto& c : prefix) c = static_cast<char>(::toupper(c));
+        return prefix.compare(0, 6, "SELECT") == 0 ||
+               prefix.compare(0, 7, "EXPLAIN") == 0 ||
+               prefix.compare(0, 6, "PRAGMA") == 0;
+    }
+
     // ---- 建表 + 索引 ----
     Status CreateTables() {
         int rc;
@@ -493,6 +567,7 @@ private:
 
     sqlite3* db_ = nullptr;        // SQLite 数据库连接句柄
     std::string db_path_;          // 数据库文件路径
+    std::mutex write_mutex_;       // 序列化所有写入操作，防止并发锁冲突
 };
 
 // 静态初始化器：自动注册 SQLite 后端到 StorageFactory

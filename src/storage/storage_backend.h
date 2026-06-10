@@ -76,6 +76,14 @@ struct QueryResult {
     std::vector<StackSample> stack_samples; // 堆栈采样
     uint64_t total_count = 0;             // 总命中数
     bool has_more = false;                // 是否有更多数据
+
+    // 反序列化时的字符串存储池，Record 中 string_view 指向这里
+    std::vector<std::unique_ptr<std::string>> string_pool;
+
+    std::string_view Intern(const std::string& s) {
+        string_pool.push_back(std::make_unique<std::string>(s));
+        return *string_pool.back();
+    }
 };
 
 // ---- StorageBackend 抽象接口 ----

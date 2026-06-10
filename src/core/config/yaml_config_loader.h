@@ -168,6 +168,9 @@ private:
                 if (ws["enabled"])
                     config.server.ws_enabled = ws["enabled"].as<bool>();
             }
+            // 认证 token（可选）
+            if (server["auth_token"])
+                config.server.auth_token = server["auth_token"].as<std::string>();
         }
 
         // 解析 [engine] 节
