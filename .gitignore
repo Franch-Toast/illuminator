@@ -51,6 +51,9 @@ illuminator.yaml
 # Plan files (personal dev notes)
 *.plan.md
 
+# Documentation (maintained locally, not tracked in git)
+/docs/
+
 # MODULE.bazel.lock is large but should be tracked for reproducibility
 # Uncomment the next line if you don't want to track it:
 # MODULE.bazel.lock
