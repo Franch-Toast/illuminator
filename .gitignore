@@ -42,6 +42,9 @@ __pycache__/
 *.db-shm
 /data/
 
+# User configuration (use illuminator.yaml.example as template)
+illuminator.yaml
+
 # BPF compiled objects (generated, not tracked)
 *.bpf.o
 
