@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 # Source plugins — organized by subsystem (cpu, sched, io, net)
 
 # ============================================================================

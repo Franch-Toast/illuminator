@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
 cc_test(
     name = "lock_free_queue_test",
     srcs = ["lock_free_queue_test.cc"],

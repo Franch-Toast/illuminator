@@ -13,6 +13,18 @@ on:
       - '**.md'
       - 'docs/**'
       - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      build_docker:
+        description: 'Build and push Docker image'
+        required: false
+        type: boolean
+        default: true
+      docker_tag:
+        description: 'Docker image tag (default: git SHA short)'
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -33,14 +45,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mount Bazel cache
-        uses: actions/cache@v4
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
         with:
-          path: |
-            ~/.cache/bazel
-          key: bazel-build-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
-          restore-keys: |
-            bazel-build-${{ runner.os }}-
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
 
       - name: Install system dependencies
         run: |
@@ -59,14 +69,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mount Bazel cache
-        uses: actions/cache@v4
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
         with:
-          path: |
-            ~/.cache/bazel
-          key: bazel-test-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
-          restore-keys: |
-            bazel-test-${{ runner.os }}-
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
 
       - name: Install system dependencies
         run: |
@@ -94,14 +102,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mount Bazel cache
-        uses: actions/cache@v4
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
         with:
-          path: |
-            ~/.cache/bazel
-          key: bazel-bpf-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'src/ebpf/**') }}
-          restore-keys: |
-            bazel-bpf-${{ runner.os }}-
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-bpf
+          repository-cache: true
 
       - name: Install clang for BPF compilation
         run: |
@@ -156,14 +162,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mount Bazel cache
-        uses: actions/cache@v4
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
         with:
-          path: |
-            ~/.cache/bazel
-          key: bazel-asan-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
-          restore-keys: |
-            bazel-asan-${{ runner.os }}-
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-asan
+          repository-cache: true
 
       - name: Install system dependencies
         run: |
@@ -193,14 +197,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Mount Bazel cache
-        uses: actions/cache@v4
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
         with:
-          path: |
-            ~/.cache/bazel
-          key: bazel-tsan-${{ runner.os }}-${{ hashFiles('MODULE.bazel', '.bazelrc') }}
-          restore-keys: |
-            bazel-tsan-${{ runner.os }}-
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-tsan
+          repository-cache: true
 
       - name: Install system dependencies
         run: |
@@ -265,3 +267,43 @@ jobs:
           done
 
           echo "All CI checks passed"
+
+  # ===========================================================
+  # Layer 3 — Docker Image Build (manual trigger only)
+  # ===========================================================
+
+  docker-build:
+    name: "Docker Image Build"
+    if: github.event_name == 'workflow_dispatch' && inputs.build_docker
+    needs: ci-gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine image tag
+        id: tag
+        run: |
+          if [ -n "${{ inputs.docker_tag }}" ]; then
+            echo "tag=${{ inputs.docker_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: illuminator:${{ steps.tag.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image size report
+        run: |
+          docker images illuminator:${{ steps.tag.outputs.tag }} \
+            --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"

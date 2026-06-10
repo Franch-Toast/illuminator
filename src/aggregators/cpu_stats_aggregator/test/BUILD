@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
 cc_test(
     name = "cpu_stats_aggregator_test",
     srcs = ["cpu_stats_aggregator_test.cc"],

@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 exports_files([
     "include/vmlinux.h",
     "include/common.bpf.h",

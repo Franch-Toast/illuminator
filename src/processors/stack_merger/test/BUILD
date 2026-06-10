@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
 cc_test(
     name = "stack_merger_processor_test",
     srcs = ["stack_merger_processor_test.cc"],

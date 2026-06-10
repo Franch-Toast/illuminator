@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
 cc_test(
     name = "pprof_export_sink_test",
     srcs = ["pprof_export_sink_test.cc"],
