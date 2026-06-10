@@ -1,6 +1,6 @@
 """Bazel rule for compiling BPF C sources to .bpf.o objects."""
 
-_BPF_INCLUDES = "-Isrc/ebpf/include"
+_BPF_INCLUDES = "-Isrc/ebpf/include -isystem /usr/include"
 
 _BPF_HDRS = [
     "//src/ebpf:include/vmlinux.h",
@@ -12,6 +12,7 @@ def bpf_probe(name, src, arch = "x86"):
     """Compile a single BPF probe .bpf.c → .bpf.o
 
     Uses $$BPF_CLANG from --action_env (default: clang).
+    Requires libbpf-dev installed on the host (provides bpf/bpf_helpers.h).
     """
     copts = "-g -O2 -target bpf -D__TARGET_ARCH_" + arch
     native.genrule(

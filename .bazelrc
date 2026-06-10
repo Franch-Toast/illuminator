@@ -6,6 +6,8 @@ build --copt=-Wno-unused-parameter
 
 # BPF probe compilation uses system clang via genrule; pin the path here.
 build --action_env=BPF_CLANG=/usr/bin/clang
+# Allow genrules to read system headers (needed for libbpf bpf_helpers.h)
+build --sandbox_add_mount_pair=/usr/include
 
 build:opt --compilation_mode=opt
 build:opt --copt=-O2

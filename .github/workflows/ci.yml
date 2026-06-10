@@ -109,10 +109,11 @@ jobs:
           disk-cache: ${{ github.workflow }}-bpf
           repository-cache: true
 
-      - name: Install clang for BPF compilation
+      - name: Install clang and BPF headers
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends clang
+          sudo apt-get install -y -qq --no-install-recommends \
+            clang libbpf-dev
 
       - name: Compile all BPF probes
         run: bazel build //src/ebpf/probes:all
