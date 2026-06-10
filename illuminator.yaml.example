@@ -189,7 +189,7 @@ pipelines:
   #   source:
   #     type: ebpf_io_monitor
   #     config:
-  #       bpf_object: bazel-bin/src/ebpf/probes/io_monitor.bpf.o
+  #       bpf_object: bazel-bin/src/ebpf/probes/bio_latency.bpf.o
   #       track_file_io: true
   #       track_block_io: true
   #       min_latency_us: 100

@@ -141,6 +141,12 @@ jobs:
       - name: TypeScript type check
         run: npx tsc --noEmit
 
+      - name: ESLint
+        run: npx eslint src/ --max-warnings=100
+
+      - name: Vitest unit tests
+        run: npx vitest run
+
       - name: Vite production build
         run: npx vite build
 

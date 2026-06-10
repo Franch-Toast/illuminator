@@ -87,13 +87,26 @@
 ```
 illuminator/
 ├── MODULE.bazel                # Bazel bzlmod 依赖管理
-├── .bazelrc                    # Bazel 编译配置（C++17, sanitizers 等）
+├── .bazelrc                    # Bazel 编译配置（C++20, stamp, sanitizers）
+├── .bazelversion               # Bazel 版本锁定 (7.6.1)
+├── Makefile                    # 常用命令快捷封装
+├── Dockerfile                  # 多阶段 Docker 构建（前端+后端+runtime）
 ├── illuminator.yaml.example    # 全功能配置文件 (唯一标准配置)
+├── LICENSE                     # MIT License
 ├── README.md
+│
+├── tools/                      # ===== 构建工具 =====
+│   ├── workspace_status.sh     #   Bazel stamp: 输出 git 版本信息
+│   ├── version.bzl             #   Starlark: 生成 version_generated.h
+│   └── BUILD
+│
+├── scripts/                    # ===== 脚本 =====
+│   └── check_env.sh           #   环境检测（编译+运行环境）
 │
 ├── docs/                       # ===== 设计文档 =====
 │   ├── pipeline_v3_design.md   #   Pipeline v3 事件驱动架构设计文档
 │   ├── architecture_audit_v4.md#   全面架构审计报告 (P0-P2 缺陷追踪)
+│   ├── wasm_runtime_design.md  #   WASM 沙箱插件系统设计与路线图
 │   ├── frontend_implementation_report.md# 前端实施报告
 │   ├── project_review_and_roadmap.md   # 项目全面审阅与未来路线图
 │   └── onboarding_guide.md     #   新人入门指南
@@ -246,6 +259,21 @@ illuminator/
 
 ---
 
+## 快速开始
+
+```bash
+# 检测本地环境是否满足构建/运行要求
+make check-env
+
+# 编译后端 + BPF 探针
+make build && make probes
+
+# 启动开发模式
+make dev
+```
+
+---
+
 ## 构建
 
 ### 安装系统依赖 (Ubuntu/Debian)
@@ -260,6 +288,24 @@ sudo apt install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
 # SQLite
 sudo apt install -y libsqlite3-dev
 ```
+
+> 使用 `make check-env` 或 `bash scripts/check_env.sh --all` 可自动检测环境并给出修复建议。
+
+### Makefile 快捷命令
+
+| 命令 | 说明 |
+|------|------|
+| `make build` | 标准构建（debug） |
+| `make build-opt` | 优化构建 |
+| `make test` | 运行全部单元测试 |
+| `make probes` | 编译 eBPF 探针 |
+| `make dev` | 启动后端守护进程 |
+| `make dev-web` | 启动前端开发服务器 |
+| `make docker` | 构建 Docker 镜像（自动注入版本） |
+| `make asan` | AddressSanitizer 测试 |
+| `make tsan` | ThreadSanitizer 测试 |
+| `make version` | 显示当前版本 |
+| `make check-env` | 检测编译/运行环境 |
 
 ### 构建 C++ 后端
 
@@ -279,7 +325,7 @@ bazel build //src/cli:illuminator --config=dbg
 BPF 探针可通过 Bazel 编译（推荐）：
 
 ```bash
-# 编译全部 8 个 BPF 探针
+# 编译全部 BPF 探针
 bazel build //src/ebpf/probes:all
 
 # 编译单个探针
@@ -295,6 +341,19 @@ npm run build
 ```
 
 构建产物输出到 `web/dist/`，会被 HTTP 服务器自动托管。
+
+### Docker 构建
+
+```bash
+# 使用 Makefile（自动注入 git 版本）
+make docker
+
+# 手动构建
+docker build \
+  --build-arg GIT_VERSION=$(git describe --tags --always) \
+  --build-arg GIT_COMMIT=$(git rev-parse HEAD) \
+  -t illuminator:latest .
+```
 
 ---
 
@@ -468,12 +527,13 @@ extern "C" const IlPluginDescriptor* illuminator_plugin_describe() {
 | Job | 触发 | 功能 |
 |-----|------|------|
 | **backend-build** | push/PR | `bazel build //src/...` 全量 C++ 编译 |
-| **backend-test** | push/PR | `bazel test //src/...` 运行 21 个单元测试 |
+| **backend-test** | push/PR | `bazel test //src/...` 运行 25 个单元测试 |
 | **bpf-probes** | push/PR | `bazel build //src/ebpf/probes:all` eBPF 探针编译 |
-| **frontend-build** | push/PR | `npm ci && tsc --noEmit && vite build` 类型检查 + 构建 |
+| **frontend-build** | push/PR | `tsc --noEmit` + ESLint + Vitest + `vite build` |
 | **sanitizer-asan** | 仅 PR | AddressSanitizer 内存错误检测 |
 | **sanitizer-tsan** | 仅 PR | ThreadSanitizer 数据竞争检测 |
 | **ci-gate** | 始终 | 汇总门禁，所有必要 job 通过后才允许合并 |
+| **docker-build** | 手动 (workflow_dispatch) | Docker 镜像构建验证 |
 
 ### 安全扫描 (`security.yml`)
 
@@ -520,8 +580,11 @@ src/
 ### 运行测试
 
 ```bash
-# 运行全部 21 个测试目标
+# 运行全部测试目标（后端 C++）
 bazel test //src/...
+
+# 运行前端测试
+cd web && npm test
 
 # 运行单个模块的测试
 bazel test //src/core/engine/test:all
@@ -542,7 +605,12 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Processors** | passthrough, filter, stack_merger, stack_symbolizer | 4 | 透传、标签过滤、堆栈合并分组、符号化 |
 | **Aggregators** | cpu_stats_aggregator | 1 | 窗口聚合、avg/min/max/p50/p99、Flush 清空 |
 | **Sinks** | console, file, local_storage, otlp, pprof, prometheus, websocket | 7 | I/O 写入、格式化、缓冲淘汰、pipeline 隔离 |
-| **总计** | | **21** | |
+| **Sources** | cpu_utilization | 1 | Init/Collect、配置解析、Load Average |
+| **Server** | api_routes, auth middleware | 1 | /healthz、认证绕过、401/403/200 |
+| **Plugin** | PluginRegistry | 1 | 注册/创建/列举、Source/Processor/Sink |
+| **Storage** | SQLite backend | 1 | 并发写入、查询反序列化、只读 SQL |
+| **后端总计** | | **25** | |
+| **前端** | Zustand stores, hooks | 2 files / 7 cases | useTimeStore、usePolling |
 
 ---
 
@@ -567,6 +635,36 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Compare** | `/compare` | 双 Profile 捕获（Base/Compare，On-CPU/Off-CPU）、**差异火焰图**（红/灰/绿色映射）、Function Diff 表格（1000+ 函数对比） |
 | **Query** | `/query` | SQL 查询控制台（只读 SELECT）、示例查询、执行耗时统计 |
 | **System** | `/system` | 系统健康状态、聚合统计、管道详情表格、内部指标 JSON |
+
+---
+
+## 版本机制
+
+版本号在编译时通过 Bazel stamp 机制自动注入：
+
+| 场景 | 版本号格式 | 示例 |
+|------|-----------|------|
+| 有精确 git tag（`v1.2.3`） | `1.2.3` | Release 版本 |
+| 有历史 tag | `1.2.3-5-gabcdef0` | 开发中版本 |
+| 无 tag | `abcdef0` | 8 位 commit hash |
+
+**后端**：通过 `tools/workspace_status.sh` → Bazel stamp → `version_generated.h`，启动时输出版本并在 `/healthz` 返回。
+
+**前端**：Vite 构建时注入 `__APP_VERSION__`，运行时从 `/healthz` 动态获取。标题旁显示。
+
+**Docker**：通过 `--build-arg GIT_VERSION=xxx GIT_COMMIT=yyy` 传入。
+
+---
+
+## 文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [pipeline_v3_design.md](docs/pipeline_v3_design.md) | Pipeline v3 事件驱动架构设计 |
+| [architecture_audit_v4.md](docs/architecture_audit_v4.md) | 全面架构审计报告 (P0-P2 缺陷追踪) |
+| [wasm_runtime_design.md](docs/wasm_runtime_design.md) | WASM 沙箱插件系统设计与路线图 |
+| [project_review_and_roadmap.md](docs/project_review_and_roadmap.md) | 项目全面审阅与未来路线图 |
+| [onboarding_guide.md](docs/onboarding_guide.md) | 新人入门指南 |
 
 ---
 
