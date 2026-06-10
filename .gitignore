@@ -42,11 +42,17 @@ __pycache__/
 *.db-shm
 /data/
 
+# User configuration (use illuminator.yaml.example as template)
+illuminator.yaml
+
 # BPF compiled objects (generated, not tracked)
 *.bpf.o
 
 # Plan files (personal dev notes)
 *.plan.md
+
+# Documentation (maintained locally, not tracked in git)
+/docs/
 
 # MODULE.bazel.lock is large but should be tracked for reproducibility
 # Uncomment the next line if you don't want to track it:

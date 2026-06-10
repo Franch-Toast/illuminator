@@ -1,0 +1,336 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, infra_optimize]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  pull_request:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      docker_tag:
+        description: 'Docker image tag (留空则使用 git SHA short)'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BAZEL_CACHE_DIR: ~/.cache/bazel
+
+jobs:
+  # ===========================================================
+  # Layer 1 — Fast Gate (every push, < 5 min)
+  # ===========================================================
+
+  backend-build:
+    name: "C++ Backend Build"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Build all targets
+        run: bazel build //src/...
+
+  backend-test:
+    name: "C++ Unit Tests"
+    needs: backend-build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Run all tests
+        run: bazel test //src/... --test_output=errors --test_summary=detailed
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bazel-test-logs
+          path: |
+            bazel-testlogs/**/test.log
+            bazel-testlogs/**/test.xml
+          retention-days: 7
+
+  bpf-probes:
+    name: "eBPF Probe Compilation"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-bpf
+          repository-cache: true
+
+      - name: Install clang and BPF headers
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            clang libbpf-dev
+
+      - name: Compile all BPF probes
+        run: bazel build //src/ebpf/probes:all
+
+  frontend-build:
+    name: "Frontend Build + TypeCheck"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npx eslint src/ --max-warnings=100
+
+      - name: Vitest unit tests
+        run: npx vitest run
+
+      - name: Vite production build
+        run: npx vite build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: web/dist/
+          retention-days: 3
+
+  # ===========================================================
+  # Layer 2 — Deep Checks (PR only)
+  # ===========================================================
+
+  sanitizer-asan:
+    name: "AddressSanitizer"
+    if: github.event_name == 'pull_request'
+    needs: backend-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-asan
+          repository-cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Run tests with AddressSanitizer
+        run: bazel test //src/... --config=asan --test_output=errors
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+
+      - name: Upload ASAN logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: asan-logs
+          path: bazel-testlogs/**/test.log
+          retention-days: 7
+
+  sanitizer-tsan:
+    name: "ThreadSanitizer"
+    if: github.event_name == 'pull_request'
+    needs: backend-test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-tsan
+          repository-cache: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+
+      - name: Run tests with ThreadSanitizer
+        run: bazel test //src/... --config=tsan --test_output=errors
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+
+      - name: Upload TSAN logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tsan-logs
+          path: bazel-testlogs/**/test.log
+          retention-days: 7
+
+  # ===========================================================
+  # Gate — All checks must pass before merge
+  # ===========================================================
+
+  ci-gate:
+    name: "CI Gate"
+    if: always()
+    needs:
+      - backend-build
+      - backend-test
+      - bpf-probes
+      - frontend-build
+      - sanitizer-asan
+      - sanitizer-tsan
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check all required jobs
+        run: |
+          echo "=== Job Results ==="
+          echo "backend-build:  ${{ needs.backend-build.result }}"
+          echo "backend-test:   ${{ needs.backend-test.result }}"
+          echo "bpf-probes:     ${{ needs.bpf-probes.result }}"
+          echo "frontend-build: ${{ needs.frontend-build.result }}"
+          echo "sanitizer-asan: ${{ needs.sanitizer-asan.result }}"
+          echo "sanitizer-tsan: ${{ needs.sanitizer-tsan.result }}"
+
+          # Layer-1 jobs must succeed
+          if [[ "${{ needs.backend-build.result }}" != "success" ]] || \
+             [[ "${{ needs.backend-test.result }}" != "success" ]] || \
+             [[ "${{ needs.bpf-probes.result }}" != "success" ]] || \
+             [[ "${{ needs.frontend-build.result }}" != "success" ]]; then
+            echo "::error::One or more Layer-1 CI jobs failed"
+            exit 1
+          fi
+
+          # Layer-2 jobs: must succeed or be skipped (non-PR events skip them)
+          ASAN_RESULT="${{ needs.sanitizer-asan.result }}"
+          TSAN_RESULT="${{ needs.sanitizer-tsan.result }}"
+          if [[ "$ASAN_RESULT" != "success" && "$ASAN_RESULT" != "skipped" ]]; then
+            echo "::error::sanitizer-asan failed: $ASAN_RESULT"
+            exit 1
+          fi
+          if [[ "$TSAN_RESULT" != "success" && "$TSAN_RESULT" != "skipped" ]]; then
+            echo "::error::sanitizer-tsan failed: $TSAN_RESULT"
+            exit 1
+          fi
+
+          echo "All CI checks passed ✓"
+
+  # ===========================================================
+  # Layer 3 — Docker Image Build (workflow_dispatch only)
+  # ===========================================================
+  # 触发方式: GitHub → Actions → CI → Run workflow
+  # 仅在手动触发时执行，push/PR 事件自动跳过此 job
+
+  docker-build:
+    name: "Docker Image Build"
+    if: github.event_name == 'workflow_dispatch'
+    needs: ci-gate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Determine version info
+        id: tag
+        run: |
+          TAG="${{ inputs.docker_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(git describe --tags --always 2>/dev/null || git rev-parse --short HEAD)"
+          fi
+          TAG="${TAG#v}"
+          COMMIT="$(git rev-parse HEAD)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "::notice::Building image with tag: $TAG (commit: ${COMMIT:0:8})"
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: illuminator:${{ steps.tag.outputs.tag }}
+          build-args: |
+            GIT_VERSION=${{ steps.tag.outputs.tag }}
+            GIT_COMMIT=${{ steps.tag.outputs.commit }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image info
+        run: |
+          echo "=== Docker Image Built ==="
+          docker images illuminator:${{ steps.tag.outputs.tag }} \
+            --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
+          echo ""
+          echo "Run locally:"
+          echo "  docker run --cap-add CAP_BPF --cap-add CAP_PERFMON -p 9527:9527 illuminator:${{ steps.tag.outputs.tag }}"

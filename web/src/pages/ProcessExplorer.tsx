@@ -26,7 +26,7 @@ const td: React.CSSProperties = {
   borderBottom: '1px solid #252830',
 }
 
-export function formatRssKb(kb: number): string {
+function formatRssKb(kb: number): string {
   if (kb >= 1024 * 1024) return `${(kb / (1024 * 1024)).toFixed(2)} GB`
   if (kb >= 1024) return `${(kb / 1024).toFixed(1)} MB`
   return `${kb} KB`

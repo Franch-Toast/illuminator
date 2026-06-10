@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 cc_library(
     name = "api",
     hdrs = [
@@ -23,7 +25,6 @@ cc_library(
         "manager/plugin_registry.h",
         "manager/so_loader.h",
         "manager/plugin_manager.h",
-        "manager/wasm_runtime.h",
     ],
     strip_include_prefix = "",
     include_prefix = "plugin",
@@ -46,22 +47,18 @@ cc_library(
     deps = [
         ":api",
         ":manager",
-        # Legacy sources
+        # CPU sources
         "//src/sources:proc_stat_reader",
-        "//src/sources:cpu_sys_monitor",
-        "//src/sources:process_cpu_monitor",
-        "//src/sources:ebpf_cpu_sampler",
-        "//src/sources:ebpf_net_tracer",
-        "//src/sources:ebpf_io_monitor",
-        "//src/sources:ebpf_sched_tracer",
-        "//src/sources:cpu_sys_stats",
-        "//src/sources:proc_cpu_monitor",
-        # New CPU monitoring sources
         "//src/sources:cpu_utilization",
         "//src/sources:process_cpu",
         "//src/sources:cpu_profiler",
+        # Scheduler sources
         "//src/sources:sched_analyzer",
         "//src/sources:offcpu_profiler",
+        "//src/sources:ebpf_sched_tracer",
+        # I/O + Network
+        "//src/sources:ebpf_io_monitor",
+        "//src/sources:ebpf_net_tracer",
         # Processors
         "//src/processors:passthrough",
         "//src/processors:filter",

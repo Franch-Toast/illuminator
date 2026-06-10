@@ -41,25 +41,33 @@ public:
     }
 
     // ---- 从目录加载 .so 插件 ----
-    // 遍历指定目录中的所有 .so 文件，调用 SoLoader 加载并注册。
+    // 遍历指定目录中的所有 .so 文件，调用 SoLoader 加载并注册到 PluginRegistry。
     // 不存在的目录会被跳过并记录警告。
     Status LoadPluginsFromDirs(const std::vector<std::string>& dirs) {
+        if (dirs.empty()) return Status::Ok();
+        so_loader_.SetAllowedDirs(dirs);
+
+        size_t before_count = so_loader_.Descriptors().size();
         for (auto& dir : dirs) {
-            // 检查目录是否存在，避免不必要的错误
             if (!std::filesystem::exists(dir)) {
-                IL_WARN("Plugin directory does not exist: %s", dir.c_str());
+                IL_WARN("Plugin directory does not exist: {}", dir);
                 continue;
             }
-            // 遍历目录，只处理 .so 文件
             for (auto& entry : std::filesystem::directory_iterator(dir)) {
                 if (entry.path().extension() == ".so") {
                     auto status = so_loader_.LoadPlugin(entry.path().string());
                     if (!status.ok()) {
-                        IL_ERROR("Failed to load plugin %s: %s",
-                                 entry.path().c_str(), status.message().c_str());
+                        IL_ERROR("Failed to load plugin {}: {}",
+                                 entry.path().string(), status.message());
                     }
                 }
             }
+        }
+
+        auto& reg = PluginRegistry::Instance();
+        auto& descriptors = so_loader_.Descriptors();
+        for (size_t i = before_count; i < descriptors.size(); ++i) {
+            BridgeDescriptorToRegistry(descriptors[i], reg);
         }
         return Status::Ok();
     }
@@ -73,15 +81,56 @@ public:
     void PrintRegisteredPlugins() const {
         auto& reg = PluginRegistry::Instance();
         IL_INFO("=== Registered Plugins ===");
-        for (auto& n : reg.ListSources())     IL_INFO("  Source:     %s", n.c_str());
-        for (auto& n : reg.ListProcessors())  IL_INFO("  Processor:  %s", n.c_str());
-        for (auto& n : reg.ListAggregators()) IL_INFO("  Aggregator: %s", n.c_str());
-        for (auto& n : reg.ListSinks())       IL_INFO("  Sink:       %s", n.c_str());
+        for (auto& n : reg.ListSources())     IL_INFO("  Source:     {}", n);
+        for (auto& n : reg.ListProcessors())  IL_INFO("  Processor:  {}", n);
+        for (auto& n : reg.ListAggregators()) IL_INFO("  Aggregator: {}", n);
+        for (auto& n : reg.ListSinks())       IL_INFO("  Sink:       {}", n);
     }
 
 private:
     PluginManager() = default;
-    SoLoader so_loader_;  // .so 动态库加载器
+
+    static void BridgeDescriptorToRegistry(const IlPluginDescriptor* desc,
+                                           PluginRegistry& reg) {
+        if (!desc || !desc->create || !desc->name) return;
+        auto plugin_type = static_cast<PluginType>(desc->type);
+        std::string name(desc->name);
+
+        switch (plugin_type) {
+        case PluginType::kSource:
+            reg.RegisterSource(name, [desc]() {
+                void* raw = desc->create(nullptr);
+                return std::unique_ptr<SourcePlugin>(
+                    static_cast<SourcePlugin*>(raw));
+            });
+            break;
+        case PluginType::kProcessor:
+            reg.RegisterProcessor(name, [desc]() {
+                void* raw = desc->create(nullptr);
+                return std::unique_ptr<ProcessorPlugin>(
+                    static_cast<ProcessorPlugin*>(raw));
+            });
+            break;
+        case PluginType::kAggregator:
+            reg.RegisterAggregator(name, [desc]() {
+                void* raw = desc->create(nullptr);
+                return std::unique_ptr<AggregatorPlugin>(
+                    static_cast<AggregatorPlugin*>(raw));
+            });
+            break;
+        case PluginType::kSink:
+            reg.RegisterSink(name, [desc]() {
+                void* raw = desc->create(nullptr);
+                return std::unique_ptr<SinkPlugin>(
+                    static_cast<SinkPlugin*>(raw));
+            });
+            break;
+        }
+        IL_INFO("Bridged SO plugin '{}' -> PluginRegistry (type={})",
+                name, PluginTypeToString(plugin_type));
+    }
+
+    SoLoader so_loader_;
 };
 
 }  // namespace illuminator

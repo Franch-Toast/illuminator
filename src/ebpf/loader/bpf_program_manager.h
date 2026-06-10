@@ -41,12 +41,7 @@
 // 前向声明旧内核可能未定义的 BPF 链接类型枚举
 // 这确保了在旧内核头文件环境下编译不受影响
 #include <linux/bpf.h>
-#ifndef BPF_LINK_TYPE_UNSPEC
-// 如果内核头文件未定义 bpf_link_type，提供一个最小定义以避免编译错误
-enum bpf_link_type { BPF_LINK_TYPE_UNSPEC = 0 };
-#endif
-#include <bpf/libbpf.h>     // libbpf 主库：bpf_object, bpf_program, bpf_link
-#include <bpf/bpf.h>        // BPF 系统调用封装：bpf_map__fd 等
+#include "ebpf/include/bpf_compat.h"
 
 #include <cstring>
 #include <functional>
@@ -129,7 +124,7 @@ public:
         }
 
         objects_[name] = obj;
-        IL_INFO("Loaded BPF object: %s from %s", name.c_str(), path.c_str());
+        IL_INFO("Loaded BPF object: {} from {}", name, path);
         return Status::Ok();
     }
 
@@ -177,17 +172,6 @@ public:
     }
 
     // ------------------------------------------------------------------------
-    // AttachAll：附加对象的全部 BPF 程序（当前为空操作）
-    //
-    // 说明：目前不推荐批量附加，推荐使用 AttachProgram() 逐一附加，
-    // 以获得更精确的错误定位和可选附加能力。
-    // ------------------------------------------------------------------------
-    Status AttachAll(const std::string& obj_name) {
-        (void)obj_name;
-        return Status::Ok();
-    }
-
-    // ------------------------------------------------------------------------
     // AttachProgram：将单个 BPF 程序附加到内核钩子点
     //
     // 参数：
@@ -226,7 +210,7 @@ public:
         }
 
         links_.push_back(link);
-        IL_INFO("Attached BPF program: %s", prog_name.c_str());
+        IL_INFO("Attached BPF program: {}", prog_name);
         return Status::Ok();
     }
 
@@ -239,15 +223,24 @@ public:
     //
     // 行为：逐个调用 AttachProgram()。单个程序附加失败只记录警告（IL_WARN），
     // 不会中断后续程序的附加。这是因为部分探针可能依赖可选的 tracepoint。
+    // 若列表非空且全部附加失败，返回 kInternal，否则返回 Ok（含部分成功）。
     // ------------------------------------------------------------------------
     Status AttachPrograms(const std::string& obj_name,
                           const std::vector<std::string>& prog_names) {
+        int failures = 0;
         for (auto& name : prog_names) {
             auto status = AttachProgram(obj_name, name);
             if (!status.ok()) {
-                IL_WARN("Failed to attach %s: %s", name.c_str(),
-                        status.message().c_str());
+                IL_WARN("Failed to attach {}: {}", name,
+                        status.message());
+                ++failures;
             }
+        }
+        if (!prog_names.empty() &&
+            failures == static_cast<int>(prog_names.size())) {
+            return Status::Error(StatusCode::kInternal,
+                "Failed to attach all " + std::to_string(failures) +
+                " BPF program(s) for object: " + obj_name);
         }
         return Status::Ok();
     }

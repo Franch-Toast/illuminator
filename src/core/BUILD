@@ -1,3 +1,19 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//tools:version.bzl", "version_header")
+
+version_header(
+    name = "gen_version_header",
+    out = "common/version_generated.h",
+)
+
+cc_library(
+    name = "version",
+    hdrs = ["common/version_generated.h"],
+    strip_include_prefix = "",
+    include_prefix = "core",
+    visibility = ["//visibility:public"],
+)
+
 cc_library(
     name = "common",
     hdrs = [
@@ -5,10 +21,16 @@ cc_library(
         "common/logging.h",
         "common/config.h",
         "common/self_observability.h",
+        "common/string_util.h",
+        "common/proc_reader.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
     visibility = ["//visibility:public"],
+    deps = [
+        "@spdlog",
+        "@nlohmann_json//:json",
+    ],
 )
 
 cc_library(
@@ -25,6 +47,7 @@ cc_library(
 cc_library(
     name = "threading",
     hdrs = [
+        "threading/thread_util.h",
         "threading/thread_pool.h",
     ],
     strip_include_prefix = "",
@@ -50,7 +73,9 @@ cc_library(
     name = "engine",
     srcs = ["engine/pipeline_controller.cc"],
     hdrs = [
+        "engine/async_channel.h",
         "engine/pipeline_controller.h",
+        "engine/timer_wheel.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -59,8 +84,10 @@ cc_library(
         ":common",
         ":data",
         ":memory",
+        ":threading",
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/storage:storage",
     ],
 )
 

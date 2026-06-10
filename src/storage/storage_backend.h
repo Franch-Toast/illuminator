@@ -33,8 +33,10 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/common/status.h"
@@ -74,6 +76,14 @@ struct QueryResult {
     std::vector<StackSample> stack_samples; // 堆栈采样
     uint64_t total_count = 0;             // 总命中数
     bool has_more = false;                // 是否有更多数据
+
+    // 反序列化时的字符串存储池，Record 中 string_view 指向这里
+    std::vector<std::unique_ptr<std::string>> string_pool;
+
+    std::string_view Intern(const std::string& s) {
+        string_pool.push_back(std::make_unique<std::string>(s));
+        return *string_pool.back();
+    }
 };
 
 // ---- StorageBackend 抽象接口 ----
@@ -112,8 +122,17 @@ public:
     virtual Status Compact() = 0;     // 压缩/优化存储
     virtual Status Close() = 0;       // 关闭连接
 
+    // 数据保留：清理 max_age_ns 之前的数据（默认 no-op）
+    virtual Status Prune(uint64_t /*max_age_ns*/) { return Status::Ok(); }
+
     // 磁盘占用（字节），默认返回 0
     virtual uint64_t DiskUsageBytes() const { return 0; }
+
+    // 执行原始只读 SQL 查询，返回 JSON 字符串
+    virtual StatusOr<std::string> ExecuteRawQuery(const std::string& sql) {
+        return Status::Error(StatusCode::kUnimplemented,
+                             "ExecuteRawQuery not supported by this backend");
+    }
 };
 
 // ============================================================================

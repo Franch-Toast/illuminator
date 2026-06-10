@@ -185,22 +185,28 @@ public:
         return stack_samples_.back();
     }
 
-    // ---- 字符串内部化 ----
-    // 将字符串拷贝到 Arena 中，返回 Arena 内的 string_view 引用
-    // 这是实现零拷贝数据流的关键方法
-    // 用法：record.labels.push_back({batch->InternString("key"), batch->InternString("value")});
+    // ---- 字符串内部化（带去重） ----
+    // 将字符串拷贝到 Arena 中，返回 Arena 内的 string_view 引用。
+    // 对于重复出现的字符串（如字段名 "type"/"mode"），直接复用已有副本，
+    // 避免在高 PID 数场景下 Arena 膨胀。
     std::string_view InternString(std::string_view s) {
-        return arena_->CopyString(s);
+        if (s.empty()) return {};
+        auto it = intern_cache_.find(s);
+        if (it != intern_cache_.end()) return it->second;
+        std::string_view interned = arena_->CopyString(s);
+        intern_cache_.emplace(interned, interned);
+        return interned;
     }
 
     // ---- 容量信息 ----
     size_t Size() const { return records_.size() + stack_samples_.size(); }
     bool Empty() const { return records_.empty() && stack_samples_.empty(); }
 
-    // 清空批次内容，重置 Arena
+    // 清空批次内容，重置 Arena 和去重缓存
     void Clear() {
         records_.clear();
         stack_samples_.clear();
+        intern_cache_.clear();
         arena_->Reset();
     }
 
@@ -221,6 +227,23 @@ private:
     std::vector<Record> records_;                           // 指标记录集合
     std::vector<StackSample> stack_samples_;                // 堆栈采样集合
     std::unordered_map<std::string, std::string> metadata_; // 批次元数据
+
+    // InternString 去重缓存：key/value 均指向 Arena 内存，
+    // 使用 transparent hash 支持 string_view 直接查找
+    struct StringViewHash {
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const noexcept {
+            return std::hash<std::string_view>{}(sv);
+        }
+    };
+    struct StringViewEqual {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const noexcept {
+            return a == b;
+        }
+    };
+    std::unordered_map<std::string_view, std::string_view,
+                       StringViewHash, StringViewEqual> intern_cache_;
 };
 
 // DataBatch 的 shared_ptr 别名，方便在代码中传递

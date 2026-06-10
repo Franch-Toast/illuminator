@@ -38,11 +38,15 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unistd.h>
 #include <vector>
 #include <sstream>
+
+#include <nlohmann/json.hpp>
 
 namespace illuminator {
 
@@ -144,37 +148,24 @@ public:
         return ss.str();
     }
 
-    // ---- 导出：JSON 格式 ----
-    // 用于前端仪表盘或其他非 Prometheus 消费者
     std::string ExportJson() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        std::ostringstream ss;
-        ss << "{\"counters\":{";
-        bool first = true;
-        for (auto& [name, val] : counters_) {
-            if (!first) ss << ",";
-            ss << "\"" << name << "\":" << val;
-            first = false;
-        }
-        ss << "},\"gauges\":{";
-        first = true;
-        for (auto& [name, val] : gauges_) {
-            if (!first) ss << ",";
-            ss << "\"" << name << "\":" << val;
-            first = false;
-        }
-        ss << "},\"histograms\":{";
-        first = true;
+        nlohmann::json j;
+        nlohmann::json c = nlohmann::json::object();
+        for (auto& [name, val] : counters_) c[name] = val;
+        j["counters"] = std::move(c);
+
+        nlohmann::json g = nlohmann::json::object();
+        for (auto& [name, val] : gauges_) g[name] = val;
+        j["gauges"] = std::move(g);
+
+        nlohmann::json h = nlohmann::json::object();
         for (auto& [name, hist] : histograms_) {
-            if (!first) ss << ",";
-            ss << "\"" << name << "\":{\"count\":" << hist.count
-               << ",\"sum\":" << hist.sum
-               << ",\"min\":" << hist.min
-               << ",\"max\":" << hist.max << "}";
-            first = false;
+            h[name] = {{"count", hist.count}, {"sum", hist.sum},
+                        {"min", hist.min}, {"max", hist.max}};
         }
-        ss << "}}";
-        return ss.str();
+        j["histograms"] = std::move(h);
+        return j.dump();
     }
 
 private:
@@ -245,7 +236,7 @@ private:
     // 输出格式示例：`45123 2345 1234 ...`
     //   第1列: 总虚拟内存页数
     //   第2列: RSS 页数（我们需要这个）
-    // 每页大小 4096 字节 (4KB)
+    // 字节数 = 页数 × 系统页大小（sysconf(_SC_PAGESIZE)）
     static uint64_t GetRssBytes() {
         FILE* f = fopen("/proc/self/statm", "r");
         if (!f) return 0;
@@ -253,7 +244,9 @@ private:
         // fscanf 格式：跳过第一列（%*u），读取第二列到 pages
         if (fscanf(f, "%*u %lu", &pages) != 1) pages = 0;
         fclose(f);
-        return pages * 4096;  // 页数 × 4KB = 字节数
+        long psz = ::sysconf(_SC_PAGESIZE);
+        if (psz <= 0) psz = 4096;
+        return pages * static_cast<uint64_t>(psz);
     }
 
     Limits limits_;

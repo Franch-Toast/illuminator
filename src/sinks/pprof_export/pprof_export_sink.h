@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "core/common/logging.h"
 #include "plugin/api/sink_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
@@ -79,8 +80,8 @@ public:
         }
 
         out.close();
-        IL_INFO("pprof export: %zu unique stacks written to %s",
-                folded_counts_.size(), path_.c_str());
+        IL_INFO("pprof export: {} unique stacks written to {}",
+                folded_counts_.size(), path_);
         folded_counts_.clear();
         return Status::Ok();
     }

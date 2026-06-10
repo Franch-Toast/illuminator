@@ -29,11 +29,9 @@ namespace illuminator {
 //   - 实际 HTTP POST 调用尚未实现（需引入 HTTP 客户端库）
 class OtlpExportSink : public SinkPlugin {
 public:
-    // 返回 Sink 名称
     const char* Name() const override { return "otlp_export"; }
-
-    // 返回 Sink 版本号
     const char* Version() const override { return "0.1.0"; }
+    bool IsStub() const override { return true; }
 
     // 从配置中解析 OTLP 端点 URL
     // 参数:
@@ -102,9 +100,8 @@ public:
 
         json << "]}]}]}";
 
-        // 当前仅暂存载荷（实际 HTTP POST 待实现）
         last_payload_ = json.str();
-        payloads_sent_++;
+        payloads_built_++;
 
         return Status::Ok();
     }
@@ -112,8 +109,7 @@ public:
     // 获取最近一次生成的 OTLP JSON 载荷（供 API 调试或手动发送）
     const std::string& LastPayload() const { return last_payload_; }
 
-    // 获取累计生成的载荷数量（用于监控导出吞吐量）
-    uint64_t PayloadsSent() const { return payloads_sent_; }
+    uint64_t PayloadsBuilt() const { return payloads_built_; }
 
 private:
     // 将 FieldValue 统一转换为 double 数值
@@ -134,9 +130,9 @@ private:
         return std::visit(Vis{}, val);
     }
 
-    std::string endpoint_;       // OTLP 接收端 URL（预留）
-    std::string last_payload_;   // 最近一次生成的完整 JSON 载荷
-    uint64_t payloads_sent_ = 0; // 累计发送的载荷数量
+    std::string endpoint_;
+    std::string last_payload_;
+    uint64_t payloads_built_ = 0;
 };
 
 // 在插件注册表中注册该 Sink

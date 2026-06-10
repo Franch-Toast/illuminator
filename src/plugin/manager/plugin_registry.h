@@ -19,7 +19,8 @@
 //    - sinks_:        数据出口工厂映射表
 //
 // 3. 线程安全
-//    - 所有注册和创建操作都使用 mutex_ 保护
+//    - 注册、创建、列举操作都使用 mutex_ 保护对注册表的访问
+//    - Create* 在持有锁时仅复制工厂函数，实际构造在锁外执行，避免工厂重入死锁
 //    - 支持并发注册（静态初始化阶段）和并发查询（运行阶段）
 //
 // 4. 自动注册宏
@@ -45,6 +46,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "core/common/logging.h"
 #include "plugin/api/plugin_api.h"
@@ -79,25 +81,25 @@ public:
     void RegisterSource(const std::string& name, SourceFactory factory) {
         std::lock_guard<std::mutex> lock(mutex_);
         sources_[name] = std::move(factory);
-        IL_DEBUG("Registered source plugin: %s", name.c_str());
+        IL_DEBUG("Registered source plugin: {}", name);
     }
 
     void RegisterProcessor(const std::string& name, ProcessorFactory factory) {
         std::lock_guard<std::mutex> lock(mutex_);
         processors_[name] = std::move(factory);
-        IL_DEBUG("Registered processor plugin: %s", name.c_str());
+        IL_DEBUG("Registered processor plugin: {}", name);
     }
 
     void RegisterAggregator(const std::string& name, AggregatorFactory factory) {
         std::lock_guard<std::mutex> lock(mutex_);
         aggregators_[name] = std::move(factory);
-        IL_DEBUG("Registered aggregator plugin: %s", name.c_str());
+        IL_DEBUG("Registered aggregator plugin: {}", name);
     }
 
     void RegisterSink(const std::string& name, SinkFactory factory) {
         std::lock_guard<std::mutex> lock(mutex_);
         sinks_[name] = std::move(factory);
-        IL_DEBUG("Registered sink plugin: %s", name.c_str());
+        IL_DEBUG("Registered sink plugin: {}", name);
     }
 
     // ==================================================================
@@ -106,40 +108,68 @@ public:
     // 返回 nullptr 表示未找到该名称的插件
 
     std::unique_ptr<SourcePlugin> CreateSource(const std::string& name) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = sources_.find(name);
-        if (it == sources_.end()) return nullptr;
-        return it->second();  // 调用工厂函数，返回新创建的实例
+        SourceFactory factory;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = sources_.find(name);
+            if (it == sources_.end()) return nullptr;
+            factory = it->second;
+        }
+        return factory();
     }
 
     std::unique_ptr<ProcessorPlugin> CreateProcessor(const std::string& name) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = processors_.find(name);
-        if (it == processors_.end()) return nullptr;
-        return it->second();
+        ProcessorFactory factory;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = processors_.find(name);
+            if (it == processors_.end()) return nullptr;
+            factory = it->second;
+        }
+        return factory();
     }
 
     std::unique_ptr<AggregatorPlugin> CreateAggregator(const std::string& name) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = aggregators_.find(name);
-        if (it == aggregators_.end()) return nullptr;
-        return it->second();
+        AggregatorFactory factory;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = aggregators_.find(name);
+            if (it == aggregators_.end()) return nullptr;
+            factory = it->second;
+        }
+        return factory();
     }
 
     std::unique_ptr<SinkPlugin> CreateSink(const std::string& name) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = sinks_.find(name);
-        if (it == sinks_.end()) return nullptr;
-        return it->second();
+        SinkFactory factory;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = sinks_.find(name);
+            if (it == sinks_.end()) return nullptr;
+            factory = it->second;
+        }
+        return factory();
     }
 
     // ==================================================================
     // 列表方法：列出所有已注册的插件名称
     // ==================================================================
-    std::vector<std::string> ListSources() const { return ListKeys(sources_); }
-    std::vector<std::string> ListProcessors() const { return ListKeys(processors_); }
-    std::vector<std::string> ListAggregators() const { return ListKeys(aggregators_); }
-    std::vector<std::string> ListSinks() const { return ListKeys(sinks_); }
+    std::vector<std::string> ListSources() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ListKeys(sources_);
+    }
+    std::vector<std::string> ListProcessors() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ListKeys(processors_);
+    }
+    std::vector<std::string> ListAggregators() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ListKeys(aggregators_);
+    }
+    std::vector<std::string> ListSinks() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ListKeys(sinks_);
+    }
 
 private:
     PluginRegistry() = default;
