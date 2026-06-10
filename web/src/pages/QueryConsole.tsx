@@ -15,7 +15,7 @@ const EXAMPLE_QUERIES = [
 
 export default function QueryConsole() {
   const [query, setQuery] = useState(EXAMPLE_QUERIES[0]!)
-  const [results, setResults] = useState<any[]>([])
+  const [results, setResults] = useState<Record<string, unknown>[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [elapsed, setElapsed] = useState<number | null>(null)
@@ -28,8 +28,8 @@ export default function QueryConsole() {
       const data = await api.query(query)
       setResults(data.rows || [])
       setElapsed(Math.round(performance.now() - start))
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
       setResults([])
       setElapsed(null)
     }
@@ -109,7 +109,7 @@ export default function QueryConsole() {
             <tbody>
               {results.map((row, i) => (
                 <tr key={i} style={{ borderBottom: '1px solid #1f2228' }}>
-                  {Object.values(row).map((val: any, j) => (
+                  {Object.values(row).map((val: unknown, j) => (
                     <td key={j} style={{
                       padding: '6px 10px', fontSize: 12,
                       fontFamily: 'monospace', maxWidth: 250,

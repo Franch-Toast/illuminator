@@ -4,14 +4,19 @@ import { useTimeStore } from '../stores/useTimeStore'
 export function usePolling(callback: () => void, intervalMs: number) {
   const mode = useTimeStore(s => s.mode)
   const callbackRef = useRef(callback)
-  callbackRef.current = callback
-  const intervalRef = useRef<ReturnType<typeof setInterval>>()
+
+  useEffect(() => {
+    callbackRef.current = callback
+  })
 
   useEffect(() => {
     if (mode === 'paused') return
 
-    callbackRef.current()
-    intervalRef.current = setInterval(() => callbackRef.current(), intervalMs)
-    return () => clearInterval(intervalRef.current)
+    const initTimer = window.setTimeout(() => callbackRef.current(), 0)
+    const intervalId = setInterval(() => callbackRef.current(), intervalMs)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(intervalId)
+    }
   }, [mode, intervalMs])
 }

@@ -3,10 +3,9 @@ import { flamegraph } from 'd3-flame-graph'
 import { select } from 'd3-selection'
 import 'd3-flame-graph/dist/d3-flamegraph.css'
 import { useTimeStore } from '../stores/useTimeStore'
-import { useFilterStore } from '../stores/useFilterStore'
 import { timeSeriesStore } from '../services/timeSeriesStore'
 import { api } from '../services/apiClient'
-import { colors, card as cardStyle } from '../styles/theme'
+import { colors } from '../styles/theme'
 
 interface FlameNode {
   name: string
@@ -23,7 +22,16 @@ interface SnapshotEntry {
 
 const MAX_SNAPSHOTS = 60
 
-function convertToFlameNode(data: any, isOffCpu = false): FlameNode {
+interface StackFrame { function_name?: string }
+interface StackSample {
+  comm?: string
+  user_stack?: StackFrame[]
+  kernel_stack?: StackFrame[]
+  duration_ns?: number
+  count?: number
+}
+
+function convertToFlameNode(data: { stack_samples?: StackSample[] }, isOffCpu = false): FlameNode {
   const root: FlameNode = { name: 'root', value: 0, children: [] }
   const samples = data.stack_samples || []
   for (const sample of samples) {
@@ -70,9 +78,9 @@ function countNodes(node: FlameNode): number {
 
 export default function FlameGraph() {
   const chartRef = useRef<HTMLDivElement>(null)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- d3-flame-graph instance type not exported
   const fgRef = useRef<any>(null)
   const { mode, range, cursor, setCursor } = useTimeStore()
-  const { pid } = useFilterStore()
 
   const [profileType, setProfileType] = useState<'oncpu' | 'offcpu'>('oncpu')
   const [searchText, setSearchText] = useState('')
@@ -88,7 +96,7 @@ export default function FlameGraph() {
     try {
       const pipeData = await api.pipelines()
       const pName = profileType === 'offcpu' ? 'offcpu_analysis' : 'cpu_profile'
-      const pipeline = (pipeData.pipelines || []).find((p: any) => p.name === pName)
+      const pipeline = (pipeData.pipelines || []).find((p: { name: string; stub?: boolean }) => p.name === pName)
       if (pipeline?.stub) {
         setStub(true)
         setActiveSnapshot(null)
@@ -102,7 +110,7 @@ export default function FlameGraph() {
         ? await api.cpuProfileOffcpu()
         : await api.cpuProfileFlamegraph()
 
-      const d = data as any
+      const d = data as { error?: string; stack_samples?: StackSample[] }
       if (d.error) {
         setErrorMsg(d.error)
         setActiveSnapshot(null)
@@ -126,8 +134,8 @@ export default function FlameGraph() {
         setErrorMsg('No stack samples collected yet')
         setActiveSnapshot(null)
       }
-    } catch (e: any) {
-      setErrorMsg(e.message)
+    } catch (e: unknown) {
+      setErrorMsg(e instanceof Error ? e.message : String(e))
       setActiveSnapshot(null)
     }
     setLoading(false)
@@ -135,9 +143,12 @@ export default function FlameGraph() {
 
   useEffect(() => {
     if (mode === 'paused') return
-    loadData()
+    const initTimer = window.setTimeout(loadData, 0)
     const id = setInterval(loadData, 5000)
-    return () => clearInterval(id)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(id)
+    }
   }, [loadData, mode])
 
   useEffect(() => {
@@ -153,6 +164,7 @@ export default function FlameGraph() {
       .inverted(true)
       .selfValue(false)
     fgRef.current = chart
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- d3-flame-graph typing mismatch
     select(el).datum(activeSnapshot).call(chart as any)
   }, [activeSnapshot])
 

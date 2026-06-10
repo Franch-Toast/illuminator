@@ -14,11 +14,11 @@ export interface ChannelInfo {
 export interface PipelineInfo {
   name: string
   running: boolean
-  stub: boolean
+  stub?: boolean
   batches: number
   records: number
   errors: number
-  channel: ChannelInfo
+  channel?: ChannelInfo
 }
 
 interface PipelineState {

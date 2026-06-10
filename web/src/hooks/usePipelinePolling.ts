@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { api } from '../services/apiClient'
-import { usePipelineStore } from '../stores/usePipelineStore'
+import { usePipelineStore, type PipelineInfo } from '../stores/usePipelineStore'
 import { useTimeStore } from '../stores/useTimeStore'
 
 export function usePipelinePolling(intervalMs = 3000) {
@@ -14,14 +14,25 @@ export function usePipelinePolling(intervalMs = 3000) {
     const poll = async () => {
       try {
         const data = await api.pipelines()
-        setPipelines(data.pipelines || [])
-      } catch (e: any) {
-        setError(e.message)
+        setPipelines((data.pipelines || []).map(p => ({
+          name: p.name,
+          running: p.running ?? false,
+          stub: p.stub,
+          batches: p.batches ?? 0,
+          records: p.records ?? 0,
+          errors: p.errors ?? 0,
+          channel: p.channel as PipelineInfo['channel'],
+        })))
+      } catch (e: unknown) {
+        setError(e instanceof Error ? e.message : String(e))
       }
     }
 
-    poll()
+    const initTimer = window.setTimeout(poll, 0)
     intervalRef.current = setInterval(poll, intervalMs)
-    return () => clearInterval(intervalRef.current)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(intervalRef.current)
+    }
   }, [mode, intervalMs, setPipelines, setError, setLoading])
 }

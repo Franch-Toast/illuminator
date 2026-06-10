@@ -58,16 +58,18 @@ export function usePipelines(refreshMs = 2000) {
       const data = await res.json()
       setPipelines(data.pipelines || [])
       setError(null)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
-  // 初次加载 + 定期轮询
   useEffect(() => {
-    fetch_()
+    const initTimer = window.setTimeout(fetch_, 0)
     intervalRef.current = window.setInterval(fetch_, refreshMs)
-    return () => clearInterval(intervalRef.current)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(intervalRef.current)
+    }
   }, [fetch_, refreshMs])
 
   return { pipelines, error }
@@ -75,7 +77,7 @@ export function usePipelines(refreshMs = 2000) {
 
 // ---- useHealth: 检查后端可用性 ----
 export function useHealth() {
-  const [health, setHealth] = useState<any>(null)
+  const [health, setHealth] = useState<Record<string, unknown> | null>(null)
 
   useEffect(() => {
     fetch('/healthz')

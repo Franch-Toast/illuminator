@@ -5,10 +5,9 @@ import {
 } from 'recharts'
 import { useTimeStore } from '../stores/useTimeStore'
 import { usePipelineStore } from '../stores/usePipelineStore'
-import { useFilterStore } from '../stores/useFilterStore'
 import { timeSeriesStore, type DataPoint } from '../services/timeSeriesStore'
 import { api } from '../services/apiClient'
-import { colors, card as themeCard } from '../styles/theme'
+import { colors } from '../styles/theme'
 
 const card: React.CSSProperties = {
   background: colors.cardBg, borderRadius: 8, padding: 20,
@@ -75,7 +74,7 @@ function parseUtilization(data: unknown) {
     loadavg: null as { load_1m: number; load_5m: number; load_15m: number } | null,
     runqueue: null as { procs_running: number; procs_blocked: number } | null,
   }
-  const d = data as { records?: any[] } | null
+  const d = data as { records?: Array<{ labels?: Record<string, string>; fields?: Record<string, number> }> } | null
   if (!d?.records) return result
 
   for (const rec of d.records) {
@@ -147,16 +146,19 @@ export default function CpuOverview() {
           })
         }
       }
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
   useEffect(() => {
     if (mode === 'paused') return
-    fetchData()
+    const initTimer = window.setTimeout(fetchData, 0)
     intervalRef.current = setInterval(fetchData, 1000)
-    return () => clearInterval(intervalRef.current)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(intervalRef.current)
+    }
   }, [fetchData, mode])
 
   useEffect(() => {

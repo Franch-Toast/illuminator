@@ -1,5 +1,4 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts'
 import { api } from '../services/apiClient'
 import { usePipelineStore } from '../stores/usePipelineStore'
 import { useTimeStore } from '../stores/useTimeStore'
@@ -20,8 +19,8 @@ export default function SystemPage() {
   const { pipelines } = usePipelineStore()
   const { mode, range } = useTimeStore()
   const [health, setHealth] = useState<HealthInfo | null>(null)
-  const [metrics, setMetrics] = useState<any>(null)
-  const [channelHistory, setChannelHistory] = useState<DataPoint[]>([])
+  const [metrics, setMetrics] = useState<Record<string, unknown> | null>(null)
+  const [, setChannelHistory] = useState<DataPoint[]>([])
   const intervalRef = useRef<ReturnType<typeof setInterval>>()
 
   const fetchHealth = useCallback(async () => {
@@ -36,7 +35,7 @@ export default function SystemPage() {
   const fetchMetrics = useCallback(async () => {
     try {
       const data = await api.internalMetrics()
-      setMetrics(data)
+      setMetrics(data as Record<string, unknown>)
 
       const pipeData = await api.channelStats()
       for (const ch of (pipeData.channels || [])) {
@@ -49,14 +48,18 @@ export default function SystemPage() {
   }, [])
 
   useEffect(() => {
-    fetchHealth()
+    const t = window.setTimeout(fetchHealth, 0)
+    return () => clearTimeout(t)
   }, [fetchHealth])
 
   useEffect(() => {
     if (mode === 'paused') return
-    fetchMetrics()
+    const initTimer = window.setTimeout(fetchMetrics, 0)
     intervalRef.current = setInterval(fetchMetrics, 3000)
-    return () => clearInterval(intervalRef.current)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(intervalRef.current)
+    }
   }, [fetchMetrics, mode])
 
   useEffect(() => {
@@ -66,7 +69,7 @@ export default function SystemPage() {
       for (const key of keys) {
         const data = timeSeriesStore.query(key, range.start, range.end)
         for (const d of data) {
-          merged.push({ ...d, _pipeline: key.replace('channel.', '') } as any)
+          merged.push({ ...d, _pipeline: key.replace('channel.', '') } as DataPoint & { _pipeline: string })
         }
       }
       setChannelHistory(merged)

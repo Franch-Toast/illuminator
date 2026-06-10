@@ -12,10 +12,7 @@ import {
   Legend,
 } from 'recharts'
 import { useWebSocket, type ConnectionState } from '../hooks/useWebSocket'
-import { useTimeStore } from '../stores/useTimeStore'
 import { useFilterStore } from '../stores/useFilterStore'
-import { timeSeriesStore } from '../services/timeSeriesStore'
-import { colors } from '../styles/theme'
 
 interface SchedSummary {
   pid: number
@@ -85,10 +82,11 @@ function WsIndicator({ state }: { state: ConnectionState }) {
   )
 }
 
-function parseSchedData(data: any): SchedSummary[] {
-  if (!data?.records) return []
+function parseSchedData(data: unknown): SchedSummary[] {
+  const d = data as { records?: Array<{ labels?: Record<string, string>; fields?: Record<string, number> & { comm?: string } }> } | null
+  if (!d?.records) return []
   const results: SchedSummary[] = []
-  for (const rec of data.records) {
+  for (const rec of d.records) {
     const labels = rec.labels || {}
     const fields = rec.fields || {}
     if (fields.switch_count !== undefined) {
@@ -133,7 +131,6 @@ function buildLatencyHistogram(summaries: SchedSummary[]): LatencyBucket[] {
 type TabKey = 'overview' | 'timeseries' | 'migrations' | 'wakeups'
 
 export default function Timeline() {
-  const { mode } = useTimeStore()
   const { pid: globalPid } = useFilterStore()
   const [summaries, setSummaries] = useState<SchedSummary[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -147,11 +144,13 @@ export default function Timeline() {
   const [detailEvents, setDetailEvents] = useState<SchedEvent[]>([])
   const intervalRef = useRef<number>()
 
-  useEffect(() => {
+  const [prevGlobalPid, setPrevGlobalPid] = useState(globalPid)
+  if (prevGlobalPid !== globalPid) {
+    setPrevGlobalPid(globalPid)
     if (globalPid !== null) setSelectedPid(globalPid)
-  }, [globalPid])
+  }
 
-  const handleWsMessage = useCallback((msg: any) => {
+  const handleWsMessage = useCallback((msg: unknown) => {
     const parsed = parseSchedData(msg)
     if (parsed.length > 0) setSummaries(parsed)
   }, [])
@@ -166,7 +165,7 @@ export default function Timeline() {
       const pipeRes = await fetch('/api/v1/pipelines')
       if (!pipeRes.ok) return
       const pipeData = await pipeRes.json()
-      const schedPipeline = (pipeData.pipelines || []).find((p: any) => p.name === 'sched_analysis')
+      const schedPipeline = (pipeData.pipelines || []).find((p: { name: string; stub?: boolean }) => p.name === 'sched_analysis')
       setStub(schedPipeline?.stub === true)
 
       const res = await fetch('/api/v1/cpu/sched/summary')
@@ -175,8 +174,8 @@ export default function Timeline() {
       const parsed = parseSchedData(json)
       setSummaries(parsed)
       setError(null)
-    } catch (e: any) {
-      setError(e.message)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
     }
   }, [])
 
@@ -186,7 +185,7 @@ export default function Timeline() {
       if (!res.ok) return
       const json = await res.json()
       if (json.history) setHistory(json.history)
-    } catch {}
+    } catch { /* network errors silently ignored — polling will retry */ }
   }, [])
 
   const fetchEvents = useCallback(async () => {
@@ -195,7 +194,7 @@ export default function Timeline() {
       if (!res.ok) return
       const json = await res.json()
       if (json.events) setEvents(json.events)
-    } catch {}
+    } catch { /* network errors silently ignored — polling will retry */ }
   }, [])
 
   const fetchWakeups = useCallback(async () => {
@@ -204,7 +203,7 @@ export default function Timeline() {
       if (!res.ok) return
       const json = await res.json()
       if (json.wakeups) setWakeups(json.wakeups)
-    } catch {}
+    } catch { /* network errors silently ignored — polling will retry */ }
   }, [])
 
   const fetchDetailEvents = useCallback(async (pid: number) => {
@@ -213,36 +212,44 @@ export default function Timeline() {
       if (!res.ok) return
       const json = await res.json()
       if (json.events) setDetailEvents(json.events)
-    } catch {}
+    } catch { /* network errors silently ignored — polling will retry */ }
   }, [])
 
   useEffect(() => {
-    fetchSummary()
     const pollMs = wsState === 'connected' ? 15000 : 5000
+    const initTimer = window.setTimeout(fetchSummary, 0)
     intervalRef.current = window.setInterval(fetchSummary, pollMs)
-    return () => clearInterval(intervalRef.current)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(intervalRef.current)
+    }
   }, [fetchSummary, wsState])
 
   useEffect(() => {
+    let initTimer: number
+    let pollTimer: number
     if (activeTab === 'timeseries') {
-      fetchHistory()
-      const id = window.setInterval(fetchHistory, 5000)
-      return () => clearInterval(id)
+      initTimer = window.setTimeout(fetchHistory, 0)
+      pollTimer = window.setInterval(fetchHistory, 5000)
+    } else if (activeTab === 'migrations') {
+      initTimer = window.setTimeout(fetchEvents, 0)
+      pollTimer = window.setInterval(fetchEvents, 5000)
+    } else if (activeTab === 'wakeups') {
+      initTimer = window.setTimeout(fetchWakeups, 0)
+      pollTimer = window.setInterval(fetchWakeups, 10000)
+    } else {
+      return
     }
-    if (activeTab === 'migrations') {
-      fetchEvents()
-      const id = window.setInterval(fetchEvents, 5000)
-      return () => clearInterval(id)
-    }
-    if (activeTab === 'wakeups') {
-      fetchWakeups()
-      const id = window.setInterval(fetchWakeups, 10000)
-      return () => clearInterval(id)
+    return () => {
+      clearTimeout(initTimer)
+      clearInterval(pollTimer)
     }
   }, [activeTab, fetchHistory, fetchEvents, fetchWakeups])
 
   useEffect(() => {
-    if (selectedPid !== null) fetchDetailEvents(selectedPid)
+    if (selectedPid === null) return
+    const t = window.setTimeout(() => fetchDetailEvents(selectedPid), 0)
+    return () => clearTimeout(t)
   }, [selectedPid, fetchDetailEvents])
 
   const sorted = [...summaries].sort((a, b) => {

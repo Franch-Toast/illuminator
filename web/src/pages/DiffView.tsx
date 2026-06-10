@@ -17,7 +17,16 @@ interface FlameNode {
   children?: FlameNode[]
 }
 
-function convertToFlameNode(data: any, isOffCpu = false): FlameNode {
+interface StackFrame { function_name?: string }
+interface StackSample {
+  comm?: string
+  user_stack?: StackFrame[]
+  kernel_stack?: StackFrame[]
+  duration_ns?: number
+  count?: number
+}
+
+function convertToFlameNode(data: { stack_samples?: StackSample[] }, isOffCpu = false): FlameNode {
   const root: FlameNode = { name: 'root', value: 0, children: [] }
   const samples = data.stack_samples || []
   for (const sample of samples) {
@@ -54,17 +63,6 @@ function insertStack(node: FlameNode, frames: string[], count: number) {
   }
   child.value += count
   if (frames.length > 1) insertStack(child, frames.slice(1), count)
-}
-
-function flattenNode(node: FlameNode, prefix = ''): DiffEntry[] {
-  const name = prefix ? `${prefix} > ${node.name}` : node.name
-  const entries: DiffEntry[] = [{ name: node.name, baseValue: node.value, compValue: 0 }]
-  if (node.children) {
-    for (const ch of node.children) {
-      entries.push(...flattenNode(ch, name))
-    }
-  }
-  return entries
 }
 
 function aggregateFunctions(node: FlameNode): Map<string, number> {
@@ -120,7 +118,7 @@ function buildDiffFlame(base: FlameNode, comp: FlameNode): DiffFlameNode {
   return merged
 }
 
-function diffColor(d: any): string {
+function diffColor(d: { data?: { delta?: number } }): string {
   const delta = d.data?.delta ?? 0
   if (Math.abs(delta) < 0.05) return '#6b7280'
   if (delta > 0) {
@@ -154,6 +152,7 @@ function DiffFlameGraph({ base, comp }: { base: FlameNode; comp: FlameNode }) {
       .selfValue(false)
       .setColorMapper(diffColor)
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- d3-flame-graph typing mismatch
     select(el).datum(diffData).call(chart as any)
   }, [base, comp])
 
@@ -204,8 +203,8 @@ export default function DiffView() {
       const data = source === 'offcpu'
         ? await api.cpuProfileOffcpu()
         : await api.cpuProfileFlamegraph()
-      const d = data as any
-      if (d.error || !(d.stack_samples?.length > 0)) {
+      const d = data as { error?: string; stack_samples?: StackSample[] }
+      if (d.error || !(d.stack_samples?.length)) {
         alert(d.error || 'No samples available')
         setLoading(null)
         return
@@ -213,8 +212,8 @@ export default function DiffView() {
       const node = convertToFlameNode(d, source === 'offcpu')
       if (which === 'base') setBaseProfile(node)
       else setCompProfile(node)
-    } catch (e: any) {
-      alert(`Failed: ${e.message}`)
+    } catch (e: unknown) {
+      alert(`Failed: ${e instanceof Error ? e.message : String(e)}`)
     }
     setLoading(null)
   }, [baseSource, compSource])
@@ -224,6 +223,7 @@ export default function DiffView() {
     baseChartRef.current.innerHTML = ''
     const chart = flamegraph().width(baseChartRef.current.clientWidth || 400)
       .cellHeight(16).minFrameSize(1).inverted(true).selfValue(false)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- d3-flame-graph typing mismatch
     select(baseChartRef.current).datum(baseProfile).call(chart as any)
   }, [baseProfile])
 
@@ -232,6 +232,7 @@ export default function DiffView() {
     compChartRef.current.innerHTML = ''
     const chart = flamegraph().width(compChartRef.current.clientWidth || 400)
       .cellHeight(16).minFrameSize(1).inverted(true).selfValue(false)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- d3-flame-graph typing mismatch
     select(compChartRef.current).datum(compProfile).call(chart as any)
   }, [compProfile])
 
@@ -362,7 +363,7 @@ export default function DiffView() {
                 border: `1px solid ${colors.cardBorder}`, borderRadius: 4,
                 padding: '4px 8px', fontSize: 11, width: 160,
               }} />
-            <select value={sortBy} onChange={e => setSortBy(e.target.value as any)}
+            <select value={sortBy} onChange={e => setSortBy(e.target.value as 'name' | 'diff')}
               style={{
                 background: colors.cardBg, color: colors.textPrimary,
                 border: `1px solid ${colors.cardBorder}`, borderRadius: 4,

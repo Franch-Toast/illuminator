@@ -212,9 +212,10 @@ export function useCpuUtilization(refreshMs = 1000) {
   }, [])
 
   useEffect(() => {
-    fetchData()
+    const initTimer = window.setTimeout(fetchData, 0)
     intervalRef.current = window.setInterval(fetchData, refreshMs)
     return () => {
+      clearTimeout(initTimer)
       if (intervalRef.current !== undefined) clearInterval(intervalRef.current)
     }
   }, [fetchData, refreshMs])
@@ -317,9 +318,10 @@ export function useProcessCpu(refreshMs = 2000) {
   }, [])
 
   useEffect(() => {
-    fetchData()
+    const initTimer = window.setTimeout(fetchData, 0)
     intervalRef.current = window.setInterval(fetchData, refreshMs)
     return () => {
+      clearTimeout(initTimer)
       if (intervalRef.current !== undefined) clearInterval(intervalRef.current)
     }
   }, [fetchData, refreshMs])
