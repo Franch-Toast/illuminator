@@ -1,4 +1,4 @@
-.PHONY: build test clean dev probes check-env docker help
+.PHONY: build test clean dev probes check-env docker version help
 
 BAZEL ?= bazel
 
@@ -33,8 +33,14 @@ dev-web: ## 启动前端开发服务器
 check-env: ## 检测编译/运行环境
 	@bash scripts/check_env.sh --all
 
-docker: ## 构建 Docker 镜像 (本地)
-	docker build -t illuminator:dev .
+version: ## 显示当前版本
+	@tools/workspace_status.sh | grep STABLE_GIT_VERSION | cut -d' ' -f2-
+
+docker: ## 构建 Docker 镜像 (本地，自动注入版本)
+	docker build \
+		--build-arg GIT_VERSION=$$(git describe --tags --always 2>/dev/null | sed 's/^v//') \
+		--build-arg GIT_COMMIT=$$(git rev-parse HEAD 2>/dev/null) \
+		-t illuminator:$$(git describe --tags --always 2>/dev/null || echo dev) .
 
 asan: ## 运行 AddressSanitizer 测试
 	$(BAZEL) test //src/... --config=asan --test_output=errors

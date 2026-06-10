@@ -12,13 +12,14 @@
 #include "httplib.h"
 
 #include "core/common/self_observability.h"
+#include "core/common/version_generated.h"
 #include "core/engine/pipeline_controller.h"
 #include "serialization/json_serializer.h"
 #include "storage/storage_backend.h"
 
 namespace illuminator {
 
-static constexpr const char* kIlluminatorVersion = "0.1.0";
+static constexpr const char* kIlluminatorVersion = kBuildVersion;
 
 inline void JsonError(httplib::Response& res, const std::string& msg,
                       int status = 500) {
@@ -60,7 +61,8 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                               PipelineController& controller) {
     srv.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(
-            json{{"status", "ok"}, {"version", kIlluminatorVersion}}.dump() + "\n",
+            json{{"status", "ok"}, {"version", kIlluminatorVersion},
+                 {"commit", kBuildCommit}}.dump() + "\n",
             "application/json");
     });
 

@@ -1,4 +1,18 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//tools:version.bzl", "version_header")
+
+version_header(
+    name = "gen_version_header",
+    out = "common/version_generated.h",
+)
+
+cc_library(
+    name = "version",
+    hdrs = ["common/version_generated.h"],
+    strip_include_prefix = "",
+    include_prefix = "core",
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "common",

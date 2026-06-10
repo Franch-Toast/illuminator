@@ -13,6 +13,7 @@
 
 #include "core/common/logging.h"
 #include "core/common/config.h"
+#include "core/common/version_generated.h"
 #include "core/config/yaml_config_loader.h"
 #include "core/engine/pipeline_controller.h"
 #include "plugin/builtin/builtin_plugins.h"
@@ -401,7 +402,8 @@ int main(int argc, char** argv) {
     if (command == "collect") return RunCollect(duration, log_level);
     if (command == "top") return RunTop(log_level);
     if (command == "version") {
-        std::cout << "Illuminator v" << illuminator::kIlluminatorVersion << "\n";
+        std::cout << "Illuminator v" << illuminator::kBuildVersion << "\n"
+                  << "  commit: " << illuminator::kBuildCommit << "\n";
         return 0;
     }
     if (command == "plugins") return RunPluginList();

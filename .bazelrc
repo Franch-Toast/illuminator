@@ -4,6 +4,10 @@ build --copt=-Wall
 build --copt=-Wextra
 build --copt=-Wno-unused-parameter
 
+# Version stamping — injects git tag/commit into build artifacts
+build --workspace_status_command=tools/workspace_status.sh
+build --stamp
+
 # BPF probe compilation uses system clang via genrule; pin the path here.
 build --action_env=BPF_CLANG=/usr/bin/clang
 # Allow genrules to read system headers (needed for libbpf bpf_helpers.h)

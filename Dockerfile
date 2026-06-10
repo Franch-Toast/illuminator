@@ -5,11 +5,20 @@
 # Stage 2: Backend build (Ubuntu 22.04 + Bazel 7.6.1 + GCC 11)
 # Stage 3: Runtime (Ubuntu 22.04 minimal)
 # =============================================================================
+# Build args: pass version info from CI or local build script
+#   docker build --build-arg GIT_VERSION=$(git describe --tags --always) ...
+# =============================================================================
+
+ARG GIT_VERSION=dev
+ARG GIT_COMMIT=unknown
 
 # ---------------------------------------------------------------------------
 # Stage 1: Frontend Build
 # ---------------------------------------------------------------------------
 FROM node:20-slim AS frontend-builder
+
+ARG GIT_VERSION
+ENV VITE_APP_VERSION=${GIT_VERSION}
 
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json ./
@@ -21,6 +30,9 @@ RUN npx tsc --noEmit && npx vite build
 # Stage 2: Backend Build
 # ---------------------------------------------------------------------------
 FROM ubuntu:22.04 AS backend-builder
+
+ARG GIT_VERSION
+ARG GIT_COMMIT
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV BAZEL_VERSION=7.6.1
@@ -44,6 +56,11 @@ RUN curl -fsSL "https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0
 
 WORKDIR /app
 COPY . .
+
+# Override workspace_status.sh to use build args (no .git in Docker context)
+RUN printf '#!/bin/bash\necho "STABLE_GIT_VERSION %s"\necho "STABLE_GIT_COMMIT %s"\necho "BUILD_TIMESTAMP %s"\n' \
+    "${GIT_VERSION}" "${GIT_COMMIT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > tools/workspace_status.sh && chmod +x tools/workspace_status.sh
 
 # Build the backend binary and BPF probes (optimized)
 RUN bazel build //src/cli:illuminator //src/ebpf/probes:all --config=opt \

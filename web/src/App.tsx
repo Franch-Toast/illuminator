@@ -82,8 +82,8 @@ export default function App() {
   useEffect(() => {
     fetch('/healthz')
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then(d => setVersion(d.version ?? '?'))
-      .catch(() => setVersion('offline'))
+      .then(d => setVersion(d.version ?? __APP_VERSION__))
+      .catch(() => setVersion(__APP_VERSION__))
   }, [])
 
   return (
@@ -97,9 +97,14 @@ export default function App() {
           padding: '0 16px 16px', borderBottom: '1px solid #2a2d35',
           marginBottom: 8,
         }}>
-          <h1 style={{ fontSize: 18, margin: 0, color: '#60a5fa', fontWeight: 700 }}>
-            Illuminator
-          </h1>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+            <h1 style={{ fontSize: 18, margin: 0, color: '#60a5fa', fontWeight: 700 }}>
+              Illuminator
+            </h1>
+            <span style={{ fontSize: 10, color: '#6b7280', fontFamily: 'monospace' }}>
+              v{version}
+            </span>
+          </div>
           <span style={{ fontSize: 10, color: '#888' }}>Performance Observatory</span>
         </div>
 
@@ -123,9 +128,6 @@ export default function App() {
         ))}
 
         <div style={{ flex: 1 }} />
-        <div style={{ padding: '12px 16px', fontSize: 10, color: '#555' }}>
-          v{version}
-        </div>
       </nav>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>

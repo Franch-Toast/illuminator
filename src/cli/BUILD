@@ -7,6 +7,7 @@ cc_binary(
     deps = [
         "//src/core:common",
         "//src/core:engine",
+        "//src/core:version",
         "//src/core:yaml_config",
         "//src/plugin:builtin",
         "//src/plugin:manager",

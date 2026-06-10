@@ -33,6 +33,7 @@ cc_library(
     deps = [
         "//src/core:common",
         "//src/core:engine",
+        "//src/core:version",
         "//src/serialization:json_serializer",
         "//src/storage:storage",
         "//third_party/cpp-httplib",
