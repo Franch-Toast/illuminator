@@ -45,9 +45,11 @@ RUN curl -fsSL "https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0
 WORKDIR /app
 COPY . .
 
-# Build the backend binary (optimized)
-RUN bazel build //src/cli:illuminator --config=opt \
-    && cp bazel-bin/src/cli/illuminator /app/illuminator-bin
+# Build the backend binary and BPF probes (optimized)
+RUN bazel build //src/cli:illuminator //src/ebpf/probes:all --config=opt \
+    && cp bazel-bin/src/cli/illuminator /app/illuminator-bin \
+    && mkdir -p /app/bpf \
+    && cp bazel-bin/src/ebpf/probes/*.bpf.o /app/bpf/
 
 # ---------------------------------------------------------------------------
 # Stage 3: Runtime Image (minimal)
@@ -62,18 +64,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libelf1 \
     zlib1g \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -s /usr/sbin/nologin illuminator
 
 WORKDIR /opt/illuminator
 
 COPY --from=backend-builder /app/illuminator-bin ./illuminator
+COPY --from=backend-builder /app/bpf ./bpf
 COPY --from=frontend-builder /app/web/dist ./web/dist
 COPY illuminator.yaml.example ./illuminator.yaml
 
-RUN chown -R illuminator:illuminator /opt/illuminator
+RUN mkdir -p /var/lib/illuminator \
+    && chown -R illuminator:illuminator /opt/illuminator /var/lib/illuminator
 
 USER illuminator
+
+VOLUME ["/var/lib/illuminator"]
 
 EXPOSE 9527 9528
 

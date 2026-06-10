@@ -52,6 +52,8 @@ jobs:
     needs: verify
     runs-on: ubuntu-22.04
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -125,7 +127,7 @@ jobs:
             ## Docker Image
 
             ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.docker.outputs.version }}
             ```
 
             ## Quick Start
@@ -134,7 +136,8 @@ jobs:
             docker run -d --name illuminator \
               --cap-add CAP_BPF --cap-add CAP_PERFMON \
               -p 9527:9527 -p 9528:9528 \
-              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+              -v illuminator-data:/var/lib/illuminator \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.docker.outputs.version }}
             ```
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}

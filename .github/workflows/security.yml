@@ -28,6 +28,13 @@ jobs:
           languages: cpp
           queries: +security-extended
 
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: security-codeql
+          repository-cache: true
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
