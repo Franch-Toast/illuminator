@@ -218,24 +218,13 @@ private:
         if (!self->AllowPid(ev->pid))
             return 0;
 
-        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        auto& sample = batch->AddStackSample();
-        sample.pid = ev->pid;
-        sample.tid = ev->tid;
-        sample.cpu = ev->cpu;
-        sample.comm = batch->InternString(std::string_view(
-            ev->comm, strnlen(ev->comm, TASK_COMM_LEN)));
-        sample.sample_type = SampleType::kOffCpu;
-        sample.duration_ns = ev->duration_ns;
-        sample.count = 1;
-        sample.kernel_stack_id = ev->kernel_stack_id;
-        sample.user_stack_id = ev->user_stack_id;
-
-        sample.kernel_stack =
+        // 解析堆栈（共享给 Push/Pull 路径）
+        auto kernel_stack =
             LookupBpfStackTrace(self->stacks_fd_, ev->kernel_stack_id);
-        sample.user_stack =
+        auto user_stack =
             LookupBpfStackTrace(self->stacks_fd_, ev->user_stack_id);
 
+        // Pull 模式：累积到 cached_batch_（由 Collect() 消费）
         {
             std::lock_guard<std::mutex> lk(self->cache_mu_);
             if (!self->cached_batch_)
@@ -251,12 +240,28 @@ private:
             cs.count = 1;
             cs.kernel_stack_id = ev->kernel_stack_id;
             cs.user_stack_id = ev->user_stack_id;
-            cs.kernel_stack = sample.kernel_stack;
-            cs.user_stack = sample.user_stack;
+            cs.kernel_stack = kernel_stack;
+            cs.user_stack = user_stack;
         }
 
-        if (self->callback_)
+        // Push 模式：仅在 callback 已设置时才分配独立 batch 并推送
+        if (self->callback_) {
+            auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+            auto& sample = batch->AddStackSample();
+            sample.pid = ev->pid;
+            sample.tid = ev->tid;
+            sample.cpu = ev->cpu;
+            sample.comm = batch->InternString(std::string_view(
+                ev->comm, strnlen(ev->comm, TASK_COMM_LEN)));
+            sample.sample_type = SampleType::kOffCpu;
+            sample.duration_ns = ev->duration_ns;
+            sample.count = 1;
+            sample.kernel_stack_id = ev->kernel_stack_id;
+            sample.user_stack_id = ev->user_stack_id;
+            sample.kernel_stack = kernel_stack;
+            sample.user_stack = user_stack;
             self->callback_(std::move(batch));
+        }
         return 0;
     }
 

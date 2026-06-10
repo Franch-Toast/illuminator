@@ -54,6 +54,14 @@ engine:
     backpressure_high: 0.8            # 触发反压的水位线
     backpressure_low: 0.2             # 解除反压的水位线
 
+# ---- 存储与数据保留 ----
+storage:
+  backend: sqlite                     # 存储后端 (sqlite)
+  retention_minutes: 30               # 数据保留时长（分钟），0=永不清理
+  prune_interval_sec: 60              # 自动清理间隔（秒）
+  # 注意：保留时间过短会影响历史查询；过长会增加磁盘和内存占用
+  # 建议：车端部署 30-60 分钟，开发测试 5-10 分钟
+
 # ---- 数据管道 ----
 pipelines:
 
@@ -75,6 +83,8 @@ pipelines:
           path: /tmp/illuminator_data
           pipeline: cpu_utilization
       - type: websocket_sink          # 实时推送到前端仪表盘
+        config:
+          max_buffer_size: 30           # 内存中保留的最大批次数 (默认 30)
 
   # ===========================================================================
   # 进程/线程级 CPU 监控 — 基于 /proc/[pid]/stat (Pull)

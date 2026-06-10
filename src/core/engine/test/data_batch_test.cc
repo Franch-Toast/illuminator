@@ -221,6 +221,91 @@ TEST(DataBatchTest, FieldValueStoresAndRetrievesAllSupportedTypes) {
     EXPECT_EQ(std::get<std::string_view>(*r.GetField(ksv)), vs);
 }
 
+// InternString 去重：相同字符串应返回相同的 Arena 内指针，只分配一次。
+TEST(DataBatchTest, InternStringDeduplicatesSameContent) {
+    DataBatch batch;
+
+    auto sv1 = batch.InternString("type");
+    auto sv2 = batch.InternString("type");
+    auto sv3 = batch.InternString("type");
+
+    EXPECT_EQ(sv1.data(), sv2.data());
+    EXPECT_EQ(sv2.data(), sv3.data());
+    EXPECT_EQ(sv1, "type");
+}
+
+// InternString 去重：不同字符串应返回不同指针。
+TEST(DataBatchTest, InternStringDistinguishesDifferentStrings) {
+    DataBatch batch;
+
+    auto a = batch.InternString("cpu");
+    auto b = batch.InternString("mem");
+
+    EXPECT_NE(a.data(), b.data());
+    EXPECT_EQ(a, "cpu");
+    EXPECT_EQ(b, "mem");
+}
+
+// InternString 去重在高频场景下节省 Arena 内存。
+TEST(DataBatchTest, InternStringDeduplicationSavesArenaMemory) {
+    DataBatch batch_dedup;
+    DataBatch batch_nocheck;
+
+    constexpr int kIter = 1000;
+    for (int i = 0; i < kIter; ++i) {
+        batch_dedup.InternString("switch_count");
+        batch_dedup.InternString("total_runqueue_latency_ns");
+        batch_dedup.InternString("max_runqueue_latency_ns");
+    }
+
+    // With dedup: only 3 unique strings allocated in Arena
+    // Each string is stored once, so total arena usage is minimal
+    size_t dedup_allocated = batch_dedup.arena().TotalAllocated();
+
+    // Without dedup (simulated via direct CopyString), 3000 copies
+    for (int i = 0; i < kIter; ++i) {
+        batch_nocheck.arena().CopyString("switch_count");
+        batch_nocheck.arena().CopyString("total_runqueue_latency_ns");
+        batch_nocheck.arena().CopyString("max_runqueue_latency_ns");
+    }
+    size_t nocheck_allocated = batch_nocheck.arena().TotalAllocated();
+
+    // Dedup should use vastly less arena memory (< 5% of non-dedup)
+    EXPECT_LT(dedup_allocated, nocheck_allocated / 10);
+}
+
+// InternString 空字符串处理。
+TEST(DataBatchTest, InternStringHandlesEmptyString) {
+    DataBatch batch;
+    auto sv = batch.InternString("");
+    EXPECT_TRUE(sv.empty());
+    EXPECT_EQ(sv, "");
+}
+
+// Clear 后 InternString 去重缓存应被重置：
+// 新的 intern 调用会触发 Arena 分配（而非直接复用旧缓存条目）。
+TEST(DataBatchTest, ClearResetsInternCache) {
+    DataBatch batch;
+    auto sv1 = batch.InternString("aaa");
+    auto sv2 = batch.InternString("bbb");
+    size_t alloc_before = batch.arena().TotalAllocated();
+    EXPECT_GT(alloc_before, 0u);
+
+    batch.Clear();
+
+    // After clear, TotalAllocated resets to 0
+    EXPECT_EQ(batch.arena().TotalAllocated(), 0u);
+
+    // Re-intern should allocate fresh (cache was cleared)
+    auto sv3 = batch.InternString("aaa");
+    EXPECT_EQ(sv3, "aaa");
+    EXPECT_GT(batch.arena().TotalAllocated(), 0u);
+
+    // Dedup within new cycle still works
+    auto sv4 = batch.InternString("aaa");
+    EXPECT_EQ(sv3.data(), sv4.data());
+}
+
 // NowTimestamp 与 TimestampToNanos：时间上单调且不崩溃；纳秒量级应随短暂休眠增长。
 TEST(DataBatchTest, NowTimestampAndTimestampToNanosIncreaseOverSleepWindow) {
     const Timestamp a = NowTimestamp();

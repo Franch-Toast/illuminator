@@ -35,17 +35,21 @@ public:
 
     // 向指定流水线的缓冲区推入一个 DataBatch
     // 若队列长度超过 max_keep，自动丢弃最旧的数据。
-    // 参数:
-    //   pipeline_key - 流水线标识符（用于数据隔离）
-    //   batch        - 待推入的 DataBatch
-    //   max_keep     - 最大保留条数
     void PushBatch(const std::string& pipeline_key, DataBatchPtr batch,
                    size_t max_keep) {
         std::lock_guard<std::mutex> lock(mu_);
         auto& dq = buffers_[pipeline_key];
-        dq.push_back(batch);
+        dq.push_back(std::move(batch));
         while (dq.size() > max_keep)
             dq.pop_front();
+    }
+
+    // 返回所有缓冲区的近似内存占用（batch 数量）
+    size_t TotalBatchCount() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        size_t total = 0;
+        for (auto& [_, dq] : buffers_) total += dq.size();
+        return total;
     }
 
     // 获取指定流水线的最新一条 DataBatch
@@ -100,13 +104,9 @@ public:
     const char* Version() const override { return "0.1.0"; }
 
     // 从配置中解析缓冲区大小和流水线键
-    // 参数:
-    //   config - 配置项，包含 max_buffer_size 和 pipeline_key
-    // 返回:
-    //   Status::Ok() 表示初始化成功
     Status Init(const ConfigValue& config) override {
         max_buffer_size_ =
-            static_cast<size_t>(config["max_buffer_size"].AsInt(100));
+            static_cast<size_t>(config["max_buffer_size"].AsInt(30));
         pipeline_key_ = config["pipeline_key"].AsString("default");
         return Status::Ok();
     }
@@ -146,7 +146,7 @@ public:
     }
 
 private:
-    size_t max_buffer_size_ = 100;     // 缓冲区最大容量
+    size_t max_buffer_size_ = 30;      // 缓冲区最大容量（默认 30，避免高频管道内存膨胀）
     std::string pipeline_key_ = "default"; // 流水线标识符
 };
 

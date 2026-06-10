@@ -27,6 +27,9 @@
 #pragma once
 
 #include <sqlite3.h>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -340,7 +343,38 @@ public:
     }
 
     Status Compact() override {
-        if (db_) Execute("VACUUM");  // 压缩数据库，回收碎片空间
+        if (db_) Execute("VACUUM");
+        return Status::Ok();
+    }
+
+    // 按时间窗口清理过期数据，释放内存和磁盘空间。
+    // max_age_ns: 保留最近多少纳秒的数据（0 表示不清理）
+    Status Prune(uint64_t max_age_ns) {
+        if (!db_ || max_age_ns == 0) return Status::Ok();
+        std::lock_guard<std::mutex> lock(write_mutex_);
+
+        auto now_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        uint64_t cutoff_ns = now_ns - max_age_ns;
+
+        char sql_buf[256];
+        std::snprintf(sql_buf, sizeof(sql_buf),
+            "DELETE FROM records WHERE timestamp_ns < %" PRIu64, cutoff_ns);
+        Execute(sql_buf);
+
+        std::snprintf(sql_buf, sizeof(sql_buf),
+            "DELETE FROM stack_samples WHERE timestamp_ns < %" PRIu64, cutoff_ns);
+        Execute(sql_buf);
+
+        std::snprintf(sql_buf, sizeof(sql_buf),
+            "DELETE FROM profiles WHERE start_ns < %" PRIu64, cutoff_ns);
+        Execute(sql_buf);
+
+        pruned_count_++;
+        if (pruned_count_ % 12 == 0) {
+            Execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        }
         return Status::Ok();
     }
 
@@ -568,6 +602,7 @@ private:
     sqlite3* db_ = nullptr;        // SQLite 数据库连接句柄
     std::string db_path_;          // 数据库文件路径
     std::mutex write_mutex_;       // 序列化所有写入操作，防止并发锁冲突
+    uint32_t pruned_count_ = 0;    // Prune 调用计数（用于定期 WAL checkpoint）
 };
 
 // 静态初始化器：自动注册 SQLite 后端到 StorageFactory

@@ -322,6 +322,15 @@ private:
             return;
         }
 
+        // Back-pressure: drop batch when SinkPool is overloaded
+        static constexpr size_t kMaxPendingTasks = 256;
+        if (sink_pool_->PendingTasks() > kMaxPendingTasks) {
+            IL_WARN("Pipeline '{}': SinkPool overloaded ({} pending), dropping batch",
+                    name_, sink_pool_->PendingTasks());
+            error_count_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+
         for (auto& sink : sinks_) {
             sink_pool_->Submit(
                 [sink_ptr = sink.get(), batch, this]() -> void {

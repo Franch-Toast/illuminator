@@ -4,6 +4,7 @@
 
 #include "core/engine/pipeline_controller.h"
 #include "plugin/manager/plugin_registry.h"
+#include "storage/storage_backend.h"
 
 namespace illuminator {
 
@@ -161,6 +162,21 @@ Status PipelineController::StartAll() {
             }
         }
     );
+
+    // Register periodic data pruning (every 60s, keep last 30 minutes)
+    if (storage_backend_) {
+        static constexpr uint64_t kRetentionNs = 30ULL * 60 * 1000000000ULL;
+        timer_.AddRepeating(std::chrono::seconds(60),
+            [this] {
+                if (sink_pool_) {
+                    sink_pool_->Submit([this] {
+                        storage_backend_->Prune(kRetentionNs);
+                    });
+                }
+            }
+        );
+        IL_INFO("Registered storage data pruning (retention=30min, interval=60s)");
+    }
 
     timer_.Start();
 

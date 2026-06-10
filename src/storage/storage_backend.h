@@ -122,6 +122,9 @@ public:
     virtual Status Compact() = 0;     // 压缩/优化存储
     virtual Status Close() = 0;       // 关闭连接
 
+    // 数据保留：清理 max_age_ns 之前的数据（默认 no-op）
+    virtual Status Prune(uint64_t /*max_age_ns*/) { return Status::Ok(); }
+
     // 磁盘占用（字节），默认返回 0
     virtual uint64_t DiskUsageBytes() const { return 0; }
 

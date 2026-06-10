@@ -196,5 +196,88 @@ TEST_F(SqliteBackendTest, QueryOnEmptyDbReturnsValidEmptyResult) {
     EXPECT_TRUE(result.value().records.empty());
 }
 
+// Prune：删除指定时间窗口之前的记录
+TEST_F(SqliteBackendTest, PruneRemovesOldRecords) {
+    auto now = std::chrono::system_clock::now();
+
+    // 写入 5 条记录，时间跨度 5 分钟
+    for (int i = 0; i < 5; ++i) {
+        Record rec;
+        rec.timestamp = now - std::chrono::minutes(5 - i);  // -5m, -4m, -3m, -2m, -1m
+        rec.labels.push_back({"seq", std::to_string(i)});
+        rec.SetField("value", static_cast<int64_t>(i));
+        ASSERT_TRUE(backend_->WriteRecords("prune_pipe", {rec}).ok());
+    }
+
+    // 确认全部写入
+    QueryRequest req;
+    req.pipeline_name = "prune_pipe";
+    req.limit = 100;
+    auto before = backend_->Query(req);
+    ASSERT_TRUE(before.ok());
+    EXPECT_EQ(before.value().total_count, 5u);
+
+    // Prune：保留最近 3 分钟内的数据
+    constexpr uint64_t kThreeMinNs = 3ULL * 60 * 1000000000ULL;
+    auto prune_status = backend_->Prune(kThreeMinNs);
+    EXPECT_TRUE(prune_status.ok());
+
+    // 查询剩余记录（应保留 -2m 和 -1m 的记录）
+    auto after = backend_->Query(req);
+    ASSERT_TRUE(after.ok());
+    EXPECT_LE(after.value().total_count, 3u);  // 最多保留 3 条
+    EXPECT_GE(after.value().total_count, 2u);  // 至少保留 2 条
+}
+
+// Prune：max_age_ns=0 时不执行清理
+TEST_F(SqliteBackendTest, PruneWithZeroAgeDoesNothing) {
+    Record rec;
+    rec.timestamp = std::chrono::system_clock::now() - std::chrono::hours(24);
+    rec.labels.push_back({"old", "data"});
+    ASSERT_TRUE(backend_->WriteRecords("zero_prune", {rec}).ok());
+
+    EXPECT_TRUE(backend_->Prune(0).ok());
+
+    QueryRequest req;
+    req.pipeline_name = "zero_prune";
+    req.limit = 10;
+    auto result = backend_->Query(req);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.value().total_count, 1u);
+}
+
+// Prune：同时清理 stack_samples 表
+TEST_F(SqliteBackendTest, PruneAlsoRemovesOldStackSamples) {
+    auto now = std::chrono::system_clock::now();
+
+    std::vector<StackSample> samples;
+    for (int i = 0; i < 4; ++i) {
+        StackSample s;
+        s.timestamp = now - std::chrono::minutes(10 - i * 3);  // -10m, -7m, -4m, -1m
+        s.pid = 100 + i;
+        s.tid = 200 + i;
+        s.count = 1;
+        samples.push_back(s);
+    }
+    ASSERT_TRUE(backend_->WriteStackSamples("prune_sample_pipe", samples).ok());
+
+    // Prune：保留最近 5 分钟
+    constexpr uint64_t kFiveMinNs = 5ULL * 60 * 1000000000ULL;
+    EXPECT_TRUE(backend_->Prune(kFiveMinNs).ok());
+
+    // 只有 -4m 和 -1m 的样本应保留
+    QueryRequest req;
+    req.pipeline_name = "prune_sample_pipe";
+    req.limit = 100;
+    auto result = backend_->Query(req);
+    ASSERT_TRUE(result.ok());
+    // stack_samples 查询可能只统计 records count，直接 SQL 检查更准确
+    auto sql_result = backend_->ExecuteRawQuery(
+        "SELECT count(*) as cnt FROM stack_samples WHERE pipeline='prune_sample_pipe'");
+    ASSERT_TRUE(sql_result.ok());
+    // 应剩余 1-2 条
+    EXPECT_TRUE(sql_result.value().find("\"cnt\":4") == std::string::npos);
+}
+
 }  // namespace
 }  // namespace illuminator

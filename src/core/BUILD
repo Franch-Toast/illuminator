@@ -87,6 +87,7 @@ cc_library(
         ":threading",
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/storage:storage",
     ],
 )
 
