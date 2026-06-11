@@ -152,6 +152,8 @@ private:
                 for (const auto& dir : global["plugin_dirs"])
                     config.plugin_dirs.push_back(dir.as<std::string>());
             }
+            if (global["auto_start"])
+                config.auto_start = global["auto_start"].as<bool>();
         }
 
         // 解析 [server] 节

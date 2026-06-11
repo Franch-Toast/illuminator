@@ -37,3 +37,18 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "feature_manager_test",
+    srcs = ["feature_manager_test.cc"],
+    deps = [
+        "//src/core:engine",
+        "//src/core:common",
+        "//src/plugin:api",
+        "//src/plugin:builtin",
+        "//src/sources:cpu_utilization",
+        "//src/sinks:stream_sink",
+        "//src/sinks:recording_sink",
+        "@googletest//:gtest_main",
+    ],
+)

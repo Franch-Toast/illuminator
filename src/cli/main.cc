@@ -64,6 +64,7 @@ static void SetLogLevel(const std::string& level) {
 static constexpr const char* kDefaultConfigYaml = R"yaml(
 global:
   log_level: info
+  auto_start: false
 pipelines:
   cpu_utilization:
     source:
@@ -71,7 +72,7 @@ pipelines:
       config:
         interval_ms: 1000
         collect_per_core: true
-        collect_frequency: true
+        collect_frequency: false
         ema_alpha: 0.3
     sinks:
       - type: local_storage
@@ -116,6 +117,23 @@ pipelines:
           path: /tmp/illuminator_data
           pipeline: cpu_profile
       - type: pprof_export
+  offcpu_profile:
+    source:
+      type: offcpu_profiler
+      config:
+        min_block_us: 1000
+        target_tgid: 0
+    processors:
+      - type: stack_symbolizer
+        config:
+          demangle: true
+          kernel_symbols: true
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: offcpu_profile
   sched_analysis:
     source:
       type: sched_analyzer
@@ -201,10 +219,18 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         return 1;
     }
 
-    status = controller.StartAll();
-    if (!status.ok()) {
-        IL_ERROR("Failed to start pipelines: {}", status.message());
-        return 1;
+    // 按需启动模式：pipeline 由 FeatureManager API 控制启停
+    // 仅当配置 auto_start=true 时才全量自启（兼容旧行为）
+    if (config.auto_start) {
+        status = controller.StartAll();
+        if (!status.ok()) {
+            IL_ERROR("Failed to start pipelines: {}", status.message());
+            return 1;
+        }
+        IL_INFO("Auto-start: all pipelines running");
+    } else {
+        controller.GetTimerWheel().Start();
+        IL_INFO("On-demand mode: pipelines await Feature API start commands");
     }
 
     // Expose the first storage backend for the query API
@@ -231,11 +257,35 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
 
     // FeatureManager: register all configured pipelines as features
     illuminator::FeatureManager feature_manager(controller);
+
+    auto resolve_category = [](const std::string& name) -> std::string {
+        if (name.find("cpu") != std::string::npos ||
+            name.find("sched") != std::string::npos ||
+            name.find("offcpu") != std::string::npos) return "cpu";
+        if (name.find("mem") != std::string::npos ||
+            name.find("heap") != std::string::npos) return "memory";
+        if (name.find("io") != std::string::npos ||
+            name.find("disk") != std::string::npos) return "io";
+        if (name.find("net") != std::string::npos ||
+            name.find("tcp") != std::string::npos) return "network";
+        if (name.find("gpu") != std::string::npos) return "gpu";
+        return "system";
+    };
+
+    auto resolve_display_name = [](const std::string& name) -> std::string {
+        if (name == "cpu_utilization") return "CPU Utilization";
+        if (name == "cpu_processes") return "Process CPU (Top-N)";
+        if (name == "cpu_profile") return "CPU Profile (On-CPU)";
+        if (name == "offcpu_profile") return "Off-CPU Analysis";
+        if (name == "sched_analysis") return "Scheduler Analysis";
+        return name;
+    };
+
     for (const auto& pc : config.pipelines) {
         illuminator::FeatureConfig fc;
         fc.name = pc.name;
-        fc.display_name = pc.name;
-        fc.category = "default";
+        fc.display_name = resolve_display_name(pc.name);
+        fc.category = resolve_category(pc.name);
         fc.pipeline = pc;
         feature_manager.RegisterFeature(std::move(fc));
     }

@@ -79,6 +79,8 @@
 
 #include "ebpf/include/bpf_compat.h"
 
+#include <nlohmann/json.hpp>
+
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
 #include "core/threading/thread_util.h"
@@ -195,6 +197,18 @@ public:
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
         SnapshotAggregatedCounts(batch.get());
         return batch;
+    }
+
+    // ========================================================================
+    // QueryExtra — 支持 "snapshot" 查询，返回最近 JSON 快照
+    // ========================================================================
+    StatusOr<std::string> QueryExtra(
+        const std::string& query, const QueryParams& /*params*/) override {
+        if (query == "snapshot") {
+            std::lock_guard<std::mutex> lk(last_batch_mu_);
+            return latest_json_snapshot_;
+        }
+        return Status::Error(StatusCode::kUnimplemented, "unknown query");
     }
 
     // ========================================================================
@@ -509,7 +523,7 @@ private:
     // 2. 逐个删除已读取的条目（避免重复上报）
     // 3. 将生成的 batch 同时缓存在 last_batch_ 和推送到 callback_
     void FlushAggregatedCounts() {
-        if (counts_fd_ < 0 || !callback_)
+        if (counts_fd_ < 0)
             return;
 
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
@@ -531,9 +545,49 @@ private:
             {
                 std::lock_guard<std::mutex> lock(last_batch_mu_);
                 last_batch_ = batch;
+                BuildJsonSnapshot(*batch);
             }
-            callback_(std::move(batch));
+            if (callback_) callback_(std::move(batch));
         }
+    }
+
+    // ========================================================================
+    // BuildJsonSnapshot — 从 batch 生成 JSON 快照字符串（用于 QueryExtra）
+    // ========================================================================
+    void BuildJsonSnapshot(const DataBatch& batch) {
+        nlohmann::json j;
+        nlohmann::json samples = nlohmann::json::array();
+        for (const auto& s : batch.stack_samples()) {
+            nlohmann::json item;
+            item["pid"] = s.pid;
+            item["tid"] = s.tid;
+            item["comm"] = std::string(s.comm);
+            item["count"] = s.count;
+            nlohmann::json stack_arr = nlohmann::json::array();
+            for (const auto& frame : s.kernel_stack) {
+                if (!frame.function_name.empty())
+                    stack_arr.push_back(std::string(frame.function_name));
+                else {
+                    std::ostringstream oss;
+                    oss << "0x" << std::hex << frame.address;
+                    stack_arr.push_back(oss.str());
+                }
+            }
+            for (const auto& frame : s.user_stack) {
+                if (!frame.function_name.empty())
+                    stack_arr.push_back(std::string(frame.function_name));
+                else {
+                    std::ostringstream oss;
+                    oss << "0x" << std::hex << frame.address;
+                    stack_arr.push_back(oss.str());
+                }
+            }
+            item["stack"] = std::move(stack_arr);
+            samples.push_back(std::move(item));
+        }
+        j["stack_samples"] = std::move(samples);
+        j["pipeline"] = "cpu_profile";
+        latest_json_snapshot_ = j.dump();
     }
 
     // ========================================================================
@@ -615,6 +669,7 @@ private:
 
     mutable std::mutex last_batch_mu_;        // 保护 last_batch_ 的互斥锁
     DataBatchPtr last_batch_;                 // 最近一次聚合结果的缓存
+    std::string latest_json_snapshot_ = R"({"stack_samples":[]})";
 };
 
 // 自动注册到插件注册表

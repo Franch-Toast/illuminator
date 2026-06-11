@@ -65,6 +65,19 @@ export function useFeatureStream<T extends { timestamp: number } = { timestamp: 
   const [dataVersion, setDataVersion] = useState(0)
   const buffer = useRef(new TimeSeriesBuffer<T>(windowSec))
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const syncedRef = useRef(false)
+
+  // 挂载时从后端同步 Feature 的实际状态（解决标签页切换后状态丢失的问题）
+  useEffect(() => {
+    if (syncedRef.current) return
+    syncedRef.current = true
+    api.features().then(resp => {
+      const feature = resp.features?.find(f => f.name === featureName)
+      if (feature && feature.state !== 'inactive') {
+        setState(feature.state as FeatureState)
+      }
+    }).catch(() => {})
+  }, [featureName])
 
   const start = useCallback(async () => {
     try {

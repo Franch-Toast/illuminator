@@ -170,6 +170,10 @@ inline void RegisterApiRoutes(httplib::Server& srv,
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("offcpu_profile", "snapshot", req, res);
             });
+    srv.Get("/api/v1/cpu/profile/oncpu/snapshot",
+            [query_handler](const httplib::Request& req, httplib::Response& res) {
+                query_handler("cpu_profile", "snapshot", req, res);
+            });
     srv.Get("/api/v1/cpu/sched/history",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("sched_analysis", "history", req, res);

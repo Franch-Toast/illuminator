@@ -182,6 +182,7 @@ struct GlobalConfig {
     size_t log_max_files = 3;                      // 轮转文件数
     std::string data_dir = "/var/lib/illuminator";
     std::vector<std::string> plugin_dirs;
+    bool auto_start = false;                       // true=启动时全量运行pipeline; false=按需启动
 
     // 服务器配置
     struct ServerConfig {
