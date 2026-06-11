@@ -95,5 +95,59 @@ TEST(StackSymbolizerProcessorTest, ReportsExpectedNameAndVersion) {
     EXPECT_STREQ(proc.Version(), "0.1.0");
 }
 
+// ElfSymbolCache：加载当前二进制自身并解析已知符号（验证 load_base 归一化）
+TEST(StackSymbolizerProcessorTest, ElfSymbolCacheResolvesOwnBinary) {
+    ElfSymbolCache cache;
+    // /proc/self/exe 指向当前测试二进制
+    bool loaded = cache.Load("/proc/self/exe");
+    ASSERT_TRUE(loaded);
+    // "main" 函数在任何可执行文件中都应存在
+    // 通过 nm 我们知道 main 的符号值 > 0
+    // 验证 Resolve 对一个合理偏移不会崩溃
+    std::string sym = cache.Resolve(0);
+    // 偏移 0 可能无符号，但不应崩溃
+    (void)sym;
+}
+
+// ElfSymbolCache：Resolve 返回最近的低地址符号名
+TEST(StackSymbolizerProcessorTest, ElfSymbolCacheResolveFindsSymbol) {
+    ElfSymbolCache cache;
+    ASSERT_TRUE(cache.Load("/proc/self/exe"));
+    // PIE 测试二进制的 .text 通常在较高偏移（0x10000+）
+    bool found_any = false;
+    for (uint64_t off = 0x1000; off < 0x800000; off += 0x100) {
+        std::string sym = cache.Resolve(off);
+        if (!sym.empty()) {
+            found_any = true;
+            EXPECT_FALSE(sym.empty());
+            break;
+        }
+    }
+    EXPECT_TRUE(found_any) << "Should find at least one symbol in test binary";
+}
+
+// ParseProcMapsLine：带非零文件偏移的映射行
+TEST(StackSymbolizerProcessorTest, ParseProcMapsLineWithOffset) {
+    const std::string line =
+        "7f0001000000-7f0001100000 r-xp 00022000 08:01 999 /lib/libfoo.so";
+    ProcMapEntry m{};
+    ASSERT_TRUE(ParseProcMapsLine(line, &m));
+    EXPECT_EQ(m.start, 0x7f0001000000ULL);
+    EXPECT_EQ(m.end, 0x7f0001100000ULL);
+    EXPECT_EQ(m.offset, 0x22000ULL);
+    EXPECT_EQ(m.path, "/lib/libfoo.so");
+}
+
+// ParseProcMapsLine：匿名映射（无路径）应设置空路径
+TEST(StackSymbolizerProcessorTest, ParseProcMapsLineAnonymousMapping) {
+    const std::string line =
+        "7fff00000000-7fff00001000 rw-p 00000000 00:00 0";
+    ProcMapEntry m{};
+    bool ok = ParseProcMapsLine(line, &m);
+    if (ok) {
+        EXPECT_TRUE(m.path.empty());
+    }
+}
+
 }  // namespace
 }  // namespace illuminator

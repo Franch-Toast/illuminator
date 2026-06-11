@@ -93,13 +93,11 @@ public:
         if (!f)
             return false;
 
-        // 读取整个文件到内存缓冲区
         std::vector<char> buf((std::istreambuf_iterator<char>(f)),
                               std::istreambuf_iterator<char>());
         if (buf.size() < sizeof(Elf64_Ehdr))
             return false;
 
-        // 校验 ELF 魔数和位数（仅支持 64 位 ELF）
         auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(buf.data());
         if (ehdr->e_ident[EI_MAG0] != ELFMAG0 ||
             ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
@@ -111,6 +109,22 @@ public:
         if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
             return false;
 
+        // 解析 program headers 获取 ELF load base（第一个 PT_LOAD 段的 p_vaddr）
+        // 对 PIE (ET_DYN) base=0，对 non-PIE (ET_EXEC) base 通常为 0x400000
+        // 将 sym.st_value 减去 base 以归一化为文件相对偏移
+        uint64_t load_base = 0;
+        if (ehdr->e_phoff != 0 && ehdr->e_phentsize == sizeof(Elf64_Phdr)) {
+            auto* phdrs = reinterpret_cast<Elf64_Phdr*>(buf.data() + ehdr->e_phoff);
+            uint64_t min_vaddr = UINT64_MAX;
+            for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+                if (phdrs[i].p_type == PT_LOAD && phdrs[i].p_vaddr < min_vaddr) {
+                    min_vaddr = phdrs[i].p_vaddr;
+                }
+            }
+            if (min_vaddr != UINT64_MAX)
+                load_base = min_vaddr;
+        }
+
         auto* shdrs =
             reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
 
@@ -118,7 +132,6 @@ public:
         size_t sym_count = 0;
         const char* strtab = nullptr;
 
-        // 第一步：查找 .symtab（静态符号表）
         for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
             const Elf64_Shdr& sh = shdrs[i];
             if (sh.sh_type == SHT_SYMTAB && symtab == nullptr) {
@@ -131,7 +144,6 @@ public:
         }
 
         if (!symtab || !strtab) {
-            // 回退方案：没有 .symtab 则使用 .dynsym（动态符号表）
             for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
                 const Elf64_Shdr& sh = shdrs[i];
                 if (sh.sh_type == SHT_DYNSYM) {
@@ -148,13 +160,11 @@ public:
         if (!symtab || !strtab)
             return false;
 
-        // 遍历符号表，收集函数和对象类型符号
         for (size_t i = 0; i < sym_count; ++i) {
             const Elf64_Sym& sym = symtab[i];
             unsigned char info = ELF64_ST_TYPE(sym.st_info);
             if (sym.st_name == 0)
                 continue;
-            // 只关注函数（含 IFUNC）和对象
             if (info != STT_FUNC && info != STT_GNU_IFUNC && info != STT_OBJECT)
                 continue;
             if (sym.st_value == 0 && sym.st_size == 0)
@@ -162,10 +172,12 @@ public:
             const char* name = strtab + sym.st_name;
             if (!name || name[0] == '\0')
                 continue;
-            symbols_.push_back({sym.st_value, std::string(name), sym.st_size});
+            // 归一化：减去 load_base 将绝对地址转换为文件相对偏移
+            uint64_t normalized = sym.st_value >= load_base
+                ? sym.st_value - load_base : sym.st_value;
+            symbols_.push_back({normalized, std::string(name), sym.st_size});
         }
 
-        // 按地址升序排序，以便后续二分查找
         std::sort(symbols_.begin(), symbols_.end(),
                   [](const auto& a, const auto& b) {
                       return a.value < b.value;

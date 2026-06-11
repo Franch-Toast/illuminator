@@ -56,11 +56,16 @@
 
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <cxxabi.h>
 #include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -75,6 +80,7 @@ using json = nlohmann::json;
 #include "ebpf/include/event_types.h"
 #include "ebpf/loader/bpf_program_manager.h"
 #include "ebpf/loader/stack_trace_util.h"
+#include "processors/stack_symbolizer/stack_symbolizer.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
@@ -324,7 +330,8 @@ private:
         if (stats_fd < 0) return;
 
         struct offcpu_stat_key {
-            uint32_t pid;
+            uint32_t tgid;
+            uint32_t tid;
             int32_t kernel_stack_id;
             int32_t user_stack_id;
         };
@@ -341,15 +348,15 @@ private:
 
         while (bpf_map_get_next_key(stats_fd, &key, &next_key) == 0) {
             if (bpf_map_lookup_elem(stats_fd, &next_key, &val) == 0) {
-                if (AllowPid(next_key.pid)) {
+                if (AllowPid(next_key.tgid)) {
                     auto kernel_stack =
                         LookupBpfStackTrace(stacks_fd_, next_key.kernel_stack_id);
                     auto user_stack =
                         LookupBpfStackTrace(stacks_fd_, next_key.user_stack_id);
 
                     auto& cs = batch->AddStackSample();
-                    cs.pid = next_key.pid;
-                    cs.tid = next_key.pid;
+                    cs.pid = next_key.tgid;  // 进程组 ID（用户态 PID）
+                    cs.tid = next_key.tid;   // 线程 ID（区分不同线程）
                     cs.cpu = val.cpu;
                     cs.comm = batch->InternString(std::string_view(
                         val.comm, strnlen(val.comm, 16)));
@@ -368,40 +375,16 @@ private:
 
         if (batch->stack_samples().empty()) return;
 
-        // 生成 JSON 快照供 HTTP API 使用（在 symbolizer 之前，只有地址）
-        {
-            std::lock_guard<std::mutex> lk(snapshot_mu_);
-            json j;
-            json samples = json::array();
-            for (auto& s : batch->stack_samples()) {
-                json sj;
-                sj["pid"] = s.pid;
-                sj["tid"] = s.tid;
-                sj["cpu"] = s.cpu;
-                sj["count"] = s.count;
-                sj["duration_ns"] = s.duration_ns;
-                sj["comm"] = std::string(s.comm.data(), s.comm.size());
-                sj["sample_type"] = static_cast<int>(s.sample_type);
-                json ks = json::array(), us = json::array();
-                for (auto& f : s.kernel_stack)
-                    ks.push_back({{"address", f.address}});
-                for (auto& f : s.user_stack)
-                    us.push_back({{"address", f.address}});
-                sj["kernel_stack"] = std::move(ks);
-                sj["user_stack"] = std::move(us);
-                samples.push_back(std::move(sj));
-            }
-            j["stack_samples"] = std::move(samples);
-            j["pipeline"] = "offcpu_profile";
-            latest_json_snapshot_ = j.dump();
-        }
+        // 生成符号化 JSON 快照供 HTTP API 使用
+        GenerateSymbolizedSnapshot(batch);
 
-        // Pull 模式：复制样本到 cached_batch_（需要重新 intern 字符串）
+        // Pull 模式：累积到 cached_batch_ 供 Collect() 取用
+        // 不调用 callback_（pull 模式由 TimerWheel 驱动 Collect()）
         {
             std::lock_guard<std::mutex> lk(cache_mu_);
             if (!cached_batch_)
                 cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-            for (auto& s : batch->stack_samples()) {
+            for (const auto& s : batch->stack_samples()) {
                 auto& dst = cached_batch_->AddStackSample();
                 dst.pid = s.pid;
                 dst.tid = s.tid;
@@ -411,17 +394,174 @@ private:
                 dst.sample_type = s.sample_type;
                 dst.kernel_stack_id = s.kernel_stack_id;
                 dst.user_stack_id = s.user_stack_id;
-                dst.kernel_stack = std::move(s.kernel_stack);
-                dst.user_stack = std::move(s.user_stack);
-                // 重新 intern comm 到目标 batch 的 Arena
+                dst.kernel_stack = s.kernel_stack;
+                dst.user_stack = s.user_stack;
                 dst.comm = cached_batch_->InternString(s.comm);
             }
         }
+    }
 
-        // Push 模式：callback 推送
-        if (callback_) {
-            callback_(std::move(batch));
+    // ========================================================================
+    // GenerateSymbolizedSnapshot — 生成符号化的 JSON 快照供 HTTP API 使用
+    // ========================================================================
+    void GenerateSymbolizedSnapshot(const DataBatchPtr& batch) {
+        std::lock_guard<std::mutex> lk(snapshot_mu_);
+
+        // 延迟加载内核符号
+        if (!kernel_resolver_loaded_) {
+            auto st = kernel_resolver_.Load();
+            if (st.ok())
+                IL_INFO("offcpu_profiler: kernel symbols loaded for snapshot");
+            kernel_resolver_loaded_ = true;
         }
+
+        json j;
+        json samples = json::array();
+        for (auto& s : batch->stack_samples()) {
+            json sj;
+            sj["pid"] = s.pid;
+            sj["tid"] = s.tid;
+            sj["cpu"] = s.cpu;
+            sj["count"] = s.count;
+            sj["duration_ns"] = s.duration_ns;
+            sj["comm"] = std::string(s.comm.data(), s.comm.size());
+            sj["sample_type"] = static_cast<int>(s.sample_type);
+
+            // 内核栈 — 使用 kallsyms 符号解析
+            json ks = json::array();
+            for (auto& f : s.kernel_stack) {
+                json fj;
+                fj["address"] = f.address;
+                std::string sym = kernel_resolver_.Resolve(f.address);
+                if (sym.empty()) {
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "[kernel 0x%llx]",
+                                  static_cast<unsigned long long>(f.address));
+                    sym = buf;
+                }
+                fj["function_name"] = sym;
+                ks.push_back(std::move(fj));
+            }
+
+            // 用户栈 — 使用 /proc/<pid>/maps + ELF 符号解析
+            json us = json::array();
+            for (auto& f : s.user_stack) {
+                json fj;
+                fj["address"] = f.address;
+                std::string sym;
+                if (f.address < 0x1000) {
+                    sym = "[thread entry]";
+                } else {
+                    sym = ResolveUserSymbol(s.pid, f.address);
+                    if (sym.empty()) {
+                        char buf[64];
+                        std::snprintf(buf, sizeof(buf), "[0x%llx]",
+                                      static_cast<unsigned long long>(f.address));
+                        sym = buf;
+                    }
+                }
+                fj["function_name"] = sym;
+                us.push_back(std::move(fj));
+            }
+
+            sj["kernel_stack"] = std::move(ks);
+            sj["user_stack"] = std::move(us);
+            samples.push_back(std::move(sj));
+        }
+        j["stack_samples"] = std::move(samples);
+        j["pipeline"] = "offcpu_profile";
+        latest_json_snapshot_ = j.dump();
+    }
+
+    // ========================================================================
+    // ResolveUserSymbol — 解析用户态地址到函数名
+    // ========================================================================
+    std::string ResolveUserSymbol(uint32_t pid, uint64_t addr) {
+        auto now = std::chrono::steady_clock::now();
+
+        auto it = maps_cache_.find(pid);
+        if (it == maps_cache_.end()) {
+            MapsCacheEntry entry;
+            if (!LoadProcMaps(pid, entry))
+                return {};
+            auto ins = maps_cache_.emplace(pid, std::move(entry));
+            it = ins.first;
+        } else {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - it->second.loaded_at).count();
+            if (age > 30) {
+                LoadProcMaps(pid, it->second);
+            }
+        }
+
+        for (const auto& m : it->second.maps) {
+            if (addr < m.start || addr >= m.end)
+                continue;
+            uint64_t off = addr - m.start + m.offset;
+            auto elf_it = elf_cache_.find(m.path);
+            if (elf_it == elf_cache_.end()) {
+                ElfSymbolCache cache;
+                if (!cache.Load(m.path)) {
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
+                                  m.path.c_str(),
+                                  static_cast<unsigned long long>(addr - m.start));
+                    return std::string(buf);
+                }
+                auto ins = elf_cache_.emplace(m.path, std::move(cache));
+                elf_it = ins.first;
+            }
+            std::string sym = elf_it->second.Resolve(off);
+            if (!sym.empty()) {
+                return DemangleSymbol(sym);
+            }
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
+                          m.path.c_str(),
+                          static_cast<unsigned long long>(addr - m.start));
+            return std::string(buf);
+        }
+        return {};
+    }
+
+    // PID 命名空间感知的 maps 加载：
+    // BPF 返回 init namespace PID，但 /proc/ 只显示当前 namespace 的 PID。
+    // 当 /proc/<bpf_pid>/maps 不存在时，回退到 /proc/self/maps（自分析场景）。
+    // 对于外部进程，扫描 /proc/ 查找匹配的进程。
+    bool LoadProcMaps(uint32_t pid, MapsCacheEntry& entry) {
+        entry.maps.clear();
+
+        std::string path = "/proc/" + std::to_string(pid) + "/maps";
+        std::ifstream f(path);
+        if (!f) {
+            // PID namespace fallback: BPF 报告的 init ns PID 在当前 ns 不可见
+            // 尝试 /proc/self/maps（覆盖自分析最常见场景）
+            f.open("/proc/self/maps");
+            if (!f) return false;
+            if (!self_maps_logged_) {
+                IL_INFO("offcpu_profiler: using /proc/self/maps for pid {} "
+                        "(pid namespace detected)", pid);
+                self_maps_logged_ = true;
+            }
+        }
+        std::string line;
+        while (std::getline(f, line)) {
+            ProcMapEntry m{};
+            if (!ParseProcMapsLine(line, &m)) continue;
+            if (m.path.empty() || m.path[0] != '/') continue;
+            entry.maps.push_back(std::move(m));
+        }
+        entry.loaded_at = std::chrono::steady_clock::now();
+        return !entry.maps.empty();
+    }
+
+    std::string DemangleSymbol(const std::string& sym) {
+        int status = 0;
+        char* dm = abi::__cxa_demangle(sym.c_str(), nullptr, nullptr, &status);
+        if (status != 0 || !dm) return sym;
+        std::string out(dm);
+        std::free(dm);
+        return out;
     }
 
     bool stub_mode_ = false;
@@ -447,6 +587,13 @@ private:
     DataBatchPtr cached_batch_;
     mutable std::mutex snapshot_mu_;
     std::string latest_json_snapshot_ = "{\"stack_samples\":[]}";
+
+    // ---- 内联符号解析器 ----
+    KernelSymbolResolver kernel_resolver_;
+    bool kernel_resolver_loaded_ = false;
+    bool self_maps_logged_ = false;
+    std::unordered_map<std::string, ElfSymbolCache> elf_cache_;
+    std::unordered_map<uint32_t, MapsCacheEntry> maps_cache_;
 };
 
 IL_REGISTER_SOURCE("offcpu_profiler", OffcpuProfilerSource);

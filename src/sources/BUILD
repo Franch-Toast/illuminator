@@ -140,6 +140,7 @@ cc_library(
         "//src/ebpf:common_bpf_types",
         "//src/ebpf:loader",
         "//src/ebpf:stack_trace_util",
+        "//src/processors:stack_symbolizer",
         "//src/plugin:api",
         "//src/plugin:manager",
         "@nlohmann_json//:json",

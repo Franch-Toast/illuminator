@@ -22,8 +22,10 @@ interface SnapshotEntry {
 
 const MAX_SNAPSHOTS = 60
 
-interface StackFrame { function_name?: string }
+interface StackFrame { function_name?: string; address?: number }
 interface StackSample {
+  pid?: number
+  tid?: number
   comm?: string
   user_stack?: StackFrame[]
   kernel_stack?: StackFrame[]
@@ -37,10 +39,19 @@ function convertToFlameNode(data: { stack_samples?: StackSample[] }, isOffCpu = 
   for (const sample of samples) {
     const frames: string[] = []
     const comm = sample.comm || 'unknown'
-    frames.push(comm)
+    // 线程标识：comm 已经是每个线程自己的名字（如 "offcpu-poll", "timer-wheel"）
+    const threadLabel = sample.tid && sample.tid !== sample.pid
+      ? `${comm} [tid:${sample.tid}]`
+      : comm
+    frames.push(threadLabel)
     if (sample.user_stack) {
       for (const f of [...sample.user_stack].reverse()) {
-        frames.push(f.function_name?.startsWith('[0x') ? `[${comm}]` : (f.function_name || `[${comm}]`))
+        const name = f.function_name || ''
+        if (!name || name.startsWith('[0x')) {
+          frames.push(name || `[${comm}]`)
+        } else {
+          frames.push(name)
+        }
       }
     }
     if (sample.kernel_stack) {

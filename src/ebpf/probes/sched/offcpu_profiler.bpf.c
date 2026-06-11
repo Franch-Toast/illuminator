@@ -44,20 +44,18 @@
 // 本地数据结构（BPF maps 内部存储用）
 // ============================================================================
 
-// offcpu_key：off-CPU 追踪记录的键
-// pid+tid 组合唯一标识一个任务
+// offcpu_key：off-CPU 追踪记录的键（仅用 tid，系统唯一）
 struct offcpu_key {
-    __u32 pid;  // 进程 ID（tgid）
-    __u32 tid;  // 线程 ID（pid）
+    __u32 tid;  // 线程 ID（内核 task->pid，系统范围内唯一）
 };
 
 // offcpu_val：off-CPU 追踪记录的值
-// 记录任务离开 CPU 时的快照信息：时间、调用栈、任务名
 struct offcpu_val {
     __u64 timestamp_ns;          // 离开 CPU 的时间戳
-    __s32 kernel_stack_id;       // 内核调用栈 ID（阻塞发生时的内核栈）
-    __s32 user_stack_id;         // 用户态调用栈 ID（阻塞发生时的用户栈）
-    char comm[TASK_COMM_LEN];    // 任务名称
+    __u32 tgid;                  // 进程组 ID（用户态 PID）
+    __s32 kernel_stack_id;       // 内核调用栈 ID
+    __s32 user_stack_id;         // 用户态调用栈 ID
+    char comm[TASK_COMM_LEN];    // 线程名称
 };
 
 // ============================================================================
@@ -70,10 +68,11 @@ struct {
     __uint(max_entries, IL_RINGBUF_SIZE);
 } offcpu_events SEC(".maps");
 
-// offcpu_stats：内核侧聚合 map（按 stack key 聚合 off-CPU 时长和计数）
-// 用户态定期 batch 读取并清空，避免 sched 热路径上频繁 ringbuf 推送
+// offcpu_stats：内核侧聚合 map（按 tgid+tid+stack 聚合 off-CPU 时长和计数）
+// 包含 tid 以区分同进程内不同线程的 off-CPU 行为
 struct offcpu_stat_key {
-    __u32 pid;
+    __u32 tgid;             // 进程组 ID
+    __u32 tid;              // 线程 ID
     __s32 kernel_stack_id;
     __s32 user_stack_id;
 };
@@ -82,7 +81,7 @@ struct offcpu_stat_val {
     __u64 total_ns;         // 累计 off-CPU 时长
     __u32 count;            // 事件计数
     __u32 cpu;              // 最近一次 CPU
-    char comm[TASK_COMM_LEN];
+    char comm[TASK_COMM_LEN];  // 线程名
 };
 
 struct {
@@ -110,8 +109,8 @@ struct {
 } offcpu_stacks SEC(".maps");
 
 // offcpu_start：未完成的 off-CPU 等待记录
-// key=(pid, tid)，value=离开 CPU 时的快照
-// 当任务重新回到 CPU 时，按 key 查找并计算时长
+// key=tid（系统唯一），value=离开 CPU 时的快照（含 tgid）
+// 当任务重新回到 CPU 时，按 tid 查找并计算时长
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 65536);
@@ -203,29 +202,37 @@ int trace_offcpu(struct trace_event_raw_sched_switch *ctx) {
     // ============================================================
     // 阶段 1：处理切出的任务（记录 off-CPU 开始快照）
     // ============================================================
-    __u32 prev_pid = ctx->prev_pid;
-    if (prev_pid == 0)
+    __u32 prev_tid = ctx->prev_pid;  // tracepoint 的 prev_pid 实际是 TID
+    if (prev_tid == 0)
         goto phase2;
 
-    // PID 白名单过滤（flags bit2=4）：非目标进程直接跳过
+    // 获取 tgid（进程组 ID）— sched_switch 中 current 就是 prev
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 prev_tgid = pid_tgid >> 32;
+
+    // PID 白名单过滤（flags bit2=4）：用 tgid 匹配，捕获进程的所有线程
     if (flags & 4) {
-        if (!bpf_map_lookup_elem(&offcpu_target_pids, &prev_pid))
+        if (!bpf_map_lookup_elem(&offcpu_target_pids, &prev_tgid))
             goto phase2;
     }
 
-    // 进程名白名单过滤（flags bit3=8）：非目标进程名直接跳过
+    // 进程名白名单过滤（flags bit3=8）：读取 group_leader->comm（主线程名）
+    // 确保多线程程序的所有线程都能匹配（不管线程自身 comm 如何改变）
     if (flags & 8) {
-        char comm[TASK_COMM_LEN];
-        __builtin_memset(comm, 0, sizeof(comm));
-        bpf_get_current_comm(&comm, sizeof(comm));
-        if (!bpf_map_lookup_elem(&offcpu_target_comms, &comm))
+        struct task_struct *task = (void *)bpf_get_current_task();
+        char leader_comm[TASK_COMM_LEN];
+        __builtin_memset(leader_comm, 0, sizeof(leader_comm));
+        bpf_probe_read_kernel_str(&leader_comm, sizeof(leader_comm),
+                                  BPF_CORE_READ(task, group_leader, comm));
+        if (!bpf_map_lookup_elem(&offcpu_target_comms, &leader_comm))
             goto phase2;
     }
 
     {
-        struct offcpu_key key = {.pid = prev_pid, .tid = prev_pid};
+        struct offcpu_key key = {.tid = prev_tid};
         struct offcpu_val val = {};
         val.timestamp_ns = ts;
+        val.tgid = prev_tgid;
 
         // 内核堆栈
         if (flags & 2) {
@@ -250,7 +257,8 @@ int trace_offcpu(struct trace_event_raw_sched_switch *ctx) {
             val.user_stack_id = -1;
         }
 
-        bpf_probe_read_kernel_str(&val.comm, sizeof(val.comm), ctx->prev_comm);
+        // 保存线程自身的 comm（用于聚合时标识具体线程）
+        bpf_get_current_comm(&val.comm, sizeof(val.comm));
         bpf_map_update_elem(&offcpu_start, &key, &val, BPF_ANY);
     }
 
@@ -260,11 +268,11 @@ phase2:
     // 设计参考 perf_ebpf：内核 map 聚合 + 低频信号通知用户态
     // ============================================================
     ;
-    __u32 next_pid = ctx->next_pid;
-    if (next_pid == 0)
+    __u32 next_tid = ctx->next_pid;  // tracepoint 的 next_pid 实际是 TID
+    if (next_tid == 0)
         return 0;
 
-    struct offcpu_key next_key = {.pid = next_pid, .tid = next_pid};
+    struct offcpu_key next_key = {.tid = next_tid};
     struct offcpu_val *start = bpf_map_lookup_elem(&offcpu_start, &next_key);
     if (!start)
         return 0;
@@ -277,9 +285,10 @@ phase2:
         return 0;
     }
 
-    // 聚合到 offcpu_stats map（按 pid+stack_key 聚合）
+    // 聚合到 offcpu_stats map（按 tgid+tid+stack 聚合，区分线程）
     struct offcpu_stat_key skey = {
-        .pid = next_pid,
+        .tgid = start->tgid,
+        .tid = next_tid,
         .kernel_stack_id = start->kernel_stack_id,
         .user_stack_id = start->user_stack_id,
     };
@@ -301,7 +310,6 @@ phase2:
     __u32 sig_k = 0;
     __u64 *last_signal = bpf_map_lookup_elem(&offcpu_signal_ts, &sig_k);
     if (!last_signal || (ts - *last_signal) >= 1000000000ULL) {
-        // 发送轻量信号事件（仅 timestamp，无负载）
         struct il_offcpu_event *e =
             bpf_ringbuf_reserve(&offcpu_events, sizeof(*e), 0);
         if (e) {
