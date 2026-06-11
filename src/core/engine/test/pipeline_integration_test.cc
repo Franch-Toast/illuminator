@@ -229,5 +229,99 @@ TEST(PipelineIntegrationTest, RunProcessorsDirectlyAppliesProcessorChain) {
     EXPECT_EQ(result.value(), batch);
 }
 
+// MockPushSource: 模拟 Push-mode 数据源（如 eBPF 探针）
+class MockPushSource : public SourcePlugin {
+public:
+    const char* Name() const override { return "mock_push_source"; }
+    const char* Version() const override { return "0.1.0"; }
+    bool IsPushMode() const override { return true; }
+
+    Status Start() override {
+        running_ = true;
+        push_thread_ = std::thread([this] {
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (callback_) {
+                    auto batch = std::make_shared<DataBatch>(
+                        DataBatch::Type::kProfile);
+                    auto& s = batch->AddStackSample();
+                    s.pid = 1234;
+                    s.tid = 1234;
+                    s.count = 1;
+                    callback_(std::move(batch));
+                    push_count_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+        return Status::Ok();
+    }
+
+    Status Stop() override {
+        running_ = false;
+        if (push_thread_.joinable())
+            push_thread_.join();
+        return Status::Ok();
+    }
+
+    uint64_t PushCount() const { return push_count_.load(); }
+
+private:
+    std::atomic<bool> running_{false};
+    std::atomic<uint64_t> push_count_{0};
+    std::thread push_thread_;
+};
+
+// 测试：Push-mode 源在 PipelineController 中正确工作（含启动延迟路径）
+TEST(PipelineIntegrationTest, PushModeSourceWorksWithStartupDelay) {
+    PipelineController controller;
+
+    auto pipe = std::make_unique<Pipeline>("test_push_mode");
+    pipe->SetSource(std::make_unique<MockPushSource>());
+
+    auto sink = std::make_unique<MockSink>();
+    auto* sink_ptr = sink.get();
+    pipe->AddSink(std::move(sink));
+
+    controller.AddPipeline(std::move(pipe));
+    controller.InitSinkPool(2);
+    controller.InitCollectPool(1);
+
+    ASSERT_TRUE(controller.StartAll().ok());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+    ASSERT_TRUE(controller.StopAll().ok());
+
+    EXPECT_GT(sink_ptr->WriteCount(), 0u);
+}
+
+// 测试：多个 Push-mode 源的启动延迟确保顺序启动
+TEST(PipelineIntegrationTest, MultiplePushModeSourcesStartSequentially) {
+    PipelineController controller;
+
+    auto create_push_pipeline = [](const std::string& name) {
+        auto pipe = std::make_unique<Pipeline>(name);
+        pipe->SetSource(std::make_unique<MockPushSource>());
+        pipe->AddSink(std::make_unique<MockSink>());
+        return pipe;
+    };
+
+    controller.AddPipeline(create_push_pipeline("push_1"));
+    controller.AddPipeline(create_push_pipeline("push_2"));
+    controller.AddPipeline(create_push_pipeline("push_3"));
+    controller.InitSinkPool(2);
+    controller.InitCollectPool(1);
+
+    auto start_time = std::chrono::steady_clock::now();
+    ASSERT_TRUE(controller.StartAll().ok());
+    auto elapsed = std::chrono::steady_clock::now() - start_time;
+
+    // 3 个 push-mode 管道应有 3 * 100ms ≈ 300ms+ 延迟
+    EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 280);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(controller.StopAll().ok());
+}
+
 }  // namespace
 }  // namespace illuminator

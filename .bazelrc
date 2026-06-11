@@ -3,6 +3,9 @@ build --host_cxxopt=-std=c++2a
 build --copt=-Wall
 build --copt=-Wextra
 build --copt=-Wno-unused-parameter
+# BPF user-stack unwinding 需要 frame pointer; 保留符号表用于堆栈解析
+build --copt=-fno-omit-frame-pointer
+build --strip=never
 
 # Version stamping — injects git tag/commit into build artifacts
 build --workspace_status_command=tools/workspace_status.sh

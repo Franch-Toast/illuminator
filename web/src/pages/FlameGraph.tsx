@@ -95,7 +95,7 @@ export default function FlameGraph() {
     setLoading(true)
     try {
       const pipeData = await api.pipelines()
-      const pName = profileType === 'offcpu' ? 'offcpu_analysis' : 'cpu_profile'
+      const pName = profileType === 'offcpu' ? 'offcpu_profile' : 'cpu_profile'
       const pipeline = (pipeData.pipelines || []).find((p: { name: string; stub?: boolean }) => p.name === pName)
       if (pipeline?.stub) {
         setStub(true)

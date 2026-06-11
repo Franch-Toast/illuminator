@@ -47,6 +47,7 @@ public:
     }
 
     virtual bool IsPushMode() const { return false; }
+    virtual bool HasBpfProbe() const { return false; }
     virtual uint32_t IntervalMs() const { return 1000; }
 
     // 反压通知：当下游处理速度跟不上时，Pipeline 会调用此方法。

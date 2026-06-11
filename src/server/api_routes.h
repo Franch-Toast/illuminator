@@ -140,7 +140,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
             });
     srv.Get("/api/v1/cpu/profile/offcpu",
             [pipeline_collect](const httplib::Request&, httplib::Response& res) {
-                pipeline_collect("offcpu_analysis", res);
+                pipeline_collect("offcpu_profile", res);
             });
     srv.Get("/api/v1/cpu/sched/summary",
             [pipeline_collect](const httplib::Request&, httplib::Response& res) {
@@ -163,6 +163,10 @@ inline void RegisterApiRoutes(httplib::Server& srv,
         res.set_content(*result + "\n", "application/json");
     };
 
+    srv.Get("/api/v1/cpu/profile/offcpu/snapshot",
+            [query_handler](const httplib::Request& req, httplib::Response& res) {
+                query_handler("offcpu_profile", "snapshot", req, res);
+            });
     srv.Get("/api/v1/cpu/sched/history",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("sched_analysis", "history", req, res);

@@ -94,6 +94,13 @@ Status PipelineController::StartAll() {
             StopAll();
             return status;
         }
+        // 含 BPF 探针的管道在启动间添加延迟，避免多个 BPF 程序
+        // 同时挂载到调度器热路径导致内核瞬时过载
+        if (pipeline->GetSource() &&
+            (pipeline->GetSource()->IsPushMode() ||
+             pipeline->GetSource()->HasBpfProbe())) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
     }
 
     // Register Pull-mode sources as TimerWheel collect events

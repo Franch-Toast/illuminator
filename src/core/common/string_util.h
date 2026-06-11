@@ -29,17 +29,21 @@ inline std::vector<T> ParseCommaSeparated(std::string_view input) {
             token.remove_suffix(1);
 
         if (!token.empty()) {
-            try {
-                if constexpr (std::is_same_v<T, uint32_t>) {
-                    result.push_back(static_cast<uint32_t>(std::stoul(std::string(token))));
-                } else if constexpr (std::is_same_v<T, int>) {
-                    result.push_back(std::stoi(std::string(token)));
-                } else {
-                    result.push_back(static_cast<T>(std::stoll(std::string(token))));
+            if constexpr (std::is_same_v<T, std::string>) {
+                result.emplace_back(token);
+            } else {
+                try {
+                    if constexpr (std::is_same_v<T, uint32_t>) {
+                        result.push_back(static_cast<uint32_t>(std::stoul(std::string(token))));
+                    } else if constexpr (std::is_same_v<T, int>) {
+                        result.push_back(std::stoi(std::string(token)));
+                    } else {
+                        result.push_back(static_cast<T>(std::stoll(std::string(token))));
+                    }
+                } catch (...) {
+                    IL_WARN("ParseCommaSeparated: failed to parse token '{}'",
+                            std::string(token));
                 }
-            } catch (...) {
-                IL_WARN("ParseCommaSeparated: failed to parse token '{}'",
-                        std::string(token));
             }
         }
         pos = (end == input.size()) ? end : end + 1;

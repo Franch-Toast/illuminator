@@ -142,6 +142,7 @@ cc_library(
         "//src/ebpf:stack_trace_util",
         "//src/plugin:api",
         "//src/plugin:manager",
+        "@nlohmann_json//:json",
     ],
 )
 

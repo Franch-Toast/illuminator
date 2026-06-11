@@ -64,11 +64,42 @@ struct offcpu_val {
 // BPF Maps 定义
 // ============================================================================
 
-// offcpu_events：Off-CPU 事件 ring buffer
+// offcpu_events：Off-CPU 事件 ring buffer（低频信号通道）
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, IL_RINGBUF_SIZE);
 } offcpu_events SEC(".maps");
+
+// offcpu_stats：内核侧聚合 map（按 stack key 聚合 off-CPU 时长和计数）
+// 用户态定期 batch 读取并清空，避免 sched 热路径上频繁 ringbuf 推送
+struct offcpu_stat_key {
+    __u32 pid;
+    __s32 kernel_stack_id;
+    __s32 user_stack_id;
+};
+
+struct offcpu_stat_val {
+    __u64 total_ns;         // 累计 off-CPU 时长
+    __u32 count;            // 事件计数
+    __u32 cpu;              // 最近一次 CPU
+    char comm[TASK_COMM_LEN];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 16384);
+    __type(key, struct offcpu_stat_key);
+    __type(value, struct offcpu_stat_val);
+} offcpu_stats SEC(".maps");
+
+// offcpu_signal_ts：上次向用户态发送聚合信号的时间戳
+// 用于限流：最多 1 次/秒通知用户态
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} offcpu_signal_ts SEC(".maps");
 
 // offcpu_stacks：阻塞时的调用栈存储（去重）
 struct {
@@ -83,21 +114,61 @@ struct {
 // 当任务重新回到 CPU 时，按 key 查找并计算时长
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 65536);  // 支持 65536 个任务同时处于阻塞状态
+    __uint(max_entries, 65536);
     __type(key, struct offcpu_key);
     __type(value, struct offcpu_val);
 } offcpu_start SEC(".maps");
 
 // ============================================================================
-// min_duration_ns：最小 Off-CPU 时长阈值（volatile：用户态可动态配置）
-//
-// 只有阻塞时长 ≥ 此值的 off-CPU 事件才会被记录和推送。
-// 默认 100000ns (100μs)，过滤掉时间片到期的正常调度。
-//
-// volatile 关键字告知 BPF 编译器此变量可被用户态通过 map 修改。
-// 对于全局 volatile 变量，BPF 编译器不会常量折叠优化，确保动态性。
+// offcpu_cfg：运行时配置（用户态通过 bpf_map_update_elem 写入）
+//   index 0: flags
+//     bit0 = user_stacks 启用
+//     bit1 = kernel_stacks 启用
+//     bit2 = PID 白名单过滤启用
+//     bit3 = 进程名白名单过滤启用
+//     bit4 = 全局启用标志（0=禁用所有采集，用于启动延迟期）
+//   index 1: min_duration_ns 低 32 位
+//   index 2: min_duration_ns 高 32 位
 // ============================================================================
-const volatile __u64 min_duration_ns = 100000; // 100μs 默认值
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 3);
+    __type(key, __u32);
+    __type(value, __u32);
+} offcpu_cfg SEC(".maps");
+
+// offcpu_target_pids：PID 白名单 hash map（仅 cfg bit2 时生效）
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);
+    __type(value, __u8);
+} offcpu_target_pids SEC(".maps");
+
+// offcpu_target_comms：进程名白名单 hash map（仅 cfg bit3 时生效）
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 256);
+    __type(key, char[TASK_COMM_LEN]);
+    __type(value, __u8);
+} offcpu_target_comms SEC(".maps");
+
+static __always_inline __u32 offcpu_cfg_flags(void) {
+    __u32 k = 0;
+    __u32 *p = bpf_map_lookup_elem(&offcpu_cfg, &k);
+    if (p) return *p;
+    return 0;  // 默认: 全部禁用（需要用户态显式启用 bit4）
+}
+
+// 从 offcpu_cfg map（index 1/2）读取用户态配置的阈值，避免编译时固定
+static __always_inline __u64 offcpu_get_min_duration(void) {
+    __u32 k1 = 1, k2 = 2;
+    __u32 *lo = bpf_map_lookup_elem(&offcpu_cfg, &k1);
+    __u32 *hi = bpf_map_lookup_elem(&offcpu_cfg, &k2);
+    if (lo && hi)
+        return ((__u64)*hi << 32) | (__u64)*lo;
+    return 10000000;  // 默认 10ms
+}
 
 // ============================================================================
 // trace_offcpu：调度切换 tracepoint 处理函数
@@ -120,80 +191,129 @@ const volatile __u64 min_duration_ns = 100000; // 100μs 默认值
 // ============================================================================
 SEC("tracepoint/sched/sched_switch")
 int trace_offcpu(struct trace_event_raw_sched_switch *ctx) {
-    __u64 ts = bpf_ktime_get_ns();          // 当前时间
-    __u32 cpu = bpf_get_smp_processor_id(); // 当前 CPU 编号
+    __u32 flags = offcpu_cfg_flags();
+
+    // 全局使能检查（bit4）：启动延迟期或未配置时，完全跳过所有逻辑
+    if (!(flags & 16))
+        return 0;
+
+    __u64 ts = bpf_ktime_get_ns();
+    __u32 cpu = bpf_get_smp_processor_id();
 
     // ============================================================
     // 阶段 1：处理切出的任务（记录 off-CPU 开始快照）
     // ============================================================
     __u32 prev_pid = ctx->prev_pid;
-    if (prev_pid != 0) {
+    if (prev_pid == 0)
+        goto phase2;
+
+    // PID 白名单过滤（flags bit2=4）：非目标进程直接跳过
+    if (flags & 4) {
+        if (!bpf_map_lookup_elem(&offcpu_target_pids, &prev_pid))
+            goto phase2;
+    }
+
+    // 进程名白名单过滤（flags bit3=8）：非目标进程名直接跳过
+    if (flags & 8) {
+        char comm[TASK_COMM_LEN];
+        __builtin_memset(comm, 0, sizeof(comm));
+        bpf_get_current_comm(&comm, sizeof(comm));
+        if (!bpf_map_lookup_elem(&offcpu_target_comms, &comm))
+            goto phase2;
+    }
+
+    {
         struct offcpu_key key = {.pid = prev_pid, .tid = prev_pid};
         struct offcpu_val val = {};
-
-        // 记录离开 CPU 的时间戳
         val.timestamp_ns = ts;
 
-        // 在切出的瞬间抓取内核调用栈（定位"谁导致了阻塞"）
-        val.kernel_stack_id =
-            bpf_get_stackid(ctx, &offcpu_stacks, BPF_F_FAST_STACK_CMP);
+        // 内核堆栈
+        if (flags & 2) {
+            val.kernel_stack_id =
+                bpf_get_stackid(ctx, &offcpu_stacks, BPF_F_FAST_STACK_CMP);
+        } else {
+            val.kernel_stack_id = -1;
+        }
 
-        // 同时抓取用户态调用栈（定位业务代码中导致阻塞的位置）
-        val.user_stack_id = bpf_get_stackid(
-            ctx, &offcpu_stacks, BPF_F_FAST_STACK_CMP | BPF_F_USER_STACK);
+        // 用户态堆栈 — 跳过内核线程（PF_KTHREAD = 0x00200000）
+        if (flags & 1) {
+            struct task_struct *task = (void *)bpf_get_current_task();
+            __u32 task_flags = BPF_CORE_READ(task, flags);
+            if (task_flags & 0x00200000) {
+                val.user_stack_id = -1;
+            } else {
+                val.user_stack_id = bpf_get_stackid(
+                    ctx, &offcpu_stacks,
+                    BPF_F_FAST_STACK_CMP | BPF_F_USER_STACK);
+            }
+        } else {
+            val.user_stack_id = -1;
+        }
 
-        // 安全读取任务名（通过 bpf_probe_read_kernel_str 从内核内存复制）
         bpf_probe_read_kernel_str(&val.comm, sizeof(val.comm), ctx->prev_comm);
-
-        // 存入等待表，BPF_ANY 允许覆盖（如果之前的记录尚未被消费）
         bpf_map_update_elem(&offcpu_start, &key, &val, BPF_ANY);
     }
 
+phase2:
     // ============================================================
     // 阶段 2：处理切入的任务（检查并计算 off-CPU 时长）
+    // 设计参考 perf_ebpf：内核 map 聚合 + 低频信号通知用户态
     // ============================================================
+    ;
     __u32 next_pid = ctx->next_pid;
-    // 跳过空闲任务（没有意义去追踪 idle task 的 off-CPU）
     if (next_pid == 0)
         return 0;
 
-    // 在 offcpu_start 中查找该任务之前的离开记录
     struct offcpu_key next_key = {.pid = next_pid, .tid = next_pid};
     struct offcpu_val *start = bpf_map_lookup_elem(&offcpu_start, &next_key);
     if (!start)
-        return 0;  // 没有之前的记录（可能是首次被调度）
+        return 0;
 
-    // 计算 off-CPU 时长
     __u64 duration = ts - start->timestamp_ns;
 
-    // 应用最小值过滤：太短的时间片切换不关注
-    if (duration < min_duration_ns) {
+    __u64 threshold = offcpu_get_min_duration();
+    if (duration < threshold) {
         bpf_map_delete_elem(&offcpu_start, &next_key);
         return 0;
     }
 
-    // -----------------------------------------------------------
-    // 构造 off-CPU 事件并推送
-    // -----------------------------------------------------------
-    struct il_offcpu_event *e =
-        bpf_ringbuf_reserve(&offcpu_events, sizeof(*e), 0);
-    if (!e) {
-        // ring buffer 满：丢弃事件，但必须清理 map 以防泄漏
-        bpf_map_delete_elem(&offcpu_start, &next_key);
-        return 0;
+    // 聚合到 offcpu_stats map（按 pid+stack_key 聚合）
+    struct offcpu_stat_key skey = {
+        .pid = next_pid,
+        .kernel_stack_id = start->kernel_stack_id,
+        .user_stack_id = start->user_stack_id,
+    };
+    struct offcpu_stat_val *existing = bpf_map_lookup_elem(&offcpu_stats, &skey);
+    if (existing) {
+        __sync_fetch_and_add(&existing->total_ns, duration);
+        __sync_fetch_and_add(&existing->count, 1);
+        existing->cpu = cpu;
+    } else {
+        struct offcpu_stat_val newval = {};
+        newval.total_ns = duration;
+        newval.count = 1;
+        newval.cpu = cpu;
+        __builtin_memcpy(newval.comm, start->comm, TASK_COMM_LEN);
+        bpf_map_update_elem(&offcpu_stats, &skey, &newval, BPF_NOEXIST);
     }
 
-    e->timestamp_ns = start->timestamp_ns;  // 阻塞开始时间
-    e->pid = next_pid;
-    e->tid = next_pid;
-    e->cpu = cpu;
-    e->duration_ns = duration;              // 阻塞持续时长（核心指标）
-    e->kernel_stack_id = start->kernel_stack_id;
-    e->user_stack_id = start->user_stack_id;
-    __builtin_memcpy(e->comm, start->comm, TASK_COMM_LEN);
+    // 低频信号：最多 1 次/秒通知用户态消费 offcpu_stats
+    __u32 sig_k = 0;
+    __u64 *last_signal = bpf_map_lookup_elem(&offcpu_signal_ts, &sig_k);
+    if (!last_signal || (ts - *last_signal) >= 1000000000ULL) {
+        // 发送轻量信号事件（仅 timestamp，无负载）
+        struct il_offcpu_event *e =
+            bpf_ringbuf_reserve(&offcpu_events, sizeof(*e), 0);
+        if (e) {
+            __builtin_memset(e, 0, sizeof(*e));
+            e->timestamp_ns = ts;
+            e->pid = 0;  // pid=0 标识为聚合信号
+            bpf_ringbuf_submit(e, 0);
+        }
+        __u64 now = ts;
+        bpf_map_update_elem(&offcpu_signal_ts, &sig_k, &now, BPF_ANY);
+    }
 
-    // 提交事件并清理追踪记录
-    bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&offcpu_start, &next_key);
     return 0;
 }

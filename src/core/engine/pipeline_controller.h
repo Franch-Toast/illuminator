@@ -407,6 +407,10 @@ public:
         return pipelines_;
     }
 
+    void AddPipeline(std::unique_ptr<Pipeline> pipeline) {
+        pipelines_.push_back(std::move(pipeline));
+    }
+
     void InitSinkPool(size_t num_threads = 0) {
         if (num_threads == 0) {
             num_threads = std::max(2u, std::thread::hardware_concurrency() / 2);

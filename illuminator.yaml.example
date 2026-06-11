@@ -165,31 +165,41 @@ pipelines:
       - type: websocket_sink
 
   # ===========================================================================
-  # Off-CPU 剖析 — 追踪线程阻塞/等待时间 (Push)
-  # 默认注释: 开启后有额外开销, 按需启用
+  # Off-CPU 剖析 — 追踪线程阻塞/等待时间 (Pull + BPF 聚合)
+  # ⚠️  安全注意: 此探针挂载到 sched_switch 热路径，详见 docs/ebpf_safety_guide.md
+  #
+  # 安全机制（参考 perf_ebpf 设计）:
+  #   1. 启动延迟: start_delay_seconds 期间完全不采集（bit4 使能）
+  #   2. BPF 层 PID/进程名白名单: 非目标进程直接跳过，零开销
+  #   3. 内核线程自动跳过用户态栈展开
+  #   4. min_duration_us 运行时可配（写入 BPF map）
+  #   5. BPF 层 map 聚合 + 1Hz 信号通知用户态（非 per-event ringbuf 推送）
+  #   6. 多核系统 (>32核) 建议 user_stacks: false
   # ===========================================================================
-  # offcpu_profile:
-  #   source:
-  #     type: offcpu_profiler
-  #     config:
-  #       min_duration_us: 100        # 最小阻塞时长 (微秒)
-  #       user_stacks: true
-  #       kernel_stacks: true
-  #       target_comms: "planning,perception"
-  #       bpf_object: bazel-bin/src/ebpf/probes/offcpu_profiler.bpf.o
-  #   processors:
-  #     - type: stack_symbolizer
-  #       config:
-  #         demangle: true
-  #     - type: stack_merger
-  #       config:
-  #         group_by: comm
-  #   sinks:
-  #     - type: local_storage
-  #       config:
-  #         backend: sqlite
-  #         path: /tmp/illuminator_data
-  #         pipeline: offcpu_profile
+  offcpu_profile:
+    source:
+      type: offcpu_profiler
+      config:
+        min_duration_us: 10000        # 10ms — 只关注有意义的长阻塞（BPF 运行时读取）
+        start_delay_seconds: 3        # 启动延迟（秒），等系统稳定后再采集
+        user_stacks: true             # ⚠️ 多核(>32核)系统建议 false
+        kernel_stacks: true
+        target_pids: ""               # 逗号分隔 PID 白名单（空=不按 PID 过滤）
+        target_comms: "illuminator"   # 逗号分隔进程名白名单（推荐配置）
+        bpf_object: bazel-bin/src/ebpf/probes/offcpu_profiler.bpf.o
+    processors:
+      - type: stack_symbolizer
+        config:
+          demangle: true
+      - type: stack_merger
+        config:
+          group_by: comm
+    sinks:
+      - type: local_storage
+        config:
+          backend: sqlite
+          path: /tmp/illuminator_data
+          pipeline: offcpu_profile
 
   # ===========================================================================
   # I/O 监控 — eBPF 追踪文件/块设备 I/O (Push)

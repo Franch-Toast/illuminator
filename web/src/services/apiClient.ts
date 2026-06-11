@@ -32,7 +32,7 @@ export const api = {
   cpuUtilization: () => get('/api/v1/cpu/utilization'),
   cpuProcesses: () => get('/api/v1/cpu/processes'),
   cpuProfileFlamegraph: () => get('/api/v1/cpu/profile/flamegraph'),
-  cpuProfileOffcpu: () => get('/api/v1/cpu/profile/offcpu'),
+  cpuProfileOffcpu: () => get('/api/v1/cpu/profile/offcpu/snapshot'),
   schedSummary: () => get('/api/v1/cpu/sched/summary'),
   schedHistory: () => get<{ history?: HistoryPoint[] }>('/api/v1/cpu/sched/history'),
   schedEvents: (limit = 500, pid?: number) => {
