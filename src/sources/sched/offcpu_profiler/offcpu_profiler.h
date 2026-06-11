@@ -61,10 +61,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <cxxabi.h>
+#include <elf.h>
 #include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -479,80 +481,230 @@ private:
     std::string ResolveUserSymbol(uint32_t pid, uint64_t addr) {
         auto now = std::chrono::steady_clock::now();
 
-        auto it = maps_cache_.find(pid);
+        // 自 PID 检测：使用规范化的 key 确保自分析始终使用 /proc/self/maps
+        uint32_t cache_key = IsSelfPid(pid) ? self_pid_ : pid;
+
+        auto it = maps_cache_.find(cache_key);
         if (it == maps_cache_.end()) {
             MapsCacheEntry entry;
-            if (!LoadProcMaps(pid, entry))
+            if (!LoadProcMaps(cache_key, entry))
                 return {};
-            auto ins = maps_cache_.emplace(pid, std::move(entry));
+            auto ins = maps_cache_.emplace(cache_key, std::move(entry));
             it = ins.first;
         } else {
             auto age = std::chrono::duration_cast<std::chrono::seconds>(
                 now - it->second.loaded_at).count();
             if (age > 30) {
-                LoadProcMaps(pid, it->second);
+                LoadProcMaps(cache_key, it->second);
             }
         }
 
         for (const auto& m : it->second.maps) {
             if (addr < m.start || addr >= m.end)
                 continue;
-            uint64_t off = addr - m.start + m.offset;
+
+            // 处理特殊映射：[vdso], [vsyscall], [heap], [stack] 等
+            if (!m.path.empty() && m.path[0] == '[') {
+                if (m.path == "[vdso]")
+                    return "__vdso_clock_gettime [vdso]";
+                if (m.path == "[vsyscall]")
+                    return "[vsyscall]";
+                return m.path;
+            }
+
+            uint64_t file_off = addr - m.start + m.offset;
+            uint64_t map_off = addr - m.start;
             auto elf_it = elf_cache_.find(m.path);
             if (elf_it == elf_cache_.end()) {
                 ElfSymbolCache cache;
                 if (!cache.Load(m.path)) {
-                    char buf[256];
-                    std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
-                                  m.path.c_str(),
-                                  static_cast<unsigned long long>(addr - m.start));
-                    return std::string(buf);
+                    if (!TryLoadDebugInfo(m.path, cache)) {
+                        std::string annotation = AnnotateLibraryOffset(m.path, file_off, map_off);
+                        if (!annotation.empty())
+                            return annotation;
+                        char buf[256];
+                        std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
+                                      m.path.c_str(),
+                                      static_cast<unsigned long long>(map_off));
+                        return std::string(buf);
+                    }
                 }
                 auto ins = elf_cache_.emplace(m.path, std::move(cache));
                 elf_it = ins.first;
             }
-            std::string sym = elf_it->second.Resolve(off);
+            std::string sym = elf_it->second.Resolve(file_off);
             if (!sym.empty()) {
+                // 如果是 "+gap" 标记的近似归属，清理后返回
+                if (sym.size() > 4 && sym.substr(sym.size() - 4) == "+gap") {
+                    sym = sym.substr(0, sym.size() - 4);
+                    return DemangleSymbol(sym) + " [+gap]";
+                }
                 return DemangleSymbol(sym);
             }
+            // 尝试已知库函数近似标注
+            std::string annotation = AnnotateLibraryOffset(m.path, file_off, map_off);
+            if (!annotation.empty())
+                return annotation;
             char buf[256];
             std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
                           m.path.c_str(),
-                          static_cast<unsigned long long>(addr - m.start));
+                          static_cast<unsigned long long>(map_off));
             return std::string(buf);
         }
         return {};
     }
 
-    // PID 命名空间感知的 maps 加载：
-    // BPF 返回 init namespace PID，但 /proc/ 只显示当前 namespace 的 PID。
-    // 当 /proc/<bpf_pid>/maps 不存在时，回退到 /proc/self/maps（自分析场景）。
-    // 对于外部进程，扫描 /proc/ 查找匹配的进程。
+    // 判断 BPF 报告的 PID 是否为当前进程（考虑 PID namespace 差异）
+    bool IsSelfPid(uint32_t pid) const {
+        if (pid == self_pid_) return true;
+        // 如果 /proc/<pid> 不存在但 comm 匹配，视为自身
+        std::string status_path = "/proc/" + std::to_string(pid) + "/status";
+        std::ifstream f(status_path);
+        return !f.good();  // PID 不存在意味着可能是 namespace 差异
+    }
+
+    // PID 命名空间感知的 maps 加载
     bool LoadProcMaps(uint32_t pid, MapsCacheEntry& entry) {
         entry.maps.clear();
 
-        std::string path = "/proc/" + std::to_string(pid) + "/maps";
+        std::string path;
+        if (pid == self_pid_) {
+            path = "/proc/self/maps";
+        } else {
+            path = "/proc/" + std::to_string(pid) + "/maps";
+        }
+
         std::ifstream f(path);
         if (!f) {
-            // PID namespace fallback: BPF 报告的 init ns PID 在当前 ns 不可见
-            // 尝试 /proc/self/maps（覆盖自分析最常见场景）
-            f.open("/proc/self/maps");
-            if (!f) return false;
-            if (!self_maps_logged_) {
-                IL_INFO("offcpu_profiler: using /proc/self/maps for pid {} "
-                        "(pid namespace detected)", pid);
-                self_maps_logged_ = true;
+            // PID namespace fallback: 当 /proc/<pid>/maps 不可读时尝试 /proc/self/maps
+            if (pid != self_pid_) {
+                f.open("/proc/self/maps");
+                if (!f) return false;
+                if (!self_maps_logged_) {
+                    IL_INFO("offcpu_profiler: using /proc/self/maps for pid {} "
+                            "(pid namespace or stale PID)", pid);
+                    self_maps_logged_ = true;
+                }
+            } else {
+                return false;
             }
         }
         std::string line;
         while (std::getline(f, line)) {
             ProcMapEntry m{};
             if (!ParseProcMapsLine(line, &m)) continue;
-            if (m.path.empty() || m.path[0] != '/') continue;
+            // 保留 / 开头的文件路径和 [ 开头的特殊映射（[vdso] 等）
+            if (m.path.empty()) continue;
+            if (m.path[0] != '/' && m.path[0] != '[') continue;
             entry.maps.push_back(std::move(m));
         }
         entry.loaded_at = std::chrono::steady_clock::now();
         return !entry.maps.empty();
+    }
+
+    // 尝试从 /usr/lib/debug/.build-id/ 或 debuglink 加载外部调试符号
+    bool TryLoadDebugInfo(const std::string& elf_path, ElfSymbolCache& cache) {
+        // 策略 1: build-id 查找（最准确且与路径无关）
+        std::string build_id = ExtractBuildId(elf_path);
+        if (build_id.size() >= 4) {
+            std::string bid_path = "/usr/lib/debug/.build-id/"
+                + build_id.substr(0, 2) + "/" + build_id.substr(2) + ".debug";
+            if (cache.Load(bid_path)) return true;
+        }
+
+        // 策略 2: /usr/lib/debug + 原路径
+        std::string debug_path = "/usr/lib/debug" + elf_path + ".debug";
+        if (cache.Load(debug_path)) return true;
+        debug_path = "/usr/lib/debug" + elf_path;
+        if (cache.Load(debug_path)) return true;
+
+        // 策略 3: 同目录 .debug 子目录
+        auto last_slash = elf_path.rfind('/');
+        if (last_slash != std::string::npos) {
+            std::string dir = elf_path.substr(0, last_slash + 1);
+            std::string base = elf_path.substr(last_slash + 1);
+            debug_path = dir + ".debug/" + base + ".debug";
+            if (cache.Load(debug_path)) return true;
+            debug_path = dir + ".debug/" + base;
+            if (cache.Load(debug_path)) return true;
+        }
+        return false;
+    }
+
+    // 从 ELF 文件提取 .note.gnu.build-id 十六进制字符串
+    static std::string ExtractBuildId(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return {};
+        std::vector<char> buf((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+        if (buf.size() < sizeof(Elf64_Ehdr)) return {};
+        auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(buf.data());
+        if (ehdr->e_ident[EI_MAG0] != ELFMAG0) return {};
+        if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
+            return {};
+        auto* shdrs = reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
+        for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
+            if (shdrs[i].sh_type != SHT_NOTE) continue;
+            if (shdrs[i].sh_offset + shdrs[i].sh_size > buf.size()) continue;
+            const char* nd = buf.data() + shdrs[i].sh_offset;
+            size_t rem = shdrs[i].sh_size;
+            size_t pos = 0;
+            while (pos + 12 <= rem) {
+                uint32_t namesz = *reinterpret_cast<const uint32_t*>(nd + pos);
+                uint32_t descsz = *reinterpret_cast<const uint32_t*>(nd + pos + 4);
+                uint32_t type = *reinterpret_cast<const uint32_t*>(nd + pos + 8);
+                size_t name_start = pos + 12;
+                size_t name_aligned = (namesz + 3) & ~3u;
+                size_t desc_start = name_start + name_aligned;
+                size_t desc_aligned = (descsz + 3) & ~3u;
+                if (desc_start + descsz > rem) break;
+                if (type == 3 && namesz == 4 &&
+                    std::memcmp(nd + name_start, "GNU", 4) == 0) {
+                    std::string hex;
+                    hex.reserve(descsz * 2);
+                    for (size_t j = 0; j < descsz; ++j) {
+                        char h[3];
+                        std::snprintf(h, sizeof(h), "%02x",
+                                      static_cast<uint8_t>(nd[desc_start + j]));
+                        hex += h;
+                    }
+                    return hex;
+                }
+                pos = desc_start + desc_aligned;
+            }
+        }
+        return {};
+    }
+
+    // 对无法解析的库内部地址提供友好的近似标注
+    // 接受两个偏移：file_off（文件偏移，用于 nm 地址空间比较）和 map_off（仅供参考）
+    // 使用 file_off 进行已知函数地址范围匹配
+    std::string AnnotateLibraryOffset(const std::string& lib_path,
+                                      uint64_t file_off, uint64_t /*map_off*/) {
+        if (lib_path.find("libstdc++") != std::string::npos) {
+            // execute_native_thread_routine（gcc/libstdc++ std::thread 入口）
+            // 通常在 _M_start_thread (0xf7500-0xf7900) 附近 ±0x200
+            // file offset 在 0xf7000-0xf8000 范围（适配多版本 libstdc++6.0.30-35+）
+            if (file_off >= 0xf7000 && file_off < 0xf8000)
+                return "execute_native_thread_routine [libstdc++]";
+            // 备用范围：较老版本 libstdc++ (gcc 10-11)
+            if (file_off >= 0xd5000 && file_off < 0xd6000)
+                return "execute_native_thread_routine [libstdc++]";
+        }
+        if (lib_path.find("libc.so") != std::string::npos ||
+            lib_path.find("libc-") != std::string::npos) {
+            // start_thread (pthread_create 的入口) — glibc 2.35/2.36
+            if (file_off >= 0x94000 && file_off < 0x95000)
+                return "start_thread [glibc]";
+            // __clone3 / clone (thread creation syscall wrapper)
+            if (file_off >= 0x115000 && file_off < 0x116000)
+                return "__clone3 [glibc]";
+        }
+        if (lib_path.find("libpthread") != std::string::npos) {
+            if (file_off >= 0x8000 && file_off < 0x9000)
+                return "start_thread [libpthread]";
+        }
+        return {};
     }
 
     std::string DemangleSymbol(const std::string& sym) {
@@ -589,6 +741,7 @@ private:
     std::string latest_json_snapshot_ = "{\"stack_samples\":[]}";
 
     // ---- 内联符号解析器 ----
+    uint32_t self_pid_ = static_cast<uint32_t>(getpid());
     KernelSymbolResolver kernel_resolver_;
     bool kernel_resolver_loaded_ = false;
     bool self_maps_logged_ = false;

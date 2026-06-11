@@ -35,6 +35,8 @@ cc_library(
         "//src/core:engine",
         "//src/core:version",
         "//src/serialization:json_serializer",
+        "//src/sinks:recording_sink",
+        "//src/sinks:stream_sink",
         "//src/storage:storage",
         "//third_party/cpp-httplib",
     ],

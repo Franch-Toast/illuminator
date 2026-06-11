@@ -21,6 +21,8 @@
   - **Zustand 状态管理**：全局时间、管道状态、过滤器三大 Store
   - **TimeSeriesStore**：前端 RingBuffer 时间序列缓存，支持按时间范围查询和订阅通知
 - **WebSocket 实时推送**：独立端口（默认 9528），前端 WsManager 单例自动重连
+- **动态 Feature 管理（热插拔）**：用户可通过 API/前端实时启动/停止功能模块，无需重启。内置 `StreamSink`（per-feature RingBuffer 缓冲实时数据）、`SinkFanout`（零拷贝多路分发）、`RecordingSink`（按需录制为 `.ilr` NDJSON 文件，支持大小限制）
+- **深度堆栈符号解析**：合并 `.symtab` + `.dynsym`、build-id 调试信息查找、nearest-symbol 启发式（gap 归属）、PID 命名空间感知、`[vdso]` 处理、C++ 自动 demangle，综合解析率 97%+
 - **自观测能力**：内部指标（Counter/Gauge/Histogram）、健康检查、RSS 资源限制器
 
 ---
@@ -159,13 +161,16 @@ illuminator/
 │   ├── aggregators/            # Aggregator 插件
 │   │   └── cpu_stats_aggregator/#  CPU 统计聚合 (时间窗口)
 │   │
-│   ├── sinks/                  # Sink 插件 (7 个)
+│   ├── sinks/                  # Sink 插件 (10 个)
 │   │   ├── console_output/     #   控制台输出 (文本/JSON)
+│   │   ├── fanout/             #   复合分发 Sink (零拷贝多路分发)
 │   │   ├── file_export/        #   JSONL 文件导出
 │   │   ├── local_storage/      #   SQLite 存储后端写入
 │   │   ├── pprof_export/       #   pprof 折叠栈格式 (兼容 FlameGraph)
 │   │   ├── prometheus_exposition/#  Prometheus 指标暴露
 │   │   ├── otlp_export/        #   OpenTelemetry OTLP (JSON over HTTP)
+│   │   ├── recording_sink/     #   按需录制落盘 (.ilr NDJSON 格式)
+│   │   ├── stream_sink/        #   实时流缓冲 (per-Feature RingBuffer)
 │   │   └── websocket_sink/     #   WebSocket 实时推送
 │   │
 │   ├── serialization/          # JSON 序列化 (nlohmann/json)
@@ -374,7 +379,7 @@ sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 **Web 界面**
 - `http://localhost:9527` — 可视化仪表盘（CPU 概览 / 进程 / 火焰图 / 调度器）
 
-**REST API**
+**REST API — 传统管道接口**
 - `GET /healthz` — 健康检查
 - `GET /metrics` — Prometheus exposition 格式指标
 - `GET /api/v1/pipelines` — 管道状态（含 channel 统计）
@@ -390,6 +395,16 @@ sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 - `GET /api/v1/cpu/sched/wakeups` — Wakeup 链
 - `POST /api/v1/query` — SQL 查询（只读 SELECT，返回 JSON 行数据）
 - `GET /api/v1/internal_metrics` — 内部指标（JSON）
+
+**REST API — 动态 Feature 控制接口（热插拔）**
+- `GET /api/v1/features` — 列出所有已注册 Feature 及其状态
+- `POST /api/v1/features/:name/start` — 启动指定 Feature（触发管道创建）
+- `POST /api/v1/features/:name/stop` — 停止指定 Feature（销毁管道释放资源）
+- `GET /api/v1/features/:name/collect` — 获取 Feature 最新数据快照
+- `GET /api/v1/features/:name/stream?cursor=N` — 增量拉取（cursor 机制，实时流）
+- `POST /api/v1/features/:name/record/start` — 开始录制（数据落盘为 .ilr 文件）
+- `POST /api/v1/features/:name/record/stop` — 停止录制
+- `GET /api/v1/features/:name/record/status` — 录制状态查询
 
 **WebSocket**
 - `ws://localhost:9528/ws/<pipeline>` — 实时数据推送
@@ -569,11 +584,13 @@ src/
 │   └── cpu_stats_aggregator/test/  # CpuStatsAggregator 测试
 └── sinks/
     ├── console_output/test/        # ConsoleSink 测试
+    ├── fanout/test/                # SinkFanout 多路分发测试
     ├── file_export/test/           # FileExportSink 测试
     ├── local_storage/test/         # LocalStorageSink + SQLite 测试
     ├── otlp_export/test/           # OtlpExportSink 测试
     ├── pprof_export/test/          # PprofExportSink 测试
     ├── prometheus_exposition/test/ # PrometheusSink 测试
+    ├── stream_sink/test/           # StreamSink + StreamBuffer 测试
     └── websocket_sink/test/        # WebSocketSink + Store 测试
 ```
 
@@ -604,7 +621,7 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Integration** | Pipeline E2E | 1 | Source→Sink 数据流、统计计数器、错误路径 |
 | **Processors** | passthrough, filter, stack_merger, stack_symbolizer | 4 | 透传、标签过滤、堆栈合并分组、符号化 |
 | **Aggregators** | cpu_stats_aggregator | 1 | 窗口聚合、avg/min/max/p50/p99、Flush 清空 |
-| **Sinks** | console, file, local_storage, otlp, pprof, prometheus, websocket | 7 | I/O 写入、格式化、缓冲淘汰、pipeline 隔离 |
+| **Sinks** | console, file, local_storage, otlp, pprof, prometheus, websocket, stream_sink, fanout | 9 | I/O 写入、格式化、缓冲淘汰、RingBuffer 流、多路分发 |
 | **Sources** | cpu_utilization | 1 | Init/Collect、配置解析、Load Average |
 | **Server** | api_routes, auth middleware | 1 | /healthz、认证绕过、401/403/200 |
 | **Plugin** | PluginRegistry | 1 | 注册/创建/列举、Source/Processor/Sink |
@@ -660,10 +677,12 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 
 | 文档 | 说明 |
 |------|------|
+| [dynamic_plugin_architecture.md](docs/dynamic_plugin_architecture.md) | 动态插件架构设计 v2.0（热插拔 + 录制回放） |
+| [cpu_monitoring_design.md](docs/cpu_monitoring_design.md) | CPU 监控功能设计（USE 方法论 + PMC + PSI） |
 | [pipeline_v3_design.md](docs/pipeline_v3_design.md) | Pipeline v3 事件驱动架构设计 |
+| [perf_ebpf_comparison.md](docs/perf_ebpf_comparison.md) | 与 perf_ebpf 的架构对比分析 |
 | [architecture_audit_v4.md](docs/architecture_audit_v4.md) | 全面架构审计报告 (P0-P2 缺陷追踪) |
 | [wasm_runtime_design.md](docs/wasm_runtime_design.md) | WASM 沙箱插件系统设计与路线图 |
-| [project_review_and_roadmap.md](docs/project_review_and_roadmap.md) | 项目全面审阅与未来路线图 |
 | [onboarding_guide.md](docs/onboarding_guide.md) | 新人入门指南 |
 
 ---

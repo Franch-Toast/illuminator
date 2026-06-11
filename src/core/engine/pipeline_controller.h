@@ -430,6 +430,9 @@ public:
 
     TimerWheel& GetTimerWheel() { return timer_; }
 
+    ThreadPool* GetSinkPool() { return sink_pool_.get(); }
+    ThreadPool* GetCollectPool() { return collect_pool_.get(); }
+
     void SetStorageBackend(StorageBackend* backend) {
         storage_backend_ = backend;
     }

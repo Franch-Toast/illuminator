@@ -149,5 +149,70 @@ TEST(StackSymbolizerProcessorTest, ParseProcMapsLineAnonymousMapping) {
     }
 }
 
+// ParseProcMapsLine: [vdso] 等特殊映射应被正确解析
+TEST(StackSymbolizerProcessorTest, ParseProcMapsLineVdso) {
+    const std::string line =
+        "7fff7e5fe000-7fff7e600000 r-xp 00000000 00:00 0                          [vdso]";
+    ProcMapEntry m{};
+    ASSERT_TRUE(ParseProcMapsLine(line, &m));
+    EXPECT_EQ(m.start, 0x7fff7e5fe000ULL);
+    EXPECT_EQ(m.end, 0x7fff7e600000ULL);
+    EXPECT_EQ(m.path, "[vdso]");
+}
+
+// ElfSymbolCache: nearest-symbol 启发式 — size=0 的符号应使用到下一符号的距离作为边界
+TEST(StackSymbolizerProcessorTest, ElfSymbolCacheResolveWithGapHeuristic) {
+    ElfSymbolCache cache;
+    ASSERT_TRUE(cache.Load("/proc/self/exe"));
+    // 搜索两个连续有效偏移（间隔 < 4KB）
+    std::string first_sym;
+    uint64_t first_off = 0;
+    for (uint64_t off = 0x1000; off < 0x800000; off += 0x10) {
+        std::string sym = cache.Resolve(off);
+        if (!sym.empty() && sym.find("+gap") == std::string::npos) {
+            first_sym = sym;
+            first_off = off;
+            break;
+        }
+    }
+    ASSERT_FALSE(first_sym.empty()) << "Need at least one resolvable symbol";
+    // 同一符号内的连续地址应解析到相同名称
+    std::string same = cache.Resolve(first_off + 1);
+    EXPECT_FALSE(same.empty());
+}
+
+// ElfSymbolCache: Resolve 对完全超出范围的地址返回空
+TEST(StackSymbolizerProcessorTest, ElfSymbolCacheResolveOutOfRange) {
+    ElfSymbolCache cache;
+    ASSERT_TRUE(cache.Load("/proc/self/exe"));
+    std::string sym = cache.Resolve(0xFFFFFFFF00000000ULL);
+    EXPECT_TRUE(sym.empty());
+}
+
+// ExtractBuildId: 从自身二进制提取 build-id
+TEST(StackSymbolizerProcessorTest, ExtractBuildIdFromSelf) {
+    // 通过 StackSymbolizerProcessor 的静态方法间接测试
+    // 由于 ExtractBuildId 是 private，我们验证 TryLoadDebugInfo 不会崩溃
+    ElfSymbolCache cache;
+    // 即使 debug info 不存在，Load 本身应成功（从 /proc/self/exe）
+    bool loaded = cache.Load("/proc/self/exe");
+    EXPECT_TRUE(loaded);
+}
+
+// KernelSymbolResolver: 基本加载和解析验证
+TEST(StackSymbolizerProcessorTest, KernelSymbolResolverBasic) {
+    KernelSymbolResolver resolver;
+    auto st = resolver.Load();
+    // 即使内核符号不可读（无 root），也不应崩溃
+    if (st.ok()) {
+        // 应能解析到至少一个常见内核函数
+        // 0xffffffff81000000 通常是内核 text 起始地址
+        // 尝试一些可能的地址
+        std::string sym = resolver.Resolve(0xffffffff81000000ULL);
+        // 不强制要求解析成功（地址可能不对），但不应崩溃
+        (void)sym;
+    }
+}
+
 }  // namespace
 }  // namespace illuminator

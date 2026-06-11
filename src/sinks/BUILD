@@ -94,3 +94,46 @@ cc_library(
         "//src/plugin:manager",
     ],
 )
+
+cc_library(
+    name = "stream_sink",
+    hdrs = ["stream_sink/stream_sink.h"],
+    strip_include_prefix = "",
+    include_prefix = "sinks",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "fanout",
+    hdrs = ["fanout/sink_fanout.h"],
+    strip_include_prefix = "",
+    include_prefix = "sinks",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/core:common",
+        "//src/plugin:api",
+        "//src/plugin:manager",
+    ],
+)
+
+cc_library(
+    name = "recording_sink",
+    hdrs = ["recording_sink/recording_sink.h"],
+    strip_include_prefix = "",
+    include_prefix = "sinks",
+    visibility = ["//visibility:public"],
+    alwayslink = True,
+    deps = [
+        "//src/core:common",
+        "//src/plugin:api",
+        "//src/plugin:manager",
+        "//src/serialization:json_serializer",
+        "@nlohmann_json//:json",
+    ],
+)

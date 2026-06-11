@@ -1,16 +1,18 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import TimeControls from './components/TimeControls/TimeControls'
 import StatusBar from './components/Layout/StatusBar'
 import { usePipelinePolling } from './hooks/usePipelinePolling'
 import { useTimeStore } from './stores/useTimeStore'
-import CpuOverview from './pages/CpuOverview'
-import ProcessExplorer from './pages/ProcessExplorer'
-import FlameGraph from './pages/FlameGraph'
-import Timeline from './pages/Timeline'
-import DiffView from './pages/DiffView'
-import QueryConsole from './pages/QueryConsole'
-import SystemPage from './pages/SystemPage'
+
+const OverviewPage = lazy(() => import('./pages/OverviewPage'))
+const CpuPage = lazy(() => import('./pages/CpuPage'))
+const MemoryPage = lazy(() => import('./pages/MemoryPage'))
+const IoPage = lazy(() => import('./pages/IoPage'))
+const NetworkPage = lazy(() => import('./pages/NetworkPage'))
+const GpuPage = lazy(() => import('./pages/GpuPage'))
+const QueryConsole = lazy(() => import('./pages/QueryConsole'))
+const SystemPage = lazy(() => import('./pages/SystemPage'))
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -39,11 +41,12 @@ class ErrorBoundary extends React.Component<
 }
 
 const navItems = [
-  { path: '/', label: 'Dashboard', icon: '📊' },
-  { path: '/processes', label: 'Processes', icon: '📋' },
-  { path: '/profiler', label: 'Profiler', icon: '🔥' },
-  { path: '/scheduler', label: 'Scheduler', icon: '📈' },
-  { path: '/compare', label: 'Compare', icon: '🔀' },
+  { path: '/', label: 'Overview', icon: '📊' },
+  { path: '/cpu', label: 'CPU', icon: '🔥' },
+  { path: '/memory', label: 'Memory', icon: '🧠' },
+  { path: '/io', label: 'IO', icon: '💾' },
+  { path: '/network', label: 'Network', icon: '🌐' },
+  { path: '/gpu', label: 'GPU', icon: '🎮' },
   { path: '/query', label: 'Query', icon: '🔍' },
   { path: '/system', label: 'System', icon: '⚙️' },
 ]
@@ -135,15 +138,18 @@ export default function App() {
 
         <main style={{ flex: 1, background: '#0f1117', color: '#e0e0e0', overflow: 'auto' }}>
           <ErrorBoundary>
-            <Routes>
-              <Route path="/" element={<CpuOverview />} />
-              <Route path="/processes" element={<ProcessExplorer />} />
-              <Route path="/profiler" element={<FlameGraph />} />
-              <Route path="/scheduler" element={<Timeline />} />
-              <Route path="/compare" element={<DiffView />} />
-              <Route path="/query" element={<QueryConsole />} />
-              <Route path="/system" element={<SystemPage />} />
-            </Routes>
+            <Suspense fallback={<div style={{ padding: 40, color: '#6b7280' }}>Loading...</div>}>
+              <Routes>
+                <Route path="/" element={<OverviewPage />} />
+                <Route path="/cpu" element={<CpuPage />} />
+                <Route path="/memory" element={<MemoryPage />} />
+                <Route path="/io" element={<IoPage />} />
+                <Route path="/network" element={<NetworkPage />} />
+                <Route path="/gpu" element={<GpuPage />} />
+                <Route path="/query" element={<QueryConsole />} />
+                <Route path="/system" element={<SystemPage />} />
+              </Routes>
+            </Suspense>
           </ErrorBoundary>
         </main>
 

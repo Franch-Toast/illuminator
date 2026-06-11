@@ -74,6 +74,7 @@ cc_library(
     srcs = ["engine/pipeline_controller.cc"],
     hdrs = [
         "engine/async_channel.h",
+        "engine/feature_manager.h",
         "engine/pipeline_controller.h",
         "engine/timer_wheel.h",
     ],
@@ -87,6 +88,8 @@ cc_library(
         ":threading",
         "//src/plugin:api",
         "//src/plugin:manager",
+        "//src/sinks:recording_sink",
+        "//src/sinks:stream_sink",
         "//src/storage:storage",
     ],
 )

@@ -15,6 +15,7 @@
 #include "core/common/config.h"
 #include "core/common/version_generated.h"
 #include "core/config/yaml_config_loader.h"
+#include "core/engine/feature_manager.h"
 #include "core/engine/pipeline_controller.h"
 #include "plugin/builtin/builtin_plugins.h"
 #include "plugin/manager/plugin_manager.h"
@@ -228,9 +229,22 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     });
     ws_manager.Listen(http_host, ws_port);
 
+    // FeatureManager: register all configured pipelines as features
+    illuminator::FeatureManager feature_manager(controller);
+    for (const auto& pc : config.pipelines) {
+        illuminator::FeatureConfig fc;
+        fc.name = pc.name;
+        fc.display_name = pc.name;
+        fc.category = "default";
+        fc.pipeline = pc;
+        feature_manager.RegisterFeature(std::move(fc));
+    }
+    IL_INFO("FeatureManager: {} features registered", config.pipelines.size());
+
     illuminator::HttpServer http_server;
     illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
     illuminator::RegisterApiRoutes(http_server.server(), controller);
+    illuminator::RegisterFeatureRoutes(http_server.server(), feature_manager);
 
     http_server.SetStaticDir("web/dist");
     http_server.Start(http_host, http_port);
@@ -247,6 +261,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     }
 
     IL_INFO("Shutting down...");
+    feature_manager.StopAll();
     ws_manager.Stop();
     http_server.Stop();
     controller.StopAll();

@@ -13,8 +13,11 @@
 
 #include "core/common/self_observability.h"
 #include "core/common/version_generated.h"
+#include "core/engine/feature_manager.h"
 #include "core/engine/pipeline_controller.h"
 #include "serialization/json_serializer.h"
+#include "sinks/recording_sink/recording_sink.h"
+#include "sinks/stream_sink/stream_sink.h"
 #include "storage/storage_backend.h"
 
 namespace illuminator {
@@ -250,6 +253,207 @@ inline void RegisterApiRoutes(httplib::Server& srv,
         res.set_content(InternalMetrics::Instance().ExportJson() + "\n",
                         "application/json");
     });
+}
+
+// ============================================================================
+// Feature API — 按需启停 + 实时流控制
+// ============================================================================
+inline void RegisterFeatureRoutes(httplib::Server& srv,
+                                   FeatureManager& features) {
+    srv.Get("/api/v1/features",
+            [&features](const httplib::Request&, httplib::Response& res) {
+                auto list = features.ListFeatures();
+                json arr = json::array();
+                for (const auto& f : list) {
+                    arr.push_back({
+                        {"name", f.name},
+                        {"display_name", f.display_name},
+                        {"category", f.category},
+                        {"state", FeatureStateToString(f.state)},
+                        {"is_recording", f.is_recording},
+                        {"batches_processed", f.batches_processed},
+                        {"records_processed", f.records_processed},
+                        {"errors", f.errors},
+                        {"uptime_ms", f.uptime_ms},
+                    });
+                }
+                res.set_content(
+                    json{{"features", std::move(arr)}}.dump() + "\n",
+                    "application/json");
+            });
+
+    srv.Post("/api/v1/features/:name/start",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 auto status = features.Start(name);
+                 if (!status.ok()) {
+                     int code = (status.code() == StatusCode::kNotFound) ? 404 : 400;
+                     JsonError(res, status.message(), code);
+                     return;
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"state", "active"}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Post("/api/v1/features/:name/stop",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 auto status = features.Stop(name);
+                 if (!status.ok()) {
+                     int code = (status.code() == StatusCode::kNotFound) ? 404 : 400;
+                     JsonError(res, status.message(), code);
+                     return;
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"state", "inactive"}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Post("/api/v1/features/:name/pause",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 auto status = features.Pause(name);
+                 if (!status.ok()) {
+                     int code = (status.code() == StatusCode::kNotFound) ? 404 : 400;
+                     JsonError(res, status.message(), code);
+                     return;
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"state", "paused"}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Post("/api/v1/features/:name/resume",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 auto status = features.Resume(name);
+                 if (!status.ok()) {
+                     int code = (status.code() == StatusCode::kNotFound) ? 404 : 400;
+                     JsonError(res, status.message(), code);
+                     return;
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"state", "active"}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Get("/api/v1/features/:name/collect",
+            [&features](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.path_params.at("name");
+                auto state = features.GetState(name);
+                if (state == FeatureState::kInactive) {
+                    JsonError(res, "Feature '" + name + "' is not active", 400);
+                    return;
+                }
+
+                // 从 StreamSinkStore 拉取最新数据（不干扰 pipeline 正常采集）
+                auto& buf = StreamSinkStore::Instance().GetBuffer(name);
+                auto recent = buf.Recent(1);
+                if (recent.empty()) {
+                    res.set_content(
+                        json{{"feature", name}, {"data", json::array()},
+                             {"seq", buf.Sequence()}}.dump() + "\n",
+                        "application/json");
+                    return;
+                }
+                res.set_content(
+                    BatchToJson(*recent.back(), name) + "\n",
+                    "application/json");
+            });
+
+    // 增量数据拉取（支持 cursor 参数避免重复消费）
+    srv.Get("/api/v1/features/:name/stream",
+            [](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.path_params.at("name");
+                uint64_t cursor = 0;
+                if (req.has_param("cursor")) {
+                    cursor = std::stoull(req.get_param_value("cursor"));
+                }
+
+                auto& buf = StreamSinkStore::Instance().GetBuffer(name);
+                auto batches = buf.PollSince(cursor);
+
+                json j;
+                j["feature"] = name;
+                j["cursor"] = cursor;
+                json arr = json::array();
+                for (auto& b : batches) {
+                    arr.push_back(json::parse(BatchToJson(*b, name)));
+                }
+                j["batches"] = std::move(arr);
+                res.set_content(j.dump() + "\n", "application/json");
+            });
+
+    // === 录制 API ===
+    srv.Post("/api/v1/features/:name/record/start",
+             [](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 auto sink = RecordingSinkRegistry::Instance().Get(name);
+                 if (!sink) {
+                     JsonError(res, "No recording sink for feature: " + name, 404);
+                     return;
+                 }
+                 auto status = sink->StartRecording();
+                 if (!status.ok()) {
+                     JsonError(res, status.message(), 400);
+                     return;
+                 }
+                 auto session = sink->GetSession();
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"file", session.file_path}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Post("/api/v1/features/:name/record/stop",
+             [](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 auto sink = RecordingSinkRegistry::Instance().Get(name);
+                 if (!sink) {
+                     JsonError(res, "No recording sink for feature: " + name, 404);
+                     return;
+                 }
+                 auto status = sink->StopRecording();
+                 if (!status.ok()) {
+                     JsonError(res, status.message(), 400);
+                     return;
+                 }
+                 auto session = sink->GetSession();
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"file", session.file_path},
+                          {"batches", session.batches_written},
+                          {"bytes", session.bytes_written}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Get("/api/v1/features/:name/record/status",
+            [](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.path_params.at("name");
+                auto sink = RecordingSinkRegistry::Instance().Get(name);
+                if (!sink) {
+                    res.set_content(
+                        json{{"feature", name}, {"recording", false}}.dump() + "\n",
+                        "application/json");
+                    return;
+                }
+                bool recording = sink->IsRecording();
+                auto session = sink->GetSession();
+                json j;
+                j["feature"] = name;
+                j["recording"] = recording;
+                if (recording) {
+                    j["file"] = session.file_path;
+                    j["bytes_written"] = session.bytes_written;
+                    j["batches_written"] = session.batches_written;
+                }
+                res.set_content(j.dump() + "\n", "application/json");
+            });
 }
 
 }  // namespace illuminator

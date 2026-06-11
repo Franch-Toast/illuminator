@@ -128,60 +128,69 @@ public:
         auto* shdrs =
             reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
 
-        const Elf64_Sym* symtab = nullptr;
-        size_t sym_count = 0;
-        const char* strtab = nullptr;
+        // 收集所有符号表段（.symtab 和 .dynsym 合并，maximizing coverage）
+        struct SymTabInfo {
+            const Elf64_Sym* syms;
+            size_t count;
+            const char* strtab;
+        };
+        std::vector<SymTabInfo> sym_tables;
 
         for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
             const Elf64_Shdr& sh = shdrs[i];
-            if (sh.sh_type == SHT_SYMTAB && symtab == nullptr) {
-                symtab =
-                    reinterpret_cast<const Elf64_Sym*>(buf.data() + sh.sh_offset);
-                sym_count = sh.sh_size / sizeof(Elf64_Sym);
-                const Elf64_Shdr& str_sec = shdrs[sh.sh_link];
-                strtab = buf.data() + str_sec.sh_offset;
-            }
+            if (sh.sh_type != SHT_SYMTAB && sh.sh_type != SHT_DYNSYM)
+                continue;
+            if (sh.sh_offset + sh.sh_size > buf.size())
+                continue;
+            if (sh.sh_link >= ehdr->e_shnum)
+                continue;
+            const Elf64_Shdr& str_sec = shdrs[sh.sh_link];
+            if (str_sec.sh_offset + str_sec.sh_size > buf.size())
+                continue;
+
+            SymTabInfo info{};
+            info.syms = reinterpret_cast<const Elf64_Sym*>(
+                buf.data() + sh.sh_offset);
+            info.count = sh.sh_size / sizeof(Elf64_Sym);
+            info.strtab = buf.data() + str_sec.sh_offset;
+            sym_tables.push_back(info);
         }
 
-        if (!symtab || !strtab) {
-            for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
-                const Elf64_Shdr& sh = shdrs[i];
-                if (sh.sh_type == SHT_DYNSYM) {
-                    symtab = reinterpret_cast<const Elf64_Sym*>(buf.data() +
-                                                                sh.sh_offset);
-                    sym_count = sh.sh_size / sizeof(Elf64_Sym);
-                    const Elf64_Shdr& str_sec = shdrs[sh.sh_link];
-                    strtab = buf.data() + str_sec.sh_offset;
-                    break;
-                }
-            }
-        }
-
-        if (!symtab || !strtab)
+        if (sym_tables.empty())
             return false;
 
-        for (size_t i = 0; i < sym_count; ++i) {
-            const Elf64_Sym& sym = symtab[i];
-            unsigned char info = ELF64_ST_TYPE(sym.st_info);
-            if (sym.st_name == 0)
-                continue;
-            if (info != STT_FUNC && info != STT_GNU_IFUNC && info != STT_OBJECT)
-                continue;
-            if (sym.st_value == 0 && sym.st_size == 0)
-                continue;
-            const char* name = strtab + sym.st_name;
-            if (!name || name[0] == '\0')
-                continue;
-            // 归一化：减去 load_base 将绝对地址转换为文件相对偏移
-            uint64_t normalized = sym.st_value >= load_base
-                ? sym.st_value - load_base : sym.st_value;
-            symbols_.push_back({normalized, std::string(name), sym.st_size});
+        for (const auto& tab : sym_tables) {
+            for (size_t i = 0; i < tab.count; ++i) {
+                const Elf64_Sym& sym = tab.syms[i];
+                unsigned char info = ELF64_ST_TYPE(sym.st_info);
+                if (sym.st_name == 0)
+                    continue;
+                if (info != STT_FUNC && info != STT_GNU_IFUNC && info != STT_OBJECT)
+                    continue;
+                if (sym.st_value == 0 && sym.st_size == 0)
+                    continue;
+                const char* name = tab.strtab + sym.st_name;
+                if (!name || name[0] == '\0')
+                    continue;
+                uint64_t normalized = sym.st_value >= load_base
+                    ? sym.st_value - load_base : sym.st_value;
+                symbols_.push_back({normalized, std::string(name), sym.st_size});
+            }
         }
 
         std::sort(symbols_.begin(), symbols_.end(),
                   [](const auto& a, const auto& b) {
-                      return a.value < b.value;
+                      if (a.value != b.value) return a.value < b.value;
+                      // 优先保留有 size 信息的符号
+                      return a.size > b.size;
                   });
+        // 去重：相同地址保留第一个（有 size 的优先）
+        symbols_.erase(
+            std::unique(symbols_.begin(), symbols_.end(),
+                        [](const auto& a, const auto& b) {
+                            return a.value == b.value && a.name == b.name;
+                        }),
+            symbols_.end());
         return !symbols_.empty();
     }
 
@@ -194,27 +203,53 @@ public:
         if (symbols_.empty())
             return {};
 
-        // 二分查找：定位到最后一个 value <= addr_in_file 的符号
         auto it = std::upper_bound(
             symbols_.begin(), symbols_.end(), addr_in_file,
             [](uint64_t val, const Sym& s) { return val < s.value; });
         if (it == symbols_.begin())
             return {};
         --it;
-        // 若有 size，校验地址是否在符号范围内
-        if (it->size != 0 && addr_in_file >= it->value + it->size)
-            return {};
-        return it->name;
+
+        if (it->size != 0) {
+            if (addr_in_file < it->value + it->size)
+                return it->name;
+            // 地址在符号 size 之外，尝试 nearest-symbol 启发式
+            return ResolveNearest(it, addr_in_file);
+        }
+        // size=0：使用到下一个符号的距离作为隐式边界
+        auto next = it + 1;
+        if (next != symbols_.end()) {
+            uint64_t gap = next->value - it->value;
+            if (addr_in_file < it->value + gap)
+                return it->name;
+        } else {
+            // 最后一个符号且 size=0：允许合理的偏移范围（4KB）
+            if (addr_in_file - it->value < 4096)
+                return it->name;
+        }
+        return {};
     }
 
 private:
-    // 内部符号表示：地址、名称、大小
     struct Sym {
         uint64_t value = 0;
         std::string name;
         uint64_t size = 0;
     };
     std::vector<Sym> symbols_;
+
+    std::string ResolveNearest(
+        std::vector<Sym>::const_iterator lower_it,
+        uint64_t addr) const {
+        uint64_t dist = addr - (lower_it->value + lower_it->size);
+        if (dist > 512)
+            return {};
+        auto upper_it = lower_it + 1;
+        if (upper_it != symbols_.end() && addr < upper_it->value) {
+            return lower_it->name + "+gap";
+        }
+        return {};
+    }
 };
 
 // KernelSymbolResolver: 内核符号解析器
@@ -425,17 +460,19 @@ private:
         entry->maps.clear();
         std::string path = "/proc/" + std::to_string(pid) + "/maps";
         std::ifstream f(path);
-        if (!f)
-            return false;
+        if (!f) {
+            f.open("/proc/self/maps");
+            if (!f)
+                return false;
+        }
 
         std::string line;
         while (std::getline(f, line)) {
             ProcMapEntry m{};
             if (!ParseProcMapsLine(line, &m))
                 continue;
-            // 只缓存以 '/' 开头的绝对路径映射（可执行文件和共享库）
-            if (m.path.empty() || m.path[0] != '/')
-                continue;
+            if (m.path.empty()) continue;
+            if (m.path[0] != '/' && m.path[0] != '[') continue;
             entry->maps.push_back(std::move(m));
         }
         entry->loaded_at = std::chrono::steady_clock::now();
@@ -453,11 +490,92 @@ private:
             return &it->second;
 
         ElfSymbolCache cache;
-        if (!cache.Load(path))
-            return nullptr;
+        if (!cache.Load(path)) {
+            // 尝试从调试信息路径加载
+            if (!TryLoadDebugInfo(path, cache))
+                return nullptr;
+        }
 
         auto ins = elf_cache_.emplace(path, std::move(cache));
         return &ins.first->second;
+    }
+
+    bool TryLoadDebugInfo(const std::string& elf_path, ElfSymbolCache& cache) {
+        // 策略 1: build-id 查找（最准确）
+        std::string build_id = ExtractBuildId(elf_path);
+        if (build_id.size() >= 4) {
+            std::string bid_path = "/usr/lib/debug/.build-id/"
+                + build_id.substr(0, 2) + "/" + build_id.substr(2) + ".debug";
+            if (cache.Load(bid_path)) return true;
+        }
+
+        // 策略 2: 标准路径
+        std::string debug_path = "/usr/lib/debug" + elf_path + ".debug";
+        if (cache.Load(debug_path)) return true;
+        debug_path = "/usr/lib/debug" + elf_path;
+        if (cache.Load(debug_path)) return true;
+
+        // 策略 3: 同目录 .debug 子目录
+        auto last_slash = elf_path.rfind('/');
+        if (last_slash != std::string::npos) {
+            std::string dir = elf_path.substr(0, last_slash + 1);
+            std::string base = elf_path.substr(last_slash + 1);
+            debug_path = dir + ".debug/" + base;
+            if (cache.Load(debug_path)) return true;
+        }
+        return false;
+    }
+
+    // 从 ELF 文件中提取 .note.gnu.build-id 的 hex 字符串
+    static std::string ExtractBuildId(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return {};
+
+        std::vector<char> buf((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+        if (buf.size() < sizeof(Elf64_Ehdr)) return {};
+
+        auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(buf.data());
+        if (ehdr->e_ident[EI_MAG0] != ELFMAG0) return {};
+        if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
+            return {};
+
+        auto* shdrs = reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
+        for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
+            if (shdrs[i].sh_type != SHT_NOTE) continue;
+            if (shdrs[i].sh_offset + shdrs[i].sh_size > buf.size()) continue;
+
+            const char* note_data = buf.data() + shdrs[i].sh_offset;
+            size_t remaining = shdrs[i].sh_size;
+            size_t pos = 0;
+            while (pos + 12 <= remaining) {
+                uint32_t namesz = *reinterpret_cast<const uint32_t*>(note_data + pos);
+                uint32_t descsz = *reinterpret_cast<const uint32_t*>(note_data + pos + 4);
+                uint32_t type = *reinterpret_cast<const uint32_t*>(note_data + pos + 8);
+                size_t name_start = pos + 12;
+                size_t name_aligned = (namesz + 3) & ~3u;
+                size_t desc_start = name_start + name_aligned;
+                size_t desc_aligned = (descsz + 3) & ~3u;
+
+                if (desc_start + descsz > remaining) break;
+
+                // NT_GNU_BUILD_ID = 3, name = "GNU\0"
+                if (type == 3 && namesz == 4 &&
+                    std::memcmp(note_data + name_start, "GNU", 4) == 0) {
+                    std::string hex;
+                    hex.reserve(descsz * 2);
+                    for (size_t j = 0; j < descsz; ++j) {
+                        char h[3];
+                        std::snprintf(h, sizeof(h), "%02x",
+                                      static_cast<uint8_t>(note_data[desc_start + j]));
+                        hex += h;
+                    }
+                    return hex;
+                }
+                pos = desc_start + desc_aligned;
+            }
+        }
+        return {};
     }
 
     // 解析用户态地址对应的符号名
@@ -499,16 +617,27 @@ private:
             if (addr < m.start || addr >= m.end)
                 continue;
 
+            // 特殊映射快速标注
+            if (!m.path.empty() && m.path[0] == '[') {
+                if (m.path == "[vdso]") return "__vdso_clock_gettime";
+                if (m.path == "[vsyscall]") return "[vsyscall]";
+                return m.path;
+            }
+
             ElfSymbolCache* elf = GetElfCache(m.path);
             if (!elf)
                 break;
 
             uint64_t off = addr - m.start + m.offset;
             std::string sym = elf->Resolve(off);
-            if (!sym.empty())
+            if (!sym.empty()) {
+                // 清理 "+gap" 标记（nearest-symbol 启发式产生）
+                if (sym.size() > 4 && sym.substr(sym.size() - 4) == "+gap") {
+                    sym = sym.substr(0, sym.size() - 4) + " [inlined]";
+                }
                 return sym;
+            }
 
-            // 符号解析失败，使用 "<path>+<offset>" 格式作为回退
             char buf[96];
             std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
                           m.path.c_str(),
