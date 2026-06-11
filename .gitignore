@@ -57,4 +57,4 @@ illuminator.yaml
 # MODULE.bazel.lock is large but should be tracked for reproducibility
 # Uncomment the next line if you don't want to track it:
 # MODULE.bazel.lock
-core
+
