@@ -2,6 +2,9 @@ import React, { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import TimeControls from './components/TimeControls/TimeControls'
 import StatusBar from './components/Layout/StatusBar'
+import ResourceBudget from './components/Layout/ResourceBudget'
+import ConnectionIndicator from './components/Layout/ConnectionIndicator'
+import RecordingControl from './components/Layout/RecordingControl'
 import { usePipelinePolling } from './hooks/usePipelinePolling'
 import { useTimeStore } from './stores/useTimeStore'
 
@@ -13,6 +16,8 @@ const NetworkPage = lazy(() => import('./pages/NetworkPage'))
 const GpuPage = lazy(() => import('./pages/GpuPage'))
 const QueryConsole = lazy(() => import('./pages/QueryConsole'))
 const SystemPage = lazy(() => import('./pages/SystemPage'))
+const ReplayPage = lazy(() => import('./pages/ReplayPage'))
+const PluginMgrPage = lazy(() => import('./pages/PluginManagerPage'))
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -47,7 +52,9 @@ const navItems = [
   { path: '/io', label: 'IO', icon: '💾' },
   { path: '/network', label: 'Network', icon: '🌐' },
   { path: '/gpu', label: 'GPU', icon: '🎮' },
+  { path: '/replay', label: 'Replay', icon: '📂' },
   { path: '/query', label: 'Query', icon: '🔍' },
+  { path: '/plugins', label: 'Plugins', icon: '🔌' },
   { path: '/system', label: 'System', icon: '⚙️' },
 ]
 
@@ -131,6 +138,11 @@ export default function App() {
         ))}
 
         <div style={{ flex: 1 }} />
+        <div style={{ padding: '8px 12px', borderTop: '1px solid #2a2d35', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <RecordingControl />
+          <ConnectionIndicator />
+          <ResourceBudget />
+        </div>
       </nav>
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -146,7 +158,9 @@ export default function App() {
                 <Route path="/io" element={<IoPage />} />
                 <Route path="/network" element={<NetworkPage />} />
                 <Route path="/gpu" element={<GpuPage />} />
+                <Route path="/replay" element={<ReplayPage />} />
                 <Route path="/query" element={<QueryConsole />} />
+                <Route path="/plugins" element={<PluginMgrPage />} />
                 <Route path="/system" element={<SystemPage />} />
               </Routes>
             </Suspense>

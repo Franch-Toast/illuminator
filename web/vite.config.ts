@@ -27,15 +27,30 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    hmr: {
+      path: '/__vite_hmr',
+    },
     proxy: {
       '/api': 'http://localhost:9527',
       '/healthz': 'http://localhost:9527',
       '/metrics': 'http://localhost:9527',
-      '/ws': { target: 'ws://localhost:9528', ws: true },
+      '/ws': {
+        target: 'http://localhost:9528',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers'],
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+        },
+      },
+    },
   },
 })

@@ -281,11 +281,26 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         return name;
     };
 
+    auto resolve_tier = [](const std::string& name) -> illuminator::FeatureTier {
+        if (name == "cpu_utilization" || name == "cpu_processes" ||
+            name == "memory_utilization" || name == "memory_processes" ||
+            name == "gpu_monitor")
+            return illuminator::FeatureTier::kMonitoring;
+        if (name == "sched_analysis" || name == "io_monitor" ||
+            name == "net_tracer")
+            return illuminator::FeatureTier::kTracing;
+        if (name == "cpu_profile" || name == "offcpu_profile" ||
+            name == "heap_profiler")
+            return illuminator::FeatureTier::kProfiling;
+        return illuminator::FeatureTier::kMonitoring;
+    };
+
     for (const auto& pc : config.pipelines) {
         illuminator::FeatureConfig fc;
         fc.name = pc.name;
         fc.display_name = resolve_display_name(pc.name);
         fc.category = resolve_category(pc.name);
+        fc.tier = resolve_tier(pc.name);
         fc.pipeline = pc;
         feature_manager.RegisterFeature(std::move(fc));
     }

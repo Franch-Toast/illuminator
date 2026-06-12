@@ -1,6 +1,7 @@
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { useTimeStore } from '../../stores/useTimeStore'
 import { colors } from '../../styles/theme'
+import { AddAnnotationButton } from '../AnnotationOverlay'
 
 const WINDOW_OPTIONS = [
   { label: '30s', ms: 30_000 },
@@ -31,18 +32,24 @@ export default function TimeControls() {
     }}>
       <button
         onClick={togglePause}
+        title="Space to toggle (pause freezes data updates)"
         style={{
-          display: 'flex', alignItems: 'center', gap: 4,
-          padding: '4px 12px', borderRadius: 6,
-          border: `1px solid ${mode === 'live' ? '#4ade80' : colors.accent}`,
-          background: mode === 'live' ? 'rgba(74,222,128,0.1)' : 'rgba(96,165,250,0.1)',
-          color: mode === 'live' ? '#4ade80' : colors.accent,
+          display: 'flex', alignItems: 'center', gap: 5,
+          padding: '4px 14px', borderRadius: 6,
+          border: `1px solid ${mode === 'live' ? '#4ade80' : '#f59e0b'}`,
+          background: mode === 'live' ? 'rgba(74,222,128,0.1)' : 'rgba(245,158,11,0.15)',
+          color: mode === 'live' ? '#4ade80' : '#f59e0b',
           cursor: 'pointer', fontSize: 12, fontWeight: 600,
+          transition: 'all 0.2s ease',
         }}
       >
-        <span style={{ width: 8, height: 8, borderRadius: '50%',
-          background: mode === 'live' ? '#4ade80' : colors.accent,
-        }} />
+        {mode === 'live' ? (
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4ade80',
+            animation: 'pulse 2s infinite',
+          }} />
+        ) : (
+          <span style={{ fontSize: 11 }}>⏸</span>
+        )}
         {mode === 'live' ? 'LIVE' : 'PAUSED'}
       </button>
 
@@ -66,6 +73,10 @@ export default function TimeControls() {
 
       <div style={{ color: colors.textMuted, fontSize: 11, fontFamily: 'monospace' }}>
         {fmtTime(range.start)} — {fmtTime(range.end)}
+      </div>
+
+      <div style={{ marginLeft: 'auto' }}>
+        <AddAnnotationButton />
       </div>
     </div>
   )

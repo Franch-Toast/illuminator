@@ -32,6 +32,7 @@
 #include "plugin/manager/plugin_registry.h"
 #include "sinks/recording_sink/recording_sink.h"
 #include "sinks/stream_sink/stream_sink.h"
+#include "sinks/websocket_sink/websocket_sink.h"
 
 namespace illuminator {
 
@@ -56,10 +57,17 @@ inline const char* FeatureStateToString(FeatureState s) {
     return "unknown";
 }
 
+enum class FeatureTier {
+    kMonitoring = 1,  // Tier 1: procfs reading, < 0.5% CPU, auto-start on tab enter
+    kTracing = 2,     // Tier 2: lightweight eBPF + procfs, 1-3% CPU, auto-start
+    kProfiling = 3,   // Tier 3: high-frequency sampling, 3-10% CPU, manual trigger
+};
+
 struct FeatureConfig {
     std::string name;
     std::string display_name;
     std::string category;
+    FeatureTier tier = FeatureTier::kMonitoring;
     PipelineConfig pipeline;
     uint32_t window_sec = 60;
 };
@@ -68,6 +76,7 @@ struct FeatureInfo {
     std::string name;
     std::string display_name;
     std::string category;
+    FeatureTier tier = FeatureTier::kMonitoring;
     FeatureState state;
     bool is_recording = false;
     uint64_t batches_processed = 0;
@@ -213,6 +222,7 @@ public:
             info.name = name;
             info.display_name = entry.config.display_name;
             info.category = entry.config.category;
+            info.tier = entry.config.tier;
             info.state = entry.state;
             if (entry.pipeline) {
                 info.batches_processed = entry.pipeline->BatchesProcessed();
@@ -318,6 +328,14 @@ private:
         auto stream_sink = std::make_unique<StreamSink>();
         stream_sink->SetFeatureName(name);
         pipeline->AddSink(std::move(stream_sink));
+
+        // 注入 WebSocketSink 用于 WS 实时推送（pipeline_key = feature name）
+        auto ws_sink = std::make_unique<WebSocketSink>();
+        ConfigValue ws_cfg;
+        ws_cfg.Set("pipeline_key", name);
+        ws_cfg.Set("max_buffer_size", int64_t{10});
+        ws_sink->Init(ws_cfg);
+        pipeline->AddSink(std::move(ws_sink));
 
         // 注入 RecordingSink 并注册到全局 Registry 供 API 访问
         auto rec_sink = std::make_unique<RecordingSink>();

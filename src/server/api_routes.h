@@ -15,6 +15,7 @@
 #include "core/common/version_generated.h"
 #include "core/engine/feature_manager.h"
 #include "core/engine/pipeline_controller.h"
+#include "plugin/manager/plugin_manager.h"
 #include "serialization/json_serializer.h"
 #include "sinks/recording_sink/recording_sink.h"
 #include "sinks/stream_sink/stream_sink.h"
@@ -273,6 +274,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                         {"name", f.name},
                         {"display_name", f.display_name},
                         {"category", f.category},
+                        {"tier", static_cast<int>(f.tier)},
                         {"state", FeatureStateToString(f.state)},
                         {"is_recording", f.is_recording},
                         {"batches_processed", f.batches_processed},
@@ -457,6 +459,168 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     j["batches_written"] = session.batches_written;
                 }
                 res.set_content(j.dump() + "\n", "application/json");
+            });
+
+    // === Resource Budget API ===
+    srv.Get("/api/v1/budget",
+            [&features](const httplib::Request&, httplib::Response& res) {
+                auto& limiter = ResourceLimiter::Instance();
+                auto usage = limiter.Check();
+
+                auto list = features.ListFeatures();
+                int active_count = 0;
+                int ebpf_probes = 0;
+                for (const auto& f : list) {
+                    if (f.state == FeatureState::kActive ||
+                        f.state == FeatureState::kPaused) {
+                        active_count++;
+                        if (f.tier == FeatureTier::kTracing ||
+                            f.tier == FeatureTier::kProfiling) {
+                            ebpf_probes++;
+                        }
+                    }
+                }
+
+                json j;
+                j["usage"] = {
+                    {"rss_bytes", usage.rss_bytes},
+                    {"cpu_pct", usage.cpu_percent},
+                    {"active_features", active_count},
+                    {"ebpf_probes", ebpf_probes},
+                };
+                j["limits"] = {
+                    {"max_memory_bytes", limiter.GetLimits().max_memory_bytes},
+                    {"max_cpu_pct", limiter.GetLimits().max_cpu_percent},
+                    {"max_ebpf_probes", 8},
+                };
+                j["exceeded"] = usage.memory_exceeded;
+                res.set_content(j.dump() + "\n", "application/json");
+            });
+
+    // === Global Recording API ===
+    srv.Post("/api/v1/recording/start",
+             [&features](const httplib::Request&, httplib::Response& res) {
+                 auto list = features.ListFeatures();
+                 json started = json::array();
+                 json errors = json::array();
+                 for (const auto& f : list) {
+                     if (f.state != FeatureState::kActive) continue;
+                     auto sink = RecordingSinkRegistry::Instance().Get(f.name);
+                     if (!sink) continue;
+                     if (sink->IsRecording()) {
+                         started.push_back(f.name);
+                         continue;
+                     }
+                     auto st = sink->StartRecording();
+                     if (st.ok()) started.push_back(f.name);
+                     else errors.push_back({{"feature", f.name}, {"error", st.message()}});
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"recording_features", started},
+                          {"errors", errors}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Post("/api/v1/recording/stop",
+             [&features](const httplib::Request&, httplib::Response& res) {
+                 auto list = features.ListFeatures();
+                 json stopped = json::array();
+                 for (const auto& f : list) {
+                     auto sink = RecordingSinkRegistry::Instance().Get(f.name);
+                     if (!sink || !sink->IsRecording()) continue;
+                     sink->StopRecording();
+                     auto session = sink->GetSession();
+                     stopped.push_back({
+                         {"feature", f.name},
+                         {"file", session.file_path},
+                         {"bytes", session.bytes_written},
+                     });
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"stopped_features", stopped}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Get("/api/v1/recording/status",
+            [&features](const httplib::Request&, httplib::Response& res) {
+                auto list = features.ListFeatures();
+                bool any_recording = false;
+                json recording_features = json::array();
+                uint64_t total_bytes = 0;
+                for (const auto& f : list) {
+                    auto sink = RecordingSinkRegistry::Instance().Get(f.name);
+                    if (!sink || !sink->IsRecording()) continue;
+                    any_recording = true;
+                    auto session = sink->GetSession();
+                    recording_features.push_back({
+                        {"feature", f.name},
+                        {"bytes_written", session.bytes_written},
+                    });
+                    total_bytes += session.bytes_written;
+                }
+                res.set_content(
+                    json{{"recording", any_recording},
+                         {"features", recording_features},
+                         {"total_bytes", total_bytes}}.dump() + "\n",
+                    "application/json");
+            });
+
+    // === Plugin Hot-Reload API ===
+    srv.Post("/api/v1/plugins/reload",
+             [](const httplib::Request&, httplib::Response& res) {
+                 auto& mgr = PluginManager::Instance();
+                 auto& reg = PluginRegistry::Instance();
+
+                 size_t before = reg.ListSources().size() + reg.ListProcessors().size()
+                              + reg.ListAggregators().size() + reg.ListSinks().size();
+
+                 auto status = mgr.LoadPluginsFromDirs(mgr.Loader().AllowedDirs());
+                 if (!status.ok()) {
+                     JsonError(res, "Plugin reload failed: " + status.message());
+                     return;
+                 }
+
+                 size_t after = reg.ListSources().size() + reg.ListProcessors().size()
+                             + reg.ListAggregators().size() + reg.ListSinks().size();
+
+                 json plugins = json::array();
+                 for (auto& n : reg.ListSources())     plugins.push_back({{"name", n}, {"type", "source"}});
+                 for (auto& n : reg.ListProcessors())  plugins.push_back({{"name", n}, {"type", "processor"}});
+                 for (auto& n : reg.ListAggregators()) plugins.push_back({{"name", n}, {"type", "aggregator"}});
+                 for (auto& n : reg.ListSinks())       plugins.push_back({{"name", n}, {"type", "sink"}});
+
+                 res.set_content(
+                     json{{"status", "ok"},
+                          {"loaded", after - before},
+                          {"total", after},
+                          {"plugins", plugins}}.dump() + "\n",
+                     "application/json");
+             });
+
+    srv.Get("/api/v1/plugins",
+            [](const httplib::Request&, httplib::Response& res) {
+                auto& reg = PluginRegistry::Instance();
+                json plugins = json::array();
+                for (auto& n : reg.ListSources())     plugins.push_back({{"name", n}, {"type", "source"}, {"source", "builtin"}});
+                for (auto& n : reg.ListProcessors())  plugins.push_back({{"name", n}, {"type", "processor"}, {"source", "builtin"}});
+                for (auto& n : reg.ListAggregators()) plugins.push_back({{"name", n}, {"type", "aggregator"}, {"source", "builtin"}});
+                for (auto& n : reg.ListSinks())       plugins.push_back({{"name", n}, {"type", "sink"}, {"source", "builtin"}});
+
+                auto& mgr = PluginManager::Instance();
+                for (auto& desc : mgr.Loader().Descriptors()) {
+                    if (desc && desc->name) {
+                        for (auto& p : plugins) {
+                            if (p["name"] == desc->name) {
+                                p["source"] = "shared_object";
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                res.set_content(
+                    json{{"plugins", plugins}}.dump() + "\n",
+                    "application/json");
             });
 }
 

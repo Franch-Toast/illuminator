@@ -90,6 +90,7 @@ cc_library(
         "//src/plugin:manager",
         "//src/sinks:recording_sink",
         "//src/sinks:stream_sink",
+        "//src/sinks:websocket_sink",
         "//src/storage:storage",
     ],
 )

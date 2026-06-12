@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { colors } from '../../styles/theme'
 
 export interface ProcessEntry {
@@ -36,14 +36,32 @@ function Sparkline({ values, width = 80, height = 20 }: { values: number[]; widt
   )
 }
 
+const ROW_HEIGHT = 37
+const VIRTUALIZE_THRESHOLD = 40
+const OVERSCAN = 5
+
 export default function ProcessTable({ processes, onSelect, selectedPid }: ProcessTableProps) {
   const [sortBy, setSortBy] = useState<'cpu' | 'mem'>('cpu')
+  const [scrollTop, setScrollTop] = useState(0)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const maxVisibleHeight = 600
 
   const sorted = [...processes].sort((a, b) =>
     sortBy === 'cpu'
       ? b.cpu_total_pct - a.cpu_total_pct
       : b.rss_kb - a.rss_kb
   )
+
+  const useVirtual = sorted.length > VIRTUALIZE_THRESHOLD
+  const totalHeight = sorted.length * ROW_HEIGHT
+  const visibleCount = Math.ceil(maxVisibleHeight / ROW_HEIGHT)
+
+  const startIdx = useVirtual ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN) : 0
+  const endIdx = useVirtual ? Math.min(sorted.length, startIdx + visibleCount + OVERSCAN * 2) : sorted.length
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop)
+  }, [])
 
   const thStyle: React.CSSProperties = {
     padding: '8px 10px', textAlign: 'left', fontSize: 11,
@@ -56,6 +74,39 @@ export default function ProcessTable({ processes, onSelect, selectedPid }: Proce
     borderBottom: `1px solid ${colors.cardBorder}22`,
   }
 
+  const renderRow = (p: ProcessEntry, idx: number) => {
+    const isSelected = selectedPid === p.pid
+    return (
+      <tr key={p.pid}
+          onClick={() => onSelect?.(p.pid)}
+          style={{
+            cursor: onSelect ? 'pointer' : 'default',
+            background: isSelected ? colors.activeBg : 'transparent',
+            height: ROW_HEIGHT,
+          }}>
+        <td style={{ ...tdStyle, color: colors.textMuted, width: 30 }}>{idx + 1}</td>
+        <td style={{ ...tdStyle, color: colors.textMuted, fontFamily: 'monospace', width: 60 }}>{p.pid}</td>
+        <td style={{ ...tdStyle, color: colors.textPrimary, fontWeight: 500 }}>{p.comm}</td>
+        <td style={{ ...tdStyle, color: cpuColor(p.cpu_total_pct), fontWeight: 600, fontFamily: 'monospace' }}>
+          {p.cpu_total_pct.toFixed(1)}%
+        </td>
+        <td style={tdStyle}>
+          <Sparkline values={p.history ?? [p.cpu_total_pct]} />
+        </td>
+        <td style={{ ...tdStyle, color: colors.textSecondary, fontFamily: 'monospace' }}>
+          {p.cpu_user_pct.toFixed(1)}%
+        </td>
+        <td style={{ ...tdStyle, color: colors.textSecondary, fontFamily: 'monospace' }}>
+          {p.cpu_sys_pct.toFixed(1)}%
+        </td>
+        <td style={{ ...tdStyle, color: colors.textSecondary, textAlign: 'center' }}>{p.num_threads}</td>
+        <td style={{ ...tdStyle, color: colors.textSecondary, fontFamily: 'monospace' }}>
+          {formatMem(p.rss_kb)}
+        </td>
+      </tr>
+    )
+  }
+
   return (
     <div style={{ overflowX: 'auto' }}>
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -65,58 +116,56 @@ export default function ProcessTable({ processes, onSelect, selectedPid }: Proce
             <th style={thStyle}>PID</th>
             <th style={thStyle}>Command</th>
             <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => setSortBy('cpu')}>
-              CPU% {sortBy === 'cpu' ? '▼' : ''}
+              CPU% {sortBy === 'cpu' ? '\u25BC' : ''}
             </th>
             <th style={thStyle}>Trend (30s)</th>
             <th style={thStyle}>User%</th>
             <th style={thStyle}>Sys%</th>
             <th style={thStyle}>Threads</th>
             <th style={{ ...thStyle, cursor: 'pointer' }} onClick={() => setSortBy('mem')}>
-              RSS {sortBy === 'mem' ? '▼' : ''}
+              RSS {sortBy === 'mem' ? '\u25BC' : ''}
             </th>
           </tr>
         </thead>
-        <tbody>
-          {sorted.map((p, idx) => {
-            const isSelected = selectedPid === p.pid
-            return (
-              <tr key={p.pid}
-                  onClick={() => onSelect?.(p.pid)}
-                  style={{
-                    cursor: onSelect ? 'pointer' : 'default',
-                    background: isSelected ? colors.activeBg : 'transparent',
-                  }}>
-                <td style={{ ...tdStyle, color: colors.textMuted, width: 30 }}>{idx + 1}</td>
-                <td style={{ ...tdStyle, color: colors.textMuted, fontFamily: 'monospace', width: 60 }}>{p.pid}</td>
-                <td style={{ ...tdStyle, color: colors.textPrimary, fontWeight: 500 }}>{p.comm}</td>
-                <td style={{ ...tdStyle, color: cpuColor(p.cpu_total_pct), fontWeight: 600, fontFamily: 'monospace' }}>
-                  {p.cpu_total_pct.toFixed(1)}%
-                </td>
-                <td style={tdStyle}>
-                  <Sparkline values={p.history ?? [p.cpu_total_pct]} />
-                </td>
-                <td style={{ ...tdStyle, color: colors.textSecondary, fontFamily: 'monospace' }}>
-                  {p.cpu_user_pct.toFixed(1)}%
-                </td>
-                <td style={{ ...tdStyle, color: colors.textSecondary, fontFamily: 'monospace' }}>
-                  {p.cpu_sys_pct.toFixed(1)}%
-                </td>
-                <td style={{ ...tdStyle, color: colors.textSecondary, textAlign: 'center' }}>{p.num_threads}</td>
-                <td style={{ ...tdStyle, color: colors.textSecondary, fontFamily: 'monospace' }}>
-                  {formatMem(p.rss_kb)}
+      </table>
+
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        style={{
+          overflowY: useVirtual ? 'auto' : 'visible',
+          maxHeight: useVirtual ? maxVisibleHeight : undefined,
+        }}
+      >
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <tbody>
+            {useVirtual && startIdx > 0 && (
+              <tr style={{ height: startIdx * ROW_HEIGHT }}>
+                <td colSpan={9} />
+              </tr>
+            )}
+            {sorted.slice(startIdx, endIdx).map((p, i) => renderRow(p, startIdx + i))}
+            {useVirtual && endIdx < sorted.length && (
+              <tr style={{ height: (sorted.length - endIdx) * ROW_HEIGHT }}>
+                <td colSpan={9} />
+              </tr>
+            )}
+            {sorted.length === 0 && (
+              <tr>
+                <td colSpan={9} style={{ padding: 24, textAlign: 'center', color: colors.textMuted }}>
+                  No process data yet
                 </td>
               </tr>
-            )
-          })}
-          {sorted.length === 0 && (
-            <tr>
-              <td colSpan={9} style={{ padding: 24, textAlign: 'center', color: colors.textMuted }}>
-                No process data yet
-              </td>
-            </tr>
-          )}
-        </tbody>
-      </table>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {useVirtual && (
+        <div style={{ fontSize: 10, color: colors.textMuted, padding: '4px 10px', textAlign: 'right' }}>
+          Showing {endIdx - startIdx} of {sorted.length} processes (virtualized)
+        </div>
+      )}
     </div>
   )
 }

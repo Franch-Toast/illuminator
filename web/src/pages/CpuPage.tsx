@@ -1,10 +1,10 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { colors } from '../styles/theme'
 import SubTabBar from '../components/SubTabBar'
-import FeaturePanel from '../components/FeaturePanel/FeaturePanel'
-import { useFeatureStream } from '../hooks/useFeatureStream'
 import { useCpuUtilization, useCpuProcesses } from '../hooks/useCpuData'
 import { useProcessDetail } from '../hooks/useProcessDetail'
+import { usePageActivation, useFeaturesByCategory } from '../hooks/useDataSource'
+import { useUrlState } from '../hooks/useUrlState'
 import { api } from '../services/apiClient'
 import StackedAreaChart from '../components/charts/StackedAreaChart'
 import CoreHeatmap from '../components/charts/CoreHeatmap'
@@ -20,12 +20,21 @@ const SUB_TABS = [
 ]
 
 export default function CpuPage() {
-  const [activeTab, setActiveTab] = useState('system')
+  const { subTab, setUrlState } = useUrlState()
+  const [activeTab, setActiveTab] = useState(subTab || 'system')
+  const features = useFeaturesByCategory('cpu')
+
+  usePageActivation('cpu', features)
+
+  const handleTabChange = (tab: string) => {
+    setActiveTab(tab)
+    setUrlState({ subTab: tab })
+  }
 
   return (
     <div style={{ padding: 24, display: 'flex', flexDirection: 'column' }}>
       <h2 style={{ margin: '0 0 16px', fontSize: 20, color: colors.textPrimary }}>CPU</h2>
-      <SubTabBar tabs={SUB_TABS} active={activeTab} onChange={setActiveTab} />
+      <SubTabBar tabs={SUB_TABS} active={activeTab} onChange={handleTabChange} />
 
       {activeTab === 'system' && <SystemSubTab />}
       {activeTab === 'process' && <ProcessSubTab />}
@@ -34,129 +43,111 @@ export default function CpuPage() {
 }
 
 function SystemSubTab() {
-  const util = useFeatureStream('cpu_utilization', { pollIntervalMs: 1000 })
-  const { areaData, coreData, summary, clear } = useCpuUtilization(util.state === 'active')
-
-  const handleStop = useCallback(() => {
-    util.stop()
-    clear()
-  }, [util, clear])
+  const { areaData, coreData, summary } = useCpuUtilization(true)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <FeaturePanel
-        featureName="CPU Utilization"
-        state={util.state}
-        error={util.error}
-        onStart={util.start}
-        onStop={handleStop}
-        onPause={util.pause}
-        onResume={util.resume}
-        isRecording={util.isRecording}
-        onRecordToggle={util.toggleRecording}
-      >
-        <SummaryCards data={summary} />
-        <div style={{ marginTop: 16 }}>
-          <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
-            System CPU Utilization (Stacked)
-          </h4>
-          <StackedAreaChart data={areaData} width={700} height={200} />
-        </div>
-        <div style={{ marginTop: 16 }}>
-          <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
-            Per-Core Utilization
-          </h4>
-          <CoreHeatmap data={coreData} width={700} />
-        </div>
-      </FeaturePanel>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
+      <SummaryCards data={summary} />
+
+      <div style={{
+        background: colors.cardBg, borderRadius: 8, padding: 16,
+        border: `1px solid ${colors.cardBorder}`,
+      }}>
+        <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
+          System CPU Utilization
+        </h4>
+        <StackedAreaChart data={areaData} group="cpu-charts" />
+      </div>
+
+      <div style={{
+        background: colors.cardBg, borderRadius: 8, padding: 16,
+        border: `1px solid ${colors.cardBorder}`,
+      }}>
+        <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
+          Per-Core Utilization
+        </h4>
+        <CoreHeatmap data={coreData} />
+      </div>
     </div>
   )
 }
 
 function ProcessSubTab() {
-  const proc = useFeatureStream('cpu_processes', { pollIntervalMs: 2000 })
-  const { processes, clear } = useCpuProcesses(proc.state === 'active')
-  const [selectedPid, setSelectedPid] = useState<number | null>(null)
+  const { processes } = useCpuProcesses(true)
+  const { pid: urlPid, comm: urlComm, setUrlState } = useUrlState()
+  const [selectedPid, setSelectedPid] = useState<number | null>(urlPid)
+  const [selectedComm, setSelectedComm] = useState(urlComm || '')
 
-  const handleStop = useCallback(() => {
-    proc.stop()
-    clear()
-  }, [proc, clear])
+  const handleSelect = (pid: number) => {
+    const proc = processes.find(p => p.pid === pid)
+    if (proc) {
+      setSelectedPid(pid)
+      setSelectedComm(proc.comm)
+      setUrlState({ pid, comm: proc.comm })
+    }
+  }
 
-  const selectedProcess = processes.find(p => p.pid === selectedPid)
+  const handleBack = () => {
+    setSelectedPid(null)
+    setSelectedComm('')
+    setUrlState({ pid: null, comm: null, profileType: null })
+  }
+
+  if (selectedPid) {
+    return (
+      <ProcessDetailView
+        pid={selectedPid}
+        comm={selectedComm}
+        onBack={handleBack}
+      />
+    )
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <FeaturePanel
-        featureName="Process CPU (Top-N)"
-        state={proc.state}
-        error={proc.error}
-        onStart={proc.start}
-        onStop={handleStop}
-        onPause={proc.pause}
-        onResume={proc.resume}
-        isRecording={proc.isRecording}
-        onRecordToggle={proc.toggleRecording}
-      >
-        {!selectedPid ? (
-          <ProcessTable
-            processes={processes}
-            onSelect={setSelectedPid}
-            selectedPid={selectedPid}
-          />
-        ) : (
-          <ProcessDetailView
-            pid={selectedPid}
-            comm={selectedProcess?.comm ?? '?'}
-            onBack={() => setSelectedPid(null)}
-          />
-        )}
-      </FeaturePanel>
+    <div style={{ marginTop: 16 }}>
+      <ProcessTable
+        processes={processes}
+        onSelect={handleSelect}
+        selectedPid={selectedPid}
+      />
     </div>
   )
 }
 
 function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; onBack: () => void }) {
   const [profileType, setProfileType] = useState<'on_cpu' | 'off_cpu'>('on_cpu')
-  const [selectedTimestamp, setSelectedTimestamp] = useState<number | null>(null)
-  const [profilingStatus, setProfilingStatus] = useState<'starting' | 'active' | 'failed'>('starting')
-  const { timeline, threads } = useProcessDetail(pid, true)
+  const [profilingStatus, setProfilingStatus] = useState<'idle' | 'starting' | 'active' | 'failed'>('idle')
+  const [timeSelection, setTimeSelection] = useState<import('../components/charts/ProfileSnapshot').TimeSelection | null>(null)
+  const { timeline, threads, processGone } = useProcessDetail(pid, true)
   const startedRef = useRef(false)
 
-  useEffect(() => {
+  const startProfiling = async () => {
     if (startedRef.current) return
     startedRef.current = true
+    setProfilingStatus('starting')
+    try {
+      const resp = await api.features()
+      const cpuProf = resp.features?.find(f => f.name === 'cpu_profile')
+      const offcpuProf = resp.features?.find(f => f.name === 'offcpu_profile')
 
-    const ensureFeatures = async () => {
-      try {
-        const resp = await api.features()
-        const cpuProf = resp.features?.find((f: { name: string }) => f.name === 'cpu_profile')
-        const offcpuProf = resp.features?.find((f: { name: string }) => f.name === 'offcpu_profile')
-
-        const starts: Promise<unknown>[] = []
-        if (cpuProf && cpuProf.state === 'inactive') starts.push(api.featureStart('cpu_profile'))
-        if (offcpuProf && offcpuProf.state === 'inactive') starts.push(api.featureStart('offcpu_profile'))
-
-        if (starts.length > 0) await Promise.all(starts)
-        setProfilingStatus('active')
-      } catch {
-        setProfilingStatus('failed')
-      }
+      const starts: Promise<unknown>[] = []
+      if (cpuProf && cpuProf.state === 'inactive') starts.push(api.featureStart('cpu_profile'))
+      if (offcpuProf && offcpuProf.state === 'inactive') starts.push(api.featureStart('offcpu_profile'))
+      if (starts.length > 0) await Promise.all(starts)
+      setProfilingStatus('active')
+    } catch {
+      setProfilingStatus('failed')
+      startedRef.current = false
     }
-    ensureFeatures()
-  }, [pid])
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* Breadcrumb */}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button
-          onClick={onBack}
-          style={{
-            background: 'none', border: 'none', color: colors.accent,
-            cursor: 'pointer', fontSize: 13, padding: 0,
-          }}
-        >
+        <button onClick={onBack} style={{
+          background: 'none', border: 'none', color: colors.accent,
+          cursor: 'pointer', fontSize: 13, padding: 0,
+        }}>
           &larr; Process List
         </button>
         <span style={{ color: colors.textMuted }}>/</span>
@@ -165,77 +156,101 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
         </span>
       </div>
 
-      {/* CPU Loading Timeline */}
+      {/* Process gone banner */}
+      {processGone && (
+        <div style={{
+          background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.3)',
+          borderRadius: 8, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <span style={{ fontSize: 14 }}>&#9888;</span>
+          <span style={{ fontSize: 12, color: '#fbbf24' }}>
+            Process {comm} (PID:{pid}) has dropped below top-N CPU threshold. Timeline continues with 0% readings.
+            Profiling data already collected is preserved.
+          </span>
+        </div>
+      )}
+
+      {/* CPU Timeline (Tier 1 — auto) */}
       <div style={{
-        background: colors.bg, border: `1px solid ${colors.cardBorder}`,
+        background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
         borderRadius: 8, padding: 16,
       }}>
         <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
-          CPU Loading Timeline
-          <span style={{ fontWeight: 400, color: colors.textMuted, marginLeft: 8 }}>
-            (click to select time point)
-          </span>
+          CPU Timeline
         </h4>
-        <ProcessCpuTimeline
-          data={timeline}
-          selectedTimestamp={selectedTimestamp}
-          onTimeSelect={setSelectedTimestamp}
-        />
+        <ProcessCpuTimeline data={timeline} selectedTimestamp={null} onTimeSelect={setTimeSelection} />
       </div>
 
-      {/* Profile Type Selector */}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <ProfileTypeButton
-          label="On-CPU"
-          active={profileType === 'on_cpu'}
-          onClick={() => setProfileType('on_cpu')}
-        />
-        <ProfileTypeButton
-          label="Off-CPU"
-          active={profileType === 'off_cpu'}
-          onClick={() => setProfileType('off_cpu')}
-        />
-        <span style={{ flex: 1 }} />
-        <span style={{ fontSize: 12, color: colors.textMuted, alignSelf: 'center' }}>
-          Target: {comm} (PID:{pid})
-        </span>
-      </div>
-
-      {/* Profile Snapshot (Flamegraph) */}
+      {/* Thread Breakdown (Tier 1 — auto) */}
       <div style={{
-        background: colors.bg, border: `1px solid ${colors.cardBorder}`,
+        background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
         borderRadius: 8, padding: 16,
       }}>
+        <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
+          Thread Breakdown ({threads.length} threads)
+        </h4>
+        <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+          <ThreadBreakdown threads={threads} processComm={comm} />
+        </div>
+      </div>
+
+      {/* CPU Profiling (Tier 3 — manual trigger) */}
+      <div style={{
+        background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
+        borderRadius: 8, padding: 16,
+      }}>
+        {profilingStatus === 'idle' && (
+          <div style={{ textAlign: 'center', padding: 20 }}>
+            <p style={{ margin: '0 0 12px', fontSize: 13, color: colors.textSecondary }}>
+              CPU sampling analysis for this process. Generates flame graphs.
+            </p>
+            <p style={{ margin: '0 0 16px', fontSize: 11, color: colors.textMuted }}>
+              Sampling freq: 49Hz | Est. overhead: ~3% CPU
+            </p>
+            <button onClick={startProfiling} style={{
+              padding: '8px 20px', borderRadius: 6, border: 'none',
+              background: '#2563eb', color: '#fff', fontSize: 13, cursor: 'pointer',
+            }}>
+              Start CPU Profile
+            </button>
+          </div>
+        )}
         {profilingStatus === 'starting' && (
           <div style={{ padding: 16, textAlign: 'center', color: colors.textMuted, fontSize: 12 }}>
             Starting profiling engines...
           </div>
         )}
         {profilingStatus === 'failed' && (
-          <div style={{ padding: 16, textAlign: 'center', color: colors.danger, fontSize: 12 }}>
-            Failed to start profiling features. eBPF may not be available.
+          <div style={{ padding: 16, textAlign: 'center' }}>
+            <p style={{ color: colors.danger, fontSize: 12, margin: '0 0 8px' }}>
+              Failed to start profiling. eBPF may not be available.
+            </p>
+            <button onClick={() => { startedRef.current = false; startProfiling() }} style={{
+              padding: '6px 14px', borderRadius: 4, border: `1px solid ${colors.danger}`,
+              background: 'transparent', color: colors.danger, fontSize: 12, cursor: 'pointer',
+            }}>
+              Retry
+            </button>
           </div>
         )}
         {profilingStatus === 'active' && (
-          <ProfileSnapshot
-            pid={pid}
-            comm={comm}
-            profileType={profileType}
-            selectedTimestamp={null}
-            threadComms={threads.map(t => t.comm)}
-          />
+          <>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+              <ProfileTypeButton label="On-CPU" active={profileType === 'on_cpu'}
+                onClick={() => setProfileType('on_cpu')} />
+              <ProfileTypeButton label="Off-CPU" active={profileType === 'off_cpu'}
+                onClick={() => setProfileType('off_cpu')} />
+            </div>
+            <ProfileSnapshot
+              pid={pid}
+              comm={comm}
+              profileType={profileType}
+              selectedTimestamp={null}
+              timeSelection={timeSelection}
+              threadComms={threads.map(t => t.comm)}
+            />
+          </>
         )}
-      </div>
-
-      {/* Thread Breakdown */}
-      <div style={{
-        background: colors.bg, border: `1px solid ${colors.cardBorder}`,
-        borderRadius: 8, padding: 16,
-      }}>
-        <h4 style={{ margin: '0 0 8px', fontSize: 13, color: colors.textSecondary }}>
-          Thread Breakdown
-        </h4>
-        <ThreadBreakdown threads={threads} processComm={comm} />
       </div>
     </div>
   )
@@ -243,18 +258,14 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
 
 function ProfileTypeButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      style={{
-        padding: '6px 14px', borderRadius: 4, fontSize: 12, fontWeight: 500,
-        border: `1px solid ${active ? colors.accent : colors.cardBorder}`,
-        background: active ? colors.activeBg : 'transparent',
-        color: active ? colors.accent : colors.textSecondary,
-        cursor: 'pointer',
-      }}
-    >
+    <button onClick={onClick} style={{
+      padding: '6px 14px', borderRadius: 4, fontSize: 12, fontWeight: 500,
+      border: `1px solid ${active ? colors.accent : colors.cardBorder}`,
+      background: active ? colors.activeBg : 'transparent',
+      color: active ? colors.accent : colors.textSecondary,
+      cursor: 'pointer',
+    }}>
       {active ? '◉' : '○'} {label}
     </button>
   )
 }
-

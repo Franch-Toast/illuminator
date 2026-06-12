@@ -26,12 +26,19 @@ export interface FeatureEntry {
   name: string
   display_name: string
   category: string
+  tier: number
   state: 'inactive' | 'active' | 'paused' | 'starting' | 'stopping'
   is_recording: boolean
   batches_processed: number
   records_processed: number
   errors: number
   uptime_ms: number
+}
+
+export interface BudgetResponse {
+  usage: { rss_bytes: number; cpu_pct: number; active_features: number; ebpf_probes: number }
+  limits: { max_memory_bytes: number; max_cpu_pct: number; max_ebpf_probes: number }
+  exceeded: boolean
 }
 
 export const api = {
@@ -60,4 +67,16 @@ export const api = {
     get<{ recording: boolean; feature: string; file?: string; bytes_written?: number; batches_written?: number }>(
       `/api/v1/features/${name}/record/status`
     ),
+
+  // Resource Budget
+  budget: () => get<BudgetResponse>('/api/v1/budget'),
+
+  // Plugin Hot-reload
+  pluginsReload: () => post<{ status: string; loaded: number; plugins: string[] }>('/api/v1/plugins/reload', {}),
+  pluginsList: () => get<{ plugins: Array<{ name: string; type: string; source: string }> }>('/api/v1/plugins'),
+
+  // Global Recording
+  recordingStart: () => post<{ status: string; recording_features: string[] }>('/api/v1/recording/start', {}),
+  recordingStop: () => post<{ status: string; stopped_features: Array<{ feature: string; file: string; bytes: number }> }>('/api/v1/recording/stop', {}),
+  recordingStatus: () => get<{ recording: boolean; features: Array<{ feature: string; bytes_written: number }>; total_bytes: number }>('/api/v1/recording/status'),
 }

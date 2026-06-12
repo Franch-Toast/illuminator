@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
-import { colors } from '../../styles/theme'
+import EChart from './EChart'
+import type { EChartsOption } from './EChart'
 
 export interface CpuDataPoint {
   timestamp: number
@@ -14,85 +15,81 @@ export interface CpuDataPoint {
 
 interface StackedAreaChartProps {
   data: CpuDataPoint[]
-  width?: number
+  width?: number | string
   height?: number
+  group?: string
 }
 
-const LAYERS: { key: keyof Omit<CpuDataPoint, 'timestamp'>; color: string; label: string }[] = [
-  { key: 'steal_pct', color: '#9333ea', label: 'Steal' },
-  { key: 'softirq_pct', color: '#ec4899', label: 'SoftIRQ' },
-  { key: 'irq_pct', color: '#f97316', label: 'IRQ' },
-  { key: 'iowait_pct', color: '#eab308', label: 'IOWait' },
-  { key: 'system_pct', color: '#ef4444', label: 'System' },
-  { key: 'user_pct', color: '#3b82f6', label: 'User' },
-  { key: 'idle_pct', color: '#374151', label: 'Idle' },
+const LAYERS = [
+  { key: 'user_pct' as const, color: '#3b82f6', label: 'User' },
+  { key: 'system_pct' as const, color: '#ef4444', label: 'System' },
+  { key: 'iowait_pct' as const, color: '#eab308', label: 'IOWait' },
+  { key: 'irq_pct' as const, color: '#f97316', label: 'IRQ' },
+  { key: 'softirq_pct' as const, color: '#ec4899', label: 'SoftIRQ' },
+  { key: 'steal_pct' as const, color: '#9333ea', label: 'Steal' },
 ]
 
-export default function StackedAreaChart({ data, width = 700, height = 220 }: StackedAreaChartProps) {
-  const padding = { top: 10, right: 20, bottom: 24, left: 40 }
-  const innerW = width - padding.left - padding.right
-  const innerH = height - padding.top - padding.bottom
+export default function StackedAreaChart({ data, width = '100%', height = 240, group }: StackedAreaChartProps) {
+  const option = useMemo((): EChartsOption => {
+    const times = data.map(d => {
+      const date = new Date(d.timestamp)
+      return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
+    })
 
-  const paths = useMemo(() => {
-    if (data.length < 2) return []
-
-    const n = data.length
-    const xScale = (i: number) => padding.left + (i / (n - 1)) * innerW
-
-    const stackedLayers: { key: string; color: string; d: string }[] = []
-    const cumulative = Array(n).fill(0)
-
-    for (const layer of LAYERS) {
-      const prevY = [...cumulative]
-      for (let i = 0; i < n; i++) {
-        cumulative[i] += (data[i][layer.key] as number) || 0
-      }
-
-      const yScale = (v: number) => padding.top + innerH - (v / 100) * innerH
-
-      let d = `M ${xScale(0)} ${yScale(cumulative[0])}`
-      for (let i = 1; i < n; i++) {
-        d += ` L ${xScale(i)} ${yScale(cumulative[i])}`
-      }
-      for (let i = n - 1; i >= 0; i--) {
-        d += ` L ${xScale(i)} ${yScale(prevY[i])}`
-      }
-      d += ' Z'
-      stackedLayers.push({ key: layer.key, color: layer.color, d })
+    return {
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        backgroundColor: '#1a1d23',
+        borderColor: '#2a2d35',
+        textStyle: { color: '#e0e0e0', fontSize: 12 },
+        formatter: (params: unknown) => {
+          const items = params as Array<{ seriesName: string; value: number; color: string }>
+          if (!items?.length) return ''
+          let html = `<div style="font-size:11px;color:#888">${items[0].seriesName ? times[0] : ''}</div>`
+          for (const item of items) {
+            if (item.value > 0.1) {
+              html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${item.color};margin-right:4px"></span>${item.seriesName}: ${item.value.toFixed(1)}%</div>`
+            }
+          }
+          return html
+        },
+      },
+      legend: {
+        data: LAYERS.map(l => l.label),
+        bottom: 0,
+        textStyle: { color: '#b0b0b0', fontSize: 11 },
+        itemWidth: 12,
+        itemHeight: 8,
+      },
+      grid: { top: 10, right: 16, bottom: 36, left: 44 },
+      xAxis: {
+        type: 'category',
+        data: times,
+        boundaryGap: false,
+        axisLine: { lineStyle: { color: '#3a3d45' } },
+        axisLabel: { color: '#888', fontSize: 10, interval: 'auto' },
+      },
+      yAxis: {
+        type: 'value',
+        max: 100,
+        axisLine: { lineStyle: { color: '#3a3d45' } },
+        splitLine: { lineStyle: { color: '#2a2d35' } },
+        axisLabel: { color: '#888', fontSize: 10, formatter: '{value}%' },
+      },
+      series: LAYERS.map(layer => ({
+        name: layer.label,
+        type: 'line' as const,
+        stack: 'cpu',
+        areaStyle: { opacity: 0.7 },
+        lineStyle: { width: 0 },
+        symbol: 'none',
+        data: data.map(d => d[layer.key] || 0),
+        itemStyle: { color: layer.color },
+      })),
+      animation: false,
     }
-    return stackedLayers
-  }, [data, innerW, innerH, padding.left, padding.top])
+  }, [data])
 
-  const yTicks = [0, 25, 50, 75, 100]
-
-  return (
-    <div>
-      <svg width={width} height={height} style={{ display: 'block' }}>
-        {yTicks.map(v => {
-          const y = padding.top + innerH - (v / 100) * innerH
-          return (
-            <g key={v}>
-              <line x1={padding.left} x2={width - padding.right}
-                    y1={y} y2={y} stroke={colors.cardBorder} strokeWidth={0.5} />
-              <text x={padding.left - 6} y={y + 4} textAnchor="end"
-                    fill={colors.textMuted} fontSize={10}>{v}%</text>
-            </g>
-          )
-        })}
-
-        {paths.map(p => (
-          <path key={p.key} d={p.d} fill={p.color} opacity={0.85} />
-        ))}
-      </svg>
-
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', paddingLeft: padding.left }}>
-        {LAYERS.filter(l => l.key !== 'idle_pct').map(l => (
-          <div key={l.key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <div style={{ width: 10, height: 10, borderRadius: 2, background: l.color }} />
-            <span style={{ fontSize: 11, color: colors.textSecondary }}>{l.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
+  return <EChart option={option} width={width} height={height} group={group} />
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useTimeStore } from '../../stores/useTimeStore'
 import { colors } from '../../styles/theme'
 
 interface FlameNode {
@@ -12,6 +13,13 @@ interface StackSample {
   tid: number
   stack: string[]
   count: number
+  timestamp: number
+}
+
+export interface TimeSelection {
+  type: 'point' | 'range'
+  start: number
+  end: number
 }
 
 interface ProfileSnapshotProps {
@@ -19,25 +27,27 @@ interface ProfileSnapshotProps {
   comm: string
   profileType: 'on_cpu' | 'off_cpu'
   selectedTimestamp: number | null
+  timeSelection?: TimeSelection | null
   threadComms?: string[]
 }
 
-export default function ProfileSnapshot({ pid, comm, profileType, threadComms }: ProfileSnapshotProps) {
+export default function ProfileSnapshot({ pid, comm, profileType, timeSelection, threadComms }: ProfileSnapshotProps) {
   const [root, setRoot] = useState<FlameNode | null>(null)
   const [topFunctions, setTopFunctions] = useState<{ name: string; pct: number }[]>([])
   const [totalSamples, setTotalSamples] = useState(0)
+  const [filteredSamples, setFilteredSamples] = useState(0)
   const [pollCount, setPollCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const accumulatedRef = useRef<StackSample[]>([])
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const mode = useTimeStore(s => s.mode)
 
   const hostPidRef = useRef<number | null>(null)
+  const MAX_SAMPLES = 5000
 
   const processCollectedData = useCallback((rawSamples: Array<Record<string, unknown>>) => {
-    // In containerized environments, BPF reports host-namespace PIDs which differ
-    // from container-visible PIDs. Discover the host PID by finding samples whose
-    // comm matches the target process name or any known thread name of the process.
     const knownComms = new Set<string>([comm, ...(threadComms ?? [])])
+    const now = Date.now()
 
     if (hostPidRef.current === null) {
       for (const s of rawSamples) {
@@ -63,6 +73,7 @@ export default function ProfileSnapshot({ pid, comm, profileType, threadComms }:
           comm: (s.comm as string) ?? '',
           tid: (s.tid as number) ?? 0,
           count: (s.count as number) ?? ((s.duration_ns as number) ? Math.round((s.duration_ns as number) / 1000) : 1),
+          timestamp: now,
           stack: [
             ...kernelStack.map(f => f.function_name || `0x${(f.address ?? 0).toString(16)}`),
             ...userStack.map(f => f.function_name || `0x${(f.address ?? 0).toString(16)}`),
@@ -72,19 +83,40 @@ export default function ProfileSnapshot({ pid, comm, profileType, threadComms }:
 
     if (newSamples.length > 0) {
       accumulatedRef.current = [...accumulatedRef.current, ...newSamples]
-      const maxAccumulated = 2000
-      if (accumulatedRef.current.length > maxAccumulated) {
-        accumulatedRef.current = accumulatedRef.current.slice(-maxAccumulated)
+      if (accumulatedRef.current.length > MAX_SAMPLES) {
+        accumulatedRef.current = accumulatedRef.current.slice(-MAX_SAMPLES)
       }
     }
 
-    if (accumulatedRef.current.length > 0) {
-      const tree = buildFlameTree(accumulatedRef.current)
+    setTotalSamples(accumulatedRef.current.length)
+    setPollCount(c => c + 1)
+  }, [pid, comm, threadComms])
+
+  useEffect(() => {
+    const samples = accumulatedRef.current
+    if (samples.length === 0) {
+      setRoot(null)
+      setFilteredSamples(0)
+      return
+    }
+
+    let filtered: StackSample[]
+    if (timeSelection) {
+      filtered = samples.filter(s => s.timestamp >= timeSelection.start && s.timestamp <= timeSelection.end)
+    } else {
+      filtered = samples
+    }
+
+    setFilteredSamples(filtered.length)
+    if (filtered.length > 0) {
+      const tree = buildFlameTree(filtered)
       setRoot(tree)
       setTopFunctions(extractTopFunctions(tree, 10))
-      setTotalSamples(accumulatedRef.current.length)
+    } else {
+      setRoot(null)
+      setTopFunctions([])
     }
-  }, [pid, comm, threadComms])
+  }, [totalSamples, timeSelection])
 
   useEffect(() => {
     accumulatedRef.current = []
@@ -92,8 +124,16 @@ export default function ProfileSnapshot({ pid, comm, profileType, threadComms }:
     setRoot(null)
     setTopFunctions([])
     setTotalSamples(0)
+    setFilteredSamples(0)
     setPollCount(0)
     setError(null)
+  }, [pid, profileType])
+
+  useEffect(() => {
+    if (mode === 'paused') {
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+      return
+    }
 
     const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
 
@@ -104,7 +144,6 @@ export default function ProfileSnapshot({ pid, comm, profileType, threadComms }:
         const data = await resp.json()
         const rawSamples = data.stack_samples ?? []
         processCollectedData(rawSamples)
-        setPollCount(c => c + 1)
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Fetch failed')
       }
@@ -115,7 +154,7 @@ export default function ProfileSnapshot({ pid, comm, profileType, threadComms }:
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
     }
-  }, [pid, profileType, processCollectedData])
+  }, [pid, profileType, processCollectedData, mode])
 
   if (error) {
     return <div style={{ padding: 24, textAlign: 'center', color: colors.danger }}>{error}</div>
@@ -139,16 +178,27 @@ export default function ProfileSnapshot({ pid, comm, profileType, threadComms }:
 
   return (
     <div>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 4 }}>
         <span style={{ fontSize: 12, color: colors.textMuted }}>
-          {profileType === 'on_cpu' ? 'On-CPU' : 'Off-CPU'} Profile — {totalSamples} samples accumulated
+          {profileType === 'on_cpu' ? 'On-CPU' : 'Off-CPU'} Profile —{' '}
+          {timeSelection
+            ? `${filteredSamples}/${totalSamples} samples (filtered)`
+            : `${totalSamples} samples`
+          }
         </span>
-        <button
-          onClick={() => { accumulatedRef.current = []; setRoot(null); setTotalSamples(0) }}
-          style={{ fontSize: 11, padding: '2px 8px', borderRadius: 3, border: `1px solid ${colors.cardBorder}`, background: 'transparent', color: colors.textMuted, cursor: 'pointer' }}
-        >
-          Reset
-        </button>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {timeSelection && (
+            <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 3, background: 'rgba(96,165,250,0.15)', color: colors.accent }}>
+              {timeSelection.type === 'point' ? '1s window' : `${((timeSelection.end - timeSelection.start) / 1000).toFixed(0)}s range`}
+            </span>
+          )}
+          <button
+            onClick={() => { accumulatedRef.current = []; setRoot(null); setTotalSamples(0); setFilteredSamples(0) }}
+            style={{ fontSize: 11, padding: '2px 8px', borderRadius: 3, border: `1px solid ${colors.cardBorder}`, background: 'transparent', color: colors.textMuted, cursor: 'pointer' }}
+          >
+            Reset
+          </button>
+        </div>
       </div>
       <div style={{ display: 'flex', gap: 16 }}>
         <div style={{ flex: 1 }}>

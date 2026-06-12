@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { api } from '../services/apiClient'
+import { useTimeStore } from '../stores/useTimeStore'
 import type { ThreadEntry } from '../components/charts/ThreadBreakdown'
 
 interface ProcessTimelinePoint {
@@ -19,10 +20,13 @@ interface CpuCollectResponse {
 export function useProcessDetail(pid: number, active: boolean, intervalMs = 2000) {
   const [timeline, setTimeline] = useState<ProcessTimelinePoint[]>([])
   const [threads, setThreads] = useState<ThreadEntry[]>([])
+  const [processGone, setProcessGone] = useState(false)
   const timelineRef = useRef<ProcessTimelinePoint[]>([])
+  const missCountRef = useRef(0)
+  const mode = useTimeStore(s => s.mode)
 
   useEffect(() => {
-    if (!active || !pid) return
+    if (!active || !pid || mode === 'paused') return
 
     let cancelled = false
     const poll = async () => {
@@ -40,6 +44,8 @@ export function useProcessDetail(pid: number, active: boolean, intervalMs = 2000
 
           if (rec.labels?.type === 'process') {
             foundProcess = true
+            missCountRef.current = 0
+            setProcessGone(false)
             const point: ProcessTimelinePoint = {
               timestamp: now,
               cpu_user_pct: (rec.fields?.cpu_user_pct as number) ?? 0,
@@ -61,7 +67,10 @@ export function useProcessDetail(pid: number, active: boolean, intervalMs = 2000
         }
 
         if (threadList.length > 0) setThreads(threadList)
-        if (!foundProcess && timelineRef.current.length > 0) {
+
+        if (!foundProcess) {
+          missCountRef.current++
+          if (missCountRef.current >= 5) setProcessGone(true)
           const point: ProcessTimelinePoint = {
             timestamp: now, cpu_user_pct: 0, cpu_sys_pct: 0,
           }
@@ -77,13 +86,15 @@ export function useProcessDetail(pid: number, active: boolean, intervalMs = 2000
     poll()
     const timer = setInterval(poll, intervalMs)
     return () => { cancelled = true; clearInterval(timer) }
-  }, [pid, active, intervalMs])
+  }, [pid, active, intervalMs, mode])
 
   const clear = useCallback(() => {
     timelineRef.current = []
     setTimeline([])
     setThreads([])
+    missCountRef.current = 0
+    setProcessGone(false)
   }, [])
 
-  return { timeline, threads, clear }
+  return { timeline, threads, processGone, clear }
 }

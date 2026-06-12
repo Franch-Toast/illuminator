@@ -1,5 +1,8 @@
-import { useCallback, useMemo, useRef } from 'react'
-import { colors } from '../../styles/theme'
+import { useMemo, useEffect, useRef } from 'react'
+import EChart, { echarts } from './EChart'
+import type { EChartsOption } from './EChart'
+import type { TimeSelection } from './ProfileSnapshot'
+import { useTimeStore } from '../../stores/useTimeStore'
 
 interface TimelinePoint {
   timestamp: number
@@ -10,132 +13,164 @@ interface TimelinePoint {
 interface ProcessCpuTimelineProps {
   data: TimelinePoint[]
   selectedTimestamp: number | null
-  onTimeSelect: (timestamp: number) => void
-  width?: number
+  onTimeSelect?: (selection: TimeSelection | null) => void
+  width?: number | string
   height?: number
 }
 
 export default function ProcessCpuTimeline({
-  data, selectedTimestamp, onTimeSelect, width = 680, height = 140,
+  data,
+  onTimeSelect,
+  width = '100%',
+  height = 200,
 }: ProcessCpuTimelineProps) {
-  const svgRef = useRef<SVGSVGElement>(null)
-  const padding = { top: 10, right: 20, bottom: 24, left: 46 }
-  const innerW = width - padding.left - padding.right
-  const innerH = height - padding.top - padding.bottom
+  const mode = useTimeStore(s => s.mode)
+  const chartRef = useRef<echarts.ECharts | null>(null)
+  const dataRef = useRef(data)
+  const modeRef = useRef(mode)
+  const onTimeSelectRef = useRef(onTimeSelect)
 
-  const maxY = useMemo(() => {
-    if (data.length === 0) return 100
-    const max = Math.max(...data.map(d => d.cpu_user_pct + d.cpu_sys_pct))
-    return Math.max(max * 1.1, 10)
-  }, [data])
+  dataRef.current = data
+  modeRef.current = mode
+  onTimeSelectRef.current = onTimeSelect
 
-  const { userPath, sysPath } = useMemo(() => {
-    if (data.length < 2) return { userPath: '', sysPath: '' }
-    const n = data.length
-    const xScale = (i: number) => padding.left + (i / (n - 1)) * innerW
-    const yScale = (v: number) => padding.top + innerH - (v / maxY) * innerH
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
 
-    let uPath = `M ${xScale(0)} ${yScale(data[0].cpu_user_pct)}`
-    let sPath = `M ${xScale(0)} ${yScale(data[0].cpu_user_pct + data[0].cpu_sys_pct)}`
-    for (let i = 1; i < n; i++) {
-      uPath += ` L ${xScale(i)} ${yScale(data[i].cpu_user_pct)}`
-      sPath += ` L ${xScale(i)} ${yScale(data[i].cpu_user_pct + data[i].cpu_sys_pct)}`
-    }
-    return { userPath: uPath, sysPath: sPath }
-  }, [data, maxY, innerW, innerH, padding.left, padding.top])
+    chart.off('click')
+    chart.off('brushEnd')
 
-  const handleClick = useCallback((e: React.MouseEvent<SVGSVGElement>) => {
-    if (data.length < 2 || !svgRef.current) return
-    const rect = svgRef.current.getBoundingClientRect()
-    const x = e.clientX - rect.left - padding.left
-    const ratio = Math.max(0, Math.min(1, x / innerW))
-    const idx = Math.round(ratio * (data.length - 1))
-    if (idx >= 0 && idx < data.length) {
-      onTimeSelect(data[idx].timestamp)
-    }
-  }, [data, innerW, padding.left, onTimeSelect])
+    chart.on('click', (params: unknown) => {
+      const p = params as { dataIndex?: number }
+      if (modeRef.current !== 'paused' || !onTimeSelectRef.current || p.dataIndex === undefined) return
+      const currentData = dataRef.current
+      const point = currentData[p.dataIndex]
+      if (!point) return
+      onTimeSelectRef.current({
+        type: 'point',
+        start: point.timestamp - 500,
+        end: point.timestamp + 500,
+      })
+    })
 
-  const selectedIdx = useMemo(() => {
-    if (!selectedTimestamp || data.length === 0) return -1
-    let closest = 0
-    let minDiff = Infinity
-    for (let i = 0; i < data.length; i++) {
-      const diff = Math.abs(data[i].timestamp - selectedTimestamp)
-      if (diff < minDiff) { minDiff = diff; closest = i }
-    }
-    return closest
-  }, [data, selectedTimestamp])
+    chart.on('brushEnd', (params: unknown) => {
+      const p = params as { areas?: Array<{ coordRange?: number[] }> }
+      if (!onTimeSelectRef.current || !p.areas?.length) return
+      const area = p.areas[0]
+      if (!area?.coordRange) return
+      const [startIdx, endIdx] = area.coordRange
+      const currentData = dataRef.current
+      if (startIdx === undefined || endIdx === undefined) return
+      const startTs = currentData[Math.max(0, Math.round(startIdx))]?.timestamp
+      const endTs = currentData[Math.min(currentData.length - 1, Math.round(endIdx))]?.timestamp
+      if (startTs && endTs) {
+        onTimeSelectRef.current({ type: 'range', start: Math.min(startTs, endTs), end: Math.max(startTs, endTs) })
+      }
+    })
+  }, [])
 
-  if (data.length < 2) {
-    return (
-      <div style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', color: colors.textMuted, fontSize: 12 }}>
-        Collecting CPU data for this process...
-      </div>
-    )
+  const handleInit = (chart: echarts.ECharts) => {
+    chartRef.current = chart
   }
 
-  const xScale = (i: number) => padding.left + (i / (data.length - 1)) * innerW
-  const yScale = (v: number) => padding.top + innerH - (v / maxY) * innerH
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    if (mode === 'paused') {
+      try {
+        chart.dispatchAction({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: 'lineX' } })
+      } catch { /* brush not available */ }
+    } else {
+      try {
+        chart.dispatchAction({ type: 'takeGlobalCursor', key: 'brush', brushOption: { brushType: false } })
+      } catch { /* ignore */ }
+      if (onTimeSelect) onTimeSelect(null)
+    }
+  }, [mode])
+
+  const option = useMemo((): EChartsOption => {
+    const times = data.map(d => {
+      const date = new Date(d.timestamp)
+      return `${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
+    })
+
+    const base: EChartsOption = {
+      toolbox: { show: false, feature: { brush: { type: ['lineX', 'clear'] } } },
+      brush: {
+        toolbox: ['lineX', 'clear'],
+        brushStyle: { borderWidth: 1, color: 'rgba(96,165,250,0.15)', borderColor: '#60a5fa' },
+        xAxisIndex: 0,
+        throttleType: 'debounce',
+        throttleDelay: 300,
+      },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: '#1a1d23',
+        borderColor: '#2a2d35',
+        textStyle: { color: '#e0e0e0', fontSize: 12 },
+      },
+      legend: {
+        data: ['User', 'System'],
+        bottom: 0,
+        textStyle: { color: '#b0b0b0', fontSize: 11 },
+      },
+      grid: { top: 10, right: 16, bottom: 32, left: 44 },
+      xAxis: {
+        type: 'category',
+        data: times,
+        boundaryGap: false,
+        axisLine: { lineStyle: { color: '#3a3d45' } },
+        axisLabel: { color: '#888', fontSize: 10 },
+      },
+      yAxis: {
+        type: 'value',
+        min: 0,
+        axisLine: { lineStyle: { color: '#3a3d45' } },
+        splitLine: { lineStyle: { color: '#2a2d35' } },
+        axisLabel: { color: '#888', fontSize: 10, formatter: '{value}%' },
+      },
+      series: [
+        {
+          name: 'User',
+          type: 'line',
+          stack: 'total',
+          areaStyle: { opacity: 0.6, color: '#3b82f6' },
+          lineStyle: { width: 2, color: '#3b82f6' },
+          symbol: 'none',
+          data: data.map(d => Number(d.cpu_user_pct.toFixed(1))),
+          itemStyle: { color: '#3b82f6' },
+        },
+        {
+          name: 'System',
+          type: 'line',
+          stack: 'total',
+          areaStyle: { opacity: 0.6, color: '#ef4444' },
+          lineStyle: { width: 2, color: '#ef4444' },
+          symbol: 'none',
+          data: data.map(d => Number(d.cpu_sys_pct.toFixed(1))),
+          itemStyle: { color: '#ef4444' },
+        },
+      ],
+      animation: false,
+    }
+
+    return base
+  }, [data])
 
   return (
     <div>
-      <svg
-        ref={svgRef}
-        width={width}
-        height={height}
-        style={{ display: 'block', cursor: 'crosshair' }}
-        onClick={handleClick}
-      >
-        {/* Grid */}
-        {[0, 25, 50, 75, 100].filter(v => v <= maxY).map(v => {
-          const y = yScale(v)
-          return (
-            <g key={v}>
-              <line x1={padding.left} x2={width - padding.right} y1={y} y2={y}
-                    stroke={colors.cardBorder} strokeWidth={0.5} />
-              <text x={padding.left - 6} y={y + 4} textAnchor="end"
-                    fill={colors.textMuted} fontSize={10}>{v}%</text>
-            </g>
-          )
-        })}
-
-        {/* System (total = user + sys) line */}
-        <path d={sysPath} fill="none" stroke="#ef4444" strokeWidth={1.5} opacity={0.7} />
-        {/* User line */}
-        <path d={userPath} fill="none" stroke="#3b82f6" strokeWidth={2} />
-
-        {/* Selected time indicator */}
-        {selectedIdx >= 0 && (
-          <g>
-            <line
-              x1={xScale(selectedIdx)} x2={xScale(selectedIdx)}
-              y1={padding.top} y2={padding.top + innerH}
-              stroke={colors.accent} strokeWidth={1} strokeDasharray="3,2"
-            />
-            <circle
-              cx={xScale(selectedIdx)}
-              cy={yScale(data[selectedIdx].cpu_user_pct + data[selectedIdx].cpu_sys_pct)}
-              r={4} fill={colors.accent} stroke="#fff" strokeWidth={1.5}
-            />
-          </g>
-        )}
-      </svg>
-
-      <div style={{ display: 'flex', gap: 12, paddingLeft: padding.left, marginTop: 4 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <div style={{ width: 12, height: 2, background: '#3b82f6', borderRadius: 1 }} />
-          <span style={{ fontSize: 10, color: colors.textSecondary }}>User</span>
+      <EChart option={option} width={width} height={height} onInit={handleInit} />
+      {mode === 'paused' && (
+        <div style={{ fontSize: 10, color: '#6b7280', textAlign: 'center', marginTop: 4 }}>
+          Click a time point or drag to select a range — flame graph will aggregate samples in that window
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <div style={{ width: 12, height: 2, background: '#ef4444', borderRadius: 1 }} />
-          <span style={{ fontSize: 10, color: colors.textSecondary }}>User + System</span>
+      )}
+      {mode === 'live' && data.length > 0 && (
+        <div style={{ fontSize: 10, color: '#6b7280', textAlign: 'center', marginTop: 4 }}>
+          Press Space to pause and select time range for flame graph
         </div>
-        {selectedTimestamp && (
-          <span style={{ fontSize: 10, color: colors.accent, marginLeft: 'auto' }}>
-            Selected: {new Date(selectedTimestamp).toLocaleTimeString()}
-          </span>
-        )}
-      </div>
+      )}
     </div>
   )
 }
