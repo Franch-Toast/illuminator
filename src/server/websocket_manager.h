@@ -41,6 +41,24 @@ public:
         subscriptions_[key].insert(fd);
     }
 
+    // Handle a WebSocket upgrade from the HTTP server (same-port mode).
+    // Returns true if the connection was accepted (caller must NOT close fd).
+    bool HandleUpgrade(int fd, const std::string& raw_request) {
+        if (!ValidateAuth(raw_request)) {
+            const char* resp = "HTTP/1.1 401 Unauthorized\r\n\r\n";
+            ::write(fd, resp, strlen(resp));
+            return false;
+        }
+        if (!WebSocketCodec::PerformHandshake(fd, raw_request)) {
+            return false;
+        }
+        auto path = WebSocketCodec::GetUpgradePath(raw_request);
+        AddConnection(fd, path);
+        return true;
+    }
+
+    // Legacy: listen on a separate port. Optional — prefer same-port via
+    // HttpServer::SetWebSocketUpgradeHandler + HandleUpgrade.
     bool Listen(const std::string& addr, int port) {
         ws_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (ws_fd_ < 0) return false;

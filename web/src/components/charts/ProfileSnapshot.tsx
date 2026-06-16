@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useTimeStore } from '../../stores/useTimeStore'
 import { colors } from '../../styles/theme'
 import { api } from '../../services/apiClient'
+import { getDataSource } from '../../hooks/useDataSource'
 import type { FlameNode, StackSample as WorkerSample } from '../../workers/flameGraphWorker'
 
 interface StackSample {
@@ -163,8 +164,11 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
     }
 
     const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
+    let fetchInFlight = false
 
     const poll = async () => {
+      if (fetchInFlight) return
+      fetchInFlight = true
       abortRef.current?.abort()
       abortRef.current = new AbortController()
 
@@ -184,12 +188,27 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
       } catch (e) {
         if (e instanceof Error && e.name === 'AbortError') return
         setError(e instanceof Error ? e.message : 'Fetch failed')
+      } finally {
+        fetchInFlight = false
       }
     }
 
+    // WS-driven fetch: subscribe to notifications, pull on notify
+    const ds = getDataSource()
+    const unsub = ds.subscribe(featureName, (batch) => {
+      const data = batch.data as Record<string, unknown> | undefined
+      if (data?.type === 'notify') {
+        poll()
+      }
+    })
+
+    // Fallback polling: slower interval when WS is connected (5s), fast when not (1.5s)
+    const fallbackMs = ds.getStatus() === 'connected' ? 5000 : 1500
     poll()
-    timerRef.current = setInterval(poll, 1500)
+    timerRef.current = setInterval(poll, fallbackMs)
+
     return () => {
+      unsub()
       if (timerRef.current) clearInterval(timerRef.current)
       abortRef.current?.abort()
     }

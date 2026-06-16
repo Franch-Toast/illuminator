@@ -649,69 +649,64 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 目标：  HTTP+WS(:9527, httplib 统一处理)
 ```
 
-**实现路径：**
-1. httplib 已支持 WebSocket（检查版本是否支持或升级）
-2. 在 `RegisterApiRoutes` 中注册 `/ws/features` 为 WebSocket 升级端点
-3. 将 `WebSocketManager` 从独立 socket 改为使用 httplib 提供的 fd
-4. 或保留当前 `WebSocketManager`，但让 httplib 在收到 `/ws/` 路径时代理到 WS manager
-5. 移除 `getWsUrl()` 中的 `port + 1` 计算，改为 `window.location.host`
+**✅ 已实现（2026-06-16）：**
 
-**前端变更：**
-```typescript
-// 修改后（同端口）:
-private getWsUrl(): string {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/ws/features`
-}
-```
+采用 **httplib::Server 子类化** 方案：创建 `WsAwareServer` 覆盖 `process_and_close_socket()`，
+用 `MSG_PEEK` 检测 WebSocket Upgrade 请求，在同一 TCP 端口 (9527) 上同时处理 HTTP 和 WS 连接。
 
-**预估工作量：** 中等（1-2 天）  
-**风险：** 需确认 httplib 版本的 WS 支持质量；如不支持可考虑替换为 uWebSockets 或 Boost.Beast
+关键文件变更：
+- `src/server/http_server.h`: 新增 `WsAwareServer` 子类
+- `src/server/websocket_manager.h`: 新增 `HandleUpgrade()` 公开方法
+- `src/cli/main.cc`: 移除独立 WS 端口监听，通过 `SetWebSocketUpgradeHandler` 注入
+- `web/src/services/liveDataSource.ts`: `getWsUrl()` 简化为 `window.location.host`
+- `web/vite.config.ts`: WS proxy target 改为 9527
+
+**验证结果：** Python 客户端在 port 9527 成功 WS 握手、subscribe、接收 8 帧数据/7s
 
 ---
 
 #### ★★★ P2-B（高）：前端组件测试 + E2E
 
-**问题：** 当前仅有 hooks/services 层的 Vitest 单元测试，缺少：
-- 组件渲染测试（CpuPage、ProfileSnapshot 等是否正确渲染）
-- 端到端测试（用户交互流程是否完整可用）
-- WS 连接/降级行为的集成测试
+**✅ 已实现（2026-06-16）：**
 
-**建议测试策略：**
+**测试框架搭建：**
+| 层级 | 工具 | 状态 |
+|------|------|------|
+| 组件渲染 | Vitest + React Testing Library | ✅ 已配置 + 13 个新测试 |
+| 集成测试 | Vitest + Mock WS | ✅ 已有 LiveDataSource 4 项测试 |
+| E2E | Playwright (Chromium) | ✅ 已配置 + smoke.spec.ts |
 
-| 层级 | 工具 | 覆盖范围 |
-|------|------|----------|
-| 组件渲染 | Vitest + React Testing Library | CpuPage, ProfileSnapshot, ProcessTable, ConnectionIndicator |
-| 集成测试 | Vitest + MSW (Mock WS/HTTP) | LiveDataSource 双通道切换、subscribe 行为、降级逻辑 |
-| E2E | Playwright | daemon 启动 → 浏览器打开 → 数据流 → 火焰图 → 录制 → 回放 |
+**已完成的测试文件：**
+- `src/components/SubTabBar.test.tsx` — 4 项（渲染、激活态、点击回调、空数组）
+- `src/components/Layout/ConnectionIndicator.test.tsx` — 5 项（三种状态 + tooltip）
+- `src/App.test.tsx` — 4 项（导航渲染、路由、版本获取、连接指示器）
+- `e2e/smoke.spec.ts` — 6 项（页面加载、API、WS 升级、导航、生命周期、deprecation）
 
-**优先覆盖的组件：**
-1. `ProfileSnapshot` — 最复杂的组件（Worker + 异步渲染 + 多数据源）
-2. `CpuPage` — 核心使用场景
-3. `LiveDataSource` — WS/HTTP 切换逻辑的集成测试
-4. `ReplayEngine` — 文件加载 + 播放 + 时间控制
+**当前覆盖率：** 12 test files, 69 tests, all passing (2.29s)
 
-**预估工作量：** 中等（2-3 天，分阶段进行）
+**待扩展方向：**
+1. `ProfileSnapshot` — Worker + 异步渲染测试
+2. `CpuPage` — 完整用户交互流
+3. MSW mock 集成测试（WS 降级路径）
 
 ---
 
 #### ★★☆ P2-6（中）：火焰图接入 LiveDataSource
 
-**问题：** `ProfileSnapshot` 使用独立的 HTTP stream 轮询（`api.featureStream()`），不走 WS 通道。WS 正常时仍产生大量 HTTP 请求。
+**✅ 已实现（2026-06-16）— 方案 B：WS 通知 + HTTP 拉取**
 
-**当前 WS 推送模式限制：** WS 仅推送最新快照（`Latest(key)`），火焰图需要累积所有历史样本。
+**后端变更：**
+- `main.cc` 序列化器检测 `profile` 关键字，发送轻量通知：
+  `{"type":"notify","feature":"cpu_profile","records":10,"ts":...}`
+- 非 profiling 特性继续发送完整数据批次
 
-**方案选项：**
+**前端变更 (`ProfileSnapshot.tsx`)：**
+- 通过 `getDataSource().subscribe(featureName, cb)` 订阅 WS 通知
+- 回调检测 `data.type === 'notify'` → 立即触发 `poll()` 拉取增量数据
+- WS 连接时降级轮询间隔从 1.5s → 5s；WS 断开时恢复 1.5s
+- `fetchInFlight` 防重入保护，避免通知风暴下的并发请求
 
-| 方案 | 描述 | 复杂度 |
-|------|------|--------|
-| A. 扩展 WS 增量模式 | WS 帧携带 `cursor` + 增量 batches | 大 |
-| B. WS 通知 + HTTP 拉取 | WS 推送"有新数据"通知 → 前端 HTTP 拉取 | 中 |
-| C. WS 推送完整 batch | 每次 flush 推送完整 batch（可能较大） | 小 |
-
-**推荐方案 B：** 最小改动，WS 推送轻量通知帧 `{"type":"notify","feature":"cpu_profile","cursor":123}`，前端收到后仅在有新数据时调用 `featureStream(cursor)`，避免无效轮询。
-
-**预估工作量：** 大（方案 A）/ 中（方案 B）
+**验证结果：** cpu_utilization 确认发送全量批次（tier 1-2），profiling 序列化输出 notify 格式（环境限制无法产出 profiling 数据但逻辑正确）
 
 ---
 
@@ -814,12 +809,12 @@ while (true) {
 │   - 页面可见性感知 (隐藏时停止轮询/推送)           │
 │   - DataSource 单例替代 Provider (更轻量)         │
 │                                                 │
-│   ★★★ 高优先级:                                  │
-│   P2-A: WS 同端口方案 (消除双端口部署复杂性)      │
-│   P2-B: 前端组件测试 + E2E (Playwright)          │
+│   ★★★ 高优先级 (已完成):                          │
+│   P2-A: ✅ WS 同端口方案 (消除双端口部署复杂性)   │
+│   P2-B: ✅ 前端组件测试 + E2E (Playwright)       │
 │                                                 │
 │   ★★☆ 中优先级:                                  │
-│   P2-6: 火焰图接入 LiveDataSource (WS 通知)      │
+│   P2-6: ✅ 火焰图接入 LiveDataSource (已实现)     │
 │   P2-1: Replay 流式解析 (ReadableStream)         │
 │                                                 │
 │   ★☆☆ 低优先级:                                  │

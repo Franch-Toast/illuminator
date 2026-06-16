@@ -203,14 +203,14 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     }
     illuminator::PluginManager::Instance().PrintRegisteredPlugins();
 
-    // B1: Parse HTTP address from config (default "127.0.0.1:9527")
+    // Parse HTTP address from config (default "127.0.0.1:9527")
+    // WebSocket now shares the same port via HTTP Upgrade mechanism.
     std::string http_host = "127.0.0.1";
     int http_port = 9527;
     ParseListenAddr(config.server.http_listen, http_host, http_port);
-    int ws_port = http_port + 1;
 
     if (port_override > 0) http_port = port_override;
-    if (ws_port_override > 0) ws_port = ws_port_override;
+    (void)ws_port_override; // deprecated: WS now uses same port as HTTP
 
     illuminator::PipelineController controller;
     auto status = controller.BuildFromConfig(config);
@@ -251,10 +251,19 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     ws_manager.SetBroadcastInterval(1000);
     ws_manager.SetAuthToken(config.server.auth_token);
     ws_manager.SetSerializer([](const std::string& pipeline_key,
-                                illuminator::DataBatchPtr batch) {
+                                illuminator::DataBatchPtr batch) -> std::string {
+        // Profiling features: send lightweight notification (data is large)
+        // Frontend will pull incremental data via featureStream API
+        if (pipeline_key.find("profile") != std::string::npos) {
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            return "{\"type\":\"notify\",\"feature\":\"" + pipeline_key +
+                   "\",\"records\":" + std::to_string(batch->records().size()) +
+                   ",\"ts\":" + std::to_string(now_ms) + "}";
+        }
+        // Tier 1-2 monitoring: send full batch via WS
         return illuminator::BatchToJson(*batch, pipeline_key);
     });
-    ws_manager.Listen(http_host, ws_port);
 
     // FeatureManager: register all configured pipelines as features
     illuminator::FeatureManager feature_manager(controller);
@@ -312,12 +321,18 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     illuminator::RegisterApiRoutes(http_server.server(), controller);
     illuminator::RegisterFeatureRoutes(http_server.server(), feature_manager);
 
+    // Same-port WebSocket: upgrade handler intercepts WS requests on HTTP port
+    http_server.SetWebSocketUpgradeHandler(
+        [&ws_manager](int fd, const std::string& raw_request) -> bool {
+            return ws_manager.HandleUpgrade(fd, raw_request);
+        });
+
     http_server.SetStaticDir("web/dist");
     http_server.Start(http_host, http_port);
     ws_manager.Start();
 
-    IL_INFO("Illuminator daemon running. HTTP on {}:{}, WS on {}:{}. Ctrl+C to stop.",
-            http_host, http_port, http_host, ws_port);
+    IL_INFO("Illuminator daemon running on {}:{} (HTTP + WS same port). Ctrl+C to stop.",
+            http_host, http_port);
 
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);

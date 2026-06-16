@@ -35,7 +35,7 @@ export default defineConfig({
       '/healthz': 'http://localhost:9527',
       '/metrics': 'http://localhost:9527',
       '/ws': {
-        target: 'http://localhost:9528',
+        target: 'http://localhost:9527',
         ws: true,
         changeOrigin: true,
       },
