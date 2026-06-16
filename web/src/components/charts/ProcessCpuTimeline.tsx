@@ -30,9 +30,11 @@ export default function ProcessCpuTimeline({
   const modeRef = useRef(mode)
   const onTimeSelectRef = useRef(onTimeSelect)
 
-  dataRef.current = data
-  modeRef.current = mode
-  onTimeSelectRef.current = onTimeSelect
+  useEffect(() => {
+    dataRef.current = data
+    modeRef.current = mode
+    onTimeSelectRef.current = onTimeSelect
+  })
 
   useEffect(() => {
     const chart = chartRef.current

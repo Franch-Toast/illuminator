@@ -42,7 +42,7 @@ export default function PluginManagerPage() {
   }, [])
 
   useEffect(() => {
-    fetchData()
+    fetchData() // eslint-disable-line react-hooks/set-state-in-effect
     intervalRef.current = setInterval(fetchData, 2000)
     return () => clearInterval(intervalRef.current)
   }, [fetchData])

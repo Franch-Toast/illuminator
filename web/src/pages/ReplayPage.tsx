@@ -38,7 +38,7 @@ export default function ReplayPage() {
       animRef.current = requestAnimationFrame(update)
     } else {
       if (animRef.current) cancelAnimationFrame(animRef.current)
-      setProgress(engine.getProgress())
+      setProgress(engine.getProgress()) // eslint-disable-line react-hooks/set-state-in-effect
     }
     return () => { if (animRef.current) cancelAnimationFrame(animRef.current) }
   }, [playState, engine])

@@ -64,7 +64,7 @@ export function useFeatureList() {
   }, [])
 
   useEffect(() => {
-    refresh()
+    refresh() // eslint-disable-line react-hooks/set-state-in-effect
     const timer = setInterval(refresh, 3000)
     return () => clearInterval(timer)
   }, [refresh])

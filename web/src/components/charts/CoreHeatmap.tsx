@@ -18,7 +18,6 @@ export default function CoreHeatmap({ data, width = '100%', height }: CoreHeatma
     if (data.length === 0) return {}
 
     const coreNames = data[0].cores.map(c => c.name)
-    const dynamicHeight = Math.max(160, coreNames.length * 18 + 60)
 
     const heatmapData: [number, number, number][] = []
     const times: string[] = []

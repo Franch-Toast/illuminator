@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useRef } from 'react'
 import { colors } from '../styles/theme'
 import SubTabBar from '../components/SubTabBar'
 import { useCpuUtilization, useCpuProcesses } from '../hooks/useCpuData'

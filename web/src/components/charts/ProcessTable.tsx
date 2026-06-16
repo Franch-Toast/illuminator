@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { colors } from '../../styles/theme'
 
 export interface ProcessEntry {
@@ -53,7 +53,6 @@ export default function ProcessTable({ processes, onSelect, selectedPid }: Proce
   )
 
   const useVirtual = sorted.length > VIRTUALIZE_THRESHOLD
-  const totalHeight = sorted.length * ROW_HEIGHT
   const visibleCount = Math.ceil(maxVisibleHeight / ROW_HEIGHT)
 
   const startIdx = useVirtual ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN) : 0

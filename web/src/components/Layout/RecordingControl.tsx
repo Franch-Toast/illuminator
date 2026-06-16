@@ -20,19 +20,19 @@ export default function RecordingControl() {
   }, [])
 
   useEffect(() => {
-    if (recording) {
-      startTimeRef.current = Date.now()
-      timerRef.current = setInterval(() => {
-        setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
-        api.recordingStatus().then(resp => {
-          setTotalBytes(resp.total_bytes)
-        }).catch(() => {})
-      }, 2000)
-    } else {
+    if (!recording) {
       if (timerRef.current) clearInterval(timerRef.current)
       timerRef.current = null
-      setElapsed(0)
+      return
     }
+
+    startTimeRef.current = Date.now()
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000))
+      api.recordingStatus().then(resp => {
+        setTotalBytes(resp.total_bytes)
+      }).catch(() => {})
+    }, 2000)
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
   }, [recording])
 

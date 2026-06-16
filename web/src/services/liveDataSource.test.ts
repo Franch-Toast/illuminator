@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LiveDataSource } from './liveDataSource'
-import type { DataBatch, DataCallback } from './dataSource'
 
 vi.mock('./apiClient', () => ({
   api: {

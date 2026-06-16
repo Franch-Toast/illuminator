@@ -3,7 +3,7 @@ import type { ConnectionStatus } from '../services/dataSource'
 import { LiveDataSource } from '../services/liveDataSource'
 
 let globalDataSource: LiveDataSource | null = null
-let connectionListeners = new Set<(s: ConnectionStatus) => void>()
+const connectionListeners = new Set<(s: ConnectionStatus) => void>()
 
 export function getDataSource(): LiveDataSource {
   if (!globalDataSource) {
@@ -52,19 +52,19 @@ export function usePageActivation(
     activateFeatures()
   }, [activateFeatures])
 
-  return {
-    activatedFeatures: activatedRef.current,
-    manualStart: async (name: string) => {
-      const { api } = await import('../services/apiClient')
-      await api.featureStart(name)
-      activatedRef.current.add(name)
-    },
-    manualStop: async (name: string) => {
-      const { api } = await import('../services/apiClient')
-      await api.featureStop(name)
-      activatedRef.current.delete(name)
-    },
-  }
+  const getActivated = useCallback(() => activatedRef.current, [])
+  const manualStart = useCallback(async (name: string) => {
+    const { api } = await import('../services/apiClient')
+    await api.featureStart(name)
+    activatedRef.current.add(name)
+  }, [])
+  const manualStop = useCallback(async (name: string) => {
+    const { api } = await import('../services/apiClient')
+    await api.featureStop(name)
+    activatedRef.current.delete(name)
+  }, [])
+
+  return { activatedFeatures: getActivated, manualStart, manualStop }
 }
 
 export interface BudgetInfo {

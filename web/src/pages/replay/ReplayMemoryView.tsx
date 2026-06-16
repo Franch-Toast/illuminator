@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { colors } from '../../styles/theme'
 import type { ReplayEngine } from '../../services/replayEngine'
 import type { DataBatch } from '../../services/dataSource'

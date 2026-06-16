@@ -29,7 +29,7 @@ interface ProfileSnapshotProps {
 }
 
 let worker: Worker | null = null
-let pendingCallbacks = new Map<string, (result: unknown) => void>()
+const pendingCallbacks = new Map<string, (result: unknown) => void>()
 
 function getWorker(): Worker {
   if (!worker) {
@@ -141,13 +141,10 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
   }, [totalSamples, timeSelection])
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset before async fetch
+    setRoot(null); setTopFunctions([]); setTotalSamples(0)
+    setFilteredSamples(0); setPollCount(0); setError(null)
     accumulatedRef.current = []
-    setRoot(null)
-    setTopFunctions([])
-    setTotalSamples(0)
-    setFilteredSamples(0)
-    setPollCount(0)
-    setError(null)
 
     const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
     api.featureStream(featureName, 999999999)
