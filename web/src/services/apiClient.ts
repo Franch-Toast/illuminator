@@ -45,8 +45,6 @@ export const api = {
   healthz: () => get<{ status: string; version: string }>('/healthz'),
   pipelines: () => get<{ pipelines: PipelineEntry[] }>('/api/v1/pipelines'),
   channelStats: () => get<{ channels: ChannelEntry[] }>('/api/v1/channel_stats'),
-  cpuProfileFlamegraph: () => get('/api/v1/cpu/profile/flamegraph'),
-  cpuProfileOffcpu: () => get('/api/v1/cpu/profile/offcpu/snapshot'),
   internalMetrics: () => get('/api/v1/internal_metrics'),
   query: (sql: string) => post<{ rows?: Record<string, unknown>[] }>('/api/v1/query', { query: sql }),
 

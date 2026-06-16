@@ -127,35 +127,52 @@ inline void RegisterApiRoutes(httplib::Server& srv,
 
     srv.Get("/api/v1/pipelines/:name/collect",
             [pipeline_collect](const httplib::Request& req, httplib::Response& res) {
+                res.set_header("Deprecation", "true");
+                res.set_header("Sunset", "2026-09-01");
+                res.set_header("Link",
+                    "</api/v1/features/" + req.path_params.at("name") +
+                    "/collect>; rel=\"successor-version\"");
                 pipeline_collect(req.path_params.at("name"), res);
             });
 
+    auto deprecated_alias = [pipeline_collect](
+            const std::string& feature_name,
+            const httplib::Request&, httplib::Response& res) {
+        res.set_header("Deprecation", "true");
+        res.set_header("Sunset", "2026-09-01");
+        res.set_header("Link",
+            "</api/v1/features/" + feature_name + "/collect>; rel=\"successor-version\"");
+        pipeline_collect(feature_name, res);
+    };
+
     srv.Get("/api/v1/cpu/utilization",
-            [pipeline_collect](const httplib::Request&, httplib::Response& res) {
-                pipeline_collect("cpu_utilization", res);
+            [deprecated_alias](const httplib::Request& req, httplib::Response& res) {
+                deprecated_alias("cpu_utilization", req, res);
             });
     srv.Get("/api/v1/cpu/processes",
-            [pipeline_collect](const httplib::Request&, httplib::Response& res) {
-                pipeline_collect("cpu_processes", res);
+            [deprecated_alias](const httplib::Request& req, httplib::Response& res) {
+                deprecated_alias("cpu_processes", req, res);
             });
     srv.Get("/api/v1/cpu/profile/flamegraph",
-            [pipeline_collect](const httplib::Request&, httplib::Response& res) {
-                pipeline_collect("cpu_profile", res);
+            [deprecated_alias](const httplib::Request& req, httplib::Response& res) {
+                deprecated_alias("cpu_profile", req, res);
             });
     srv.Get("/api/v1/cpu/profile/offcpu",
-            [pipeline_collect](const httplib::Request&, httplib::Response& res) {
-                pipeline_collect("offcpu_profile", res);
+            [deprecated_alias](const httplib::Request& req, httplib::Response& res) {
+                deprecated_alias("offcpu_profile", req, res);
             });
     srv.Get("/api/v1/cpu/sched/summary",
-            [pipeline_collect](const httplib::Request&, httplib::Response& res) {
-                pipeline_collect("sched_analysis", res);
+            [deprecated_alias](const httplib::Request& req, httplib::Response& res) {
+                deprecated_alias("sched_analysis", req, res);
             });
 
-    // QueryExtra endpoints
+    // QueryExtra endpoints (deprecated — prefer /api/v1/features/:name/collect for standard data)
     auto query_handler = [&controller](const std::string& pipeline_name,
                                         const std::string& query_name,
                                         const httplib::Request& req,
                                         httplib::Response& res) {
+        res.set_header("Deprecation", "true");
+        res.set_header("Sunset", "2026-09-01");
         auto* pipe = controller.GetPipeline(pipeline_name);
         if (!pipe) { JsonError(res, pipeline_name + " pipeline not found", 404); return; }
         auto* source = pipe->GetSource();

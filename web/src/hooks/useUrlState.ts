@@ -85,23 +85,3 @@ export function useUrlState(): UrlStateResult {
 
   return { pid, comm, profileType, subTab, setUrlState, clearUrlState }
 }
-
-export function useRestoreTimeFromUrl() {
-  const [searchParams] = useSearchParams()
-  const setRange = useTimeStore(s => s.setRange)
-
-  useEffect(() => {
-    const mode = searchParams.get('mode')
-    const timeStr = searchParams.get('t')
-    if (mode === 'paused' && timeStr) {
-      const parts = timeStr.split('-')
-      if (parts.length === 2) {
-        const start = parseInt(parts[0], 10)
-        const end = parseInt(parts[1], 10)
-        if (!isNaN(start) && !isNaN(end) && end > start) {
-          setRange({ start, end })
-        }
-      }
-    }
-  }, [])
-}

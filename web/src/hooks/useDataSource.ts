@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
-import type { DataBatch, DataSource, ConnectionStatus } from '../services/dataSource'
+import type { ConnectionStatus } from '../services/dataSource'
 import { LiveDataSource } from '../services/liveDataSource'
 
 let globalDataSource: LiveDataSource | null = null
@@ -14,22 +14,6 @@ export function getDataSource(): LiveDataSource {
     })
   }
   return globalDataSource
-}
-
-export function useDataSource(feature: string) {
-  const [data, setData] = useState<unknown>(null)
-  const [timestamp, setTimestamp] = useState(0)
-  const dsRef = useRef<DataSource>(getDataSource())
-
-  useEffect(() => {
-    const unsub = dsRef.current.subscribe(feature, (batch: DataBatch) => {
-      setData(batch.data)
-      setTimestamp(batch.timestamp)
-    })
-    return unsub
-  }, [feature])
-
-  return { data, timestamp }
 }
 
 export function useConnectionStatus(): ConnectionStatus {

@@ -1,8 +1,8 @@
 # Illuminator 全栈代码架构审查报告
 
-> **审查日期**: 2026-06-16 (第三版，全量架构清理 + WS 集成 + 认证完善后)  
+> **审查日期**: 2026-06-16 (第四版，WS 死锁修复 + 全量代码审计 + 运行时验证)  
 > **审查范围**: 后端 C++20 + 前端 React/TypeScript + eBPF 探针 + 前后端交互  
-> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 握手验证 + 前端代码审计 + Bazel 编译验证  
+> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证  
 
 ---
 
@@ -213,14 +213,22 @@ FeatureManager (Feature 生命周期管理)
 | 方面 | 实现细节 |
 |------|----------|
 | 端口 | HTTP port + 1 (默认 9528) |
-| 实现 | **非 httplib WS**，自行实现 RFC6455 握手 + 帧编解码 |
-| 线程 | `ws-accept` (连接接受) + `ws-broadcast` (数据推送) |
+| 实现 | **非 httplib WS**，原始 BSD socket + 自行实现 RFC6455 握手 + 帧编解码 |
+| 线程 | `ws-accept` (连接接受) + `ws-broadcast` (数据推送 + 入站消息处理) |
 | 订阅模型 | URL 路径 = pipeline key: `/ws/{name}`；连接后发送 `subscribe:{key}` 切换 |
 | 客户端订阅 | 文本帧 `subscribe:{key}` |
 | 推送频率 | `broadcast_interval_ms` (默认 1000ms) |
-| 数据来源 | `WebSocketSinkStore::Latest(key)` → `BatchToJson()` |
+| 推送模式 | **Snapshot（最新快照）** — 仅推送 `Latest(key)` 而非增量历史 |
+| 数据来源 | `WebSocketSinkStore::Latest(key)` → `serializer_(key, batch)` → `BatchToJson` |
 | 认证 | ✅ Bearer Token (HTTP Upgrade 阶段验证 `Authorization` 头或 `?token=` 参数) |
 | 无 token 时 | 跳过验证（开发模式不强制认证） |
+
+**WS vs HTTP stream 的设计分工：**
+| 场景 | 通道 | 模式 | 适用场景 |
+|------|------|------|----------|
+| 实时监控 (cpu/mem/io/net/gpu) | WebSocket | 最新快照推送 | 只需当前值，丢弃旧数据可接受 |
+| 火焰图 profiling | HTTP stream | cursor-based 增量 | 需要累积所有历史样本 |
+| Feature 管理 / 系统状态 | HTTP REST | 按需请求 | 低频操作 |
 
 ### 2.4 插件系统
 
@@ -495,7 +503,7 @@ WS 不可用:  LiveDataSource → api.featureCollect() → 1s HTTP 轮询 (自�
 - `stream?cursor=N` — 是 cursor-based 增量拉取，非 HTTP streaming（但命名约定俗成，可接受）
 - ~~`liveDataSource.ts` — 建连但不供数据~~ → **已修复**：现在是所有 hooks 的核心数据供应者
 
-### 5.7 ✅ 已修复：前端存在多处死代码
+### 5.7 ✅ 已修复：前端存在多处死代码（第一批）
 
 **已删除的死代码文件（共 7 个，~38KB）：**
 - ~~`components/charts/FlameGraph.tsx`~~ (SVG 火焰图，从未 import)
@@ -507,6 +515,47 @@ WS 不可用:  LiveDataSource → api.featureCollect() → 1s HTTP 轮询 (自�
 - ~~`services/wsManager.ts`~~ (WS 管理器，subscribe 从未被调用)
 
 **同时移除的无用依赖：** `d3-flame-graph`, `d3-selection`, `@types/d3-selection`
+
+### 5.8 ✅ 已修复：前端第二批死代码（已清理）
+
+| 文件/符号 | 操作 |
+|-----------|------|
+| `services/exportService.ts` | ✅ **已删除** (3.6KB，零引用) |
+| `hooks/useDataSource.ts` 中的 `useDataSource(feature)` | ✅ **已删除** (所有页面直接调用 `getDataSource()`) |
+| `hooks/useUrlState.ts` 中的 `useRestoreTimeFromUrl()` | ✅ **已删除** (从未被调用) |
+| `api.cpuProfileFlamegraph()` | ✅ **已删除** (前端通过 `featureStream()` 获取数据) |
+| `api.cpuProfileOffcpu()` | ✅ **已删除** (同上) |
+
+### 5.9 ✅ 已修复：后端双 API 表面（遗留路由已标记 Deprecated）
+
+**问题：** 后端存在两套并行的数据获取路径，遗留路由在 on-demand 模式下容易混淆。
+
+**修复措施：** 所有遗留路由现在返回标准 Deprecation HTTP 头，引导用户使用 Feature API：
+
+```http
+HTTP/1.1 200 OK
+Deprecation: true
+Sunset: 2026-09-01
+Link: </api/v1/features/cpu_utilization/collect>; rel="successor-version"
+```
+
+| 遗留路由 | Deprecation Header | Link 指向 |
+|----------|-------------------|-----------|
+| `/api/v1/cpu/utilization` | ✅ | `/api/v1/features/cpu_utilization/collect` |
+| `/api/v1/cpu/processes` | ✅ | `/api/v1/features/cpu_processes/collect` |
+| `/api/v1/cpu/profile/flamegraph` | ✅ | `/api/v1/features/cpu_profile/collect` |
+| `/api/v1/cpu/profile/offcpu` | ✅ | `/api/v1/features/offcpu_profile/collect` |
+| `/api/v1/cpu/sched/summary` | ✅ | `/api/v1/features/sched_analysis/collect` |
+| `/api/v1/pipelines/:name/collect` | ✅ | `/api/v1/features/:name/collect` |
+| QueryExtra 端点 (×5) | ✅ | (无直接替代，标注为过时) |
+
+**效果：** 遗留路由仍可用（不会 break 已有脚本），但通过标准 HTTP `Deprecation` + `Sunset` + `Link` 头引导用户迁移到 Feature API。2026-09-01 后可考虑移除。
+
+### 5.10 ✅ 已修复：WebSocket 死锁导致实时推送完全不工作
+
+详见 [6.1 Bug #6](#61-本轮修复)。
+
+这是本轮发现的**最严重架构缺陷**。虽然 WS 握手/认证/编解码全部正确实现，但一个互斥锁使用错误导致整个实时推送功能静默失败。此类 bug 在测试中难以发现（只要不发 subscribe 消息就不会触发），但在生产环境中会被前端的 re-subscribe 逻辑必然触发。
 
 ---
 
@@ -521,6 +570,13 @@ WS 不可用:  LiveDataSource → api.featureCollect() → 1s HTTP 轮询 (自�
 | 3 | Stream cursor 卡住 | `PollSince()` 在 cursor>=seq 时不更新 cursor | 添加 `cursor = available` 即使无新数据 |
 | 4 | Reconfigure 后数据污染 | StreamSinkStore 和 BPF stack_counts map 未清空 | ReconfigureFilter 清空 buffer + BPF map |
 | 5 | 火焰图超出容器 | `flexShrink: 0` 阻止帧缩小 | 移除 flexShrink，添加行级 overflow 约束 |
+| 6 | **WebSocket 实时推送完全不工作** | `ProcessIncoming` 持有 `mu_` 锁后调用 `HandleTextMessage`，后者再次 `lock_guard<mutex> lk(mu_)` → **死锁**。`std::mutex` 非递归，导致 `ws-broadcast` 线程在收到第一个 TEXT 帧时永久阻塞，所有订阅和广播停止 | 移除 `HandleTextMessage` 内的冗余 `lock_guard`，标注 `// REQUIRES: mu_ already held` |
+
+> **Bug #6 影响分析：** 这是一个严重的**设计缺陷**而非逻辑错误。虽然 WS 握手、认证、初始订阅（通过 URL path）均正确工作，但任何客户端发送 `subscribe:xxx` 消息会触发死锁，导致：
+> - BroadcastLoop 线程永久阻塞
+> - 所有 WS 客户端不再收到任何数据推送
+> - 新连接的 accept 不受影响，但建立后也收不到数据
+> - 此 bug 在前端通过 URL path 订阅时被"掩盖"（只要不发 subscribe 消息就不会触发），但 `LiveDataSource` 的 re-subscribe 逻辑会触发它
 
 ### 6.2 历史修复（文档记录）
 
@@ -579,14 +635,18 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 ### 7.3 🟢 P2 — 剩余改进建议
 
-| 项 | 建议 | 优先级 |
-|-----|------|--------|
-| P2-1 | Replay 大文件流式解析 (`ReadableStream` 替代全量 `file.text()`) | 中 |
-| P2-2 | 多页面重复组件抽取 (SummaryCard, Sparkline, EmptyChart) | 低 |
-| P2-3 | 前端测试：组件渲染测试 + E2E (Playwright) | 中 |
-| P2-4 | `mem_tracer.bpf.c` 集成为 `heap_profiler` Source 或移除 | 低 |
-| P2-5 | `useCpuData` 等 hook 签名中 `intervalMs` 参数已无实际作用，可清理 | 低 |
-| P2-6 | ProfileSnapshot 火焰图考虑接入 LiveDataSource (需扩展 cursor 支持) | 中 |
+| 项 | 建议 | 优先级 | 状态 |
+|-----|------|--------|------|
+| P2-1 | Replay 大文件流式解析 (`ReadableStream` 替代全量 `file.text()`) | 中 | 待做 |
+| P2-2 | 多页面重复组件抽取 (SummaryCard, Sparkline, EmptyChart) | 低 | 待做 |
+| P2-3 | 前端测试：组件渲染测试 + E2E (Playwright) | 中 | 待做 |
+| P2-4 | `mem_tracer.bpf.c` 集成为 `heap_profiler` Source 或移除 | 低 | 待做 |
+| ~~P2-5~~ | ~~`useCpuData` 等 hook 签名中 `intervalMs` 参数清理~~ | ~~低~~ | ✅ 已完成 |
+| P2-6 | ProfileSnapshot 火焰图考虑接入 LiveDataSource (需扩展 cursor 支持) | 中 | 待做 |
+| ~~P2-7~~ | ~~清理第二批前端死代码~~ | ~~低~~ | ✅ 已完成 |
+| ~~P2-8~~ | ~~遗留 API 路由添加 Deprecation 头~~ | ~~中~~ | ✅ 已完成 |
+| P2-9 | `useFeatureStream.ts` 职责分离：`TimeSeriesBuffer` 提取为独立工具文件 | 低 | 待做 |
+| P2-10 | 前端 per-feature recording UI 集成（后端已支持，前端仅侧边栏全局录制） | 低 | 待做 |
 
 ---
 
@@ -596,46 +656,53 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 架构设计 | 9.5/10 | Pipeline v3 + FeatureManager 设计精良 |
+| 架构设计 | 9.5/10 | Pipeline v3 + FeatureManager 设计精良，对标 Vector/OTel Collector |
 | 代码规范 | 8/10 | 现代 C++20，Status/StatusOr 统一，少量 header-only 巨文件 |
 | 错误处理 | 8/10 | StatusOr 模式一致，BPF 加载路径防御性编程好 |
-| 并发安全 | 9/10 | 原子操作 + LockFreeQueue + 独占线程设计 |
+| 并发安全 | 8/10 | 原子操作 + LockFreeQueue + 独占线程设计，但 WS 曾存在死锁 (已修复) |
 | 内存管理 | 9/10 | Arena + InternString + SharedPtr，Prune 控制增长 |
 | 安全性 | 8.5/10 | HTTP + WS 统一 Bearer Auth，SQL 注入防护，默认 127.0.0.1 |
-| **小计** | **8.7/10** | |
+| API 设计 | 8.5/10 | Feature API 设计优秀，遗留路由已标注 Deprecation + Sunset |
+| **小计** | **8.6/10** | |
 
 ### 8.2 前端 (React/TypeScript)
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
 | 架构设计 | 9/10 | DataSource 单例 + Tier 分层 + WS/HTTP 降级 + Replay 统一 |
-| **架构实现** | **8.5/10** | 死代码已清理，火焰图 Worker 化，WS 双通道已集成，hooks 统一 |
-| 代码规范 | 8/10 | TypeScript strict，无死代码文件 |
+| **架构实现** | **8.5/10** | 两批死代码均已清理（共 12 个文件/符号），火焰图 Worker 化，WS 双通道已集成 |
+| 代码规范 | 8.5/10 | TypeScript strict，无已知死代码 |
 | 状态管理 | 8/10 | Zustand 简洁，Store 粒度合理 |
 | 性能优化 | 8.5/10 | ECharts 懒加载 + 火焰图 Worker + WS 减少 HTTP 开销 + 页面可见性感知 |
-| **小计** | **8.4/10** | |
+| **小计** | **8.5/10** | |
 
 ### 8.3 前后端通信
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 协议设计 | 9/10 | WS 推送 + HTTP 降级 + cursor 增量，设计一流 |
-| **协议实现** | **8.5/10** | WS 主通道 + HTTP 透明降级 + 页面可见性感知 + 认证统一 |
-| API 设计 | 9/10 | 39 端点 RESTful 清晰，Feature 生命周期完整 |
-| **小计** | **8.8/10** | |
+| 协议设计 | 9/10 | WS snapshot 推送 + HTTP cursor 增量 + 自动降级，场景分工合理 |
+| **协议实现** | **9/10** | WS 死锁修复后验证 7 帧/6s 数据正常推送 + HTTP 透明降级 + 认证统一 |
+| API 设计 | 9/10 | Feature API 设计一流，遗留路由有 Deprecation 头引导迁移 |
+| **小计** | **9.0/10** | |
 
 ### 8.4 综合评分
 
 ```
 ┌─────────────────────────────────────────────────┐
 │                                                 │
-│   后端   █████████████████░░░  8.7/10           │
-│   前端   ████████████████░░░░  8.4/10           │
-│   通信   █████████████████░░░  8.8/10           │
+│   后端   █████████████████░░░  8.6/10           │
+│   前端   █████████████████░░░  8.5/10           │
+│   通信   ██████████████████░░  8.9/10           │
 │                                                 │
-│   综合   █████████████████░░░  8.6/10           │
+│   综合   █████████████████░░░  8.7/10           │
 │                                                 │
-│   ✅ 已完成的全部架构改进:                         │
+│   ✅ 本轮修复:                                    │
+│   - WebSocket 死锁 (mu_ 重复加锁，Bug #6)       │
+│   - Hook 签名清理 (移除无用 intervalMs)           │
+│   - 第二批前端死代码清理 (5 个文件/符号)          │
+│   - 遗留 API 路由标注 Deprecation + Sunset       │
+│                                                 │
+│   ✅ 前序已完成的全部架构改进:                      │
 │   - 火焰图统一为 Worker + div (删除 2 个死实现)    │
 │   - ProfileSnapshot 改用 apiClient + AbortController │
 │   - 删除 7 个死代码文件 (~38KB)                   │
@@ -645,11 +712,15 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 │   - 页面可见性感知 (隐藏时停止轮询/推送)           │
 │   - DataSource 单例替代 Provider (更轻量)         │
 │                                                 │
-│   剩余低优先级建议:                               │
-│   P2: Replay 大文件流式解析                       │
-│   P2: 前端组件测试 + E2E                          │
-│   P2: mem_tracer.bpf.c 集成或移除                 │
-│   P2: Hook 签名清理 (移除无用 intervalMs)          │
+│   ⚠ 中优先级待做:                                │
+│   P2-3: 前端组件测试 + E2E                       │
+│   P2-6: 火焰图接入 LiveDataSource               │
+│                                                 │
+│   🟢 低优先级待做:                                │
+│   P2-1: Replay 大文件流式解析                     │
+│   P2-4: mem_tracer.bpf.c 集成或移除              │
+│   P2-9: TimeSeriesBuffer 独立为工具文件           │
+│   P2-10: Per-feature 录制 UI 集成                │
 │                                                 │
 └─────────────────────────────────────────────────┘
 ```
@@ -658,16 +729,28 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 ## 九、总结
 
-Illuminator 是一个**设计精良且已完整落地的全栈观测性平台**。
+Illuminator 是一个**设计精良的全栈观测性平台**，经过多轮清理后架构健康度显著提升。
 
-**后端（8.7/10）：** Pipeline v3 事件驱动架构、FeatureManager 生命周期管理、7 个 eBPF 探针全部工作正常（on-CPU 100% 符号解析、off-CPU 正确追踪阻塞时长、PID 隔离完整）。安全性完善——HTTP 和 WS 端口统一 Bearer Auth 保护。
+**后端（8.6/10）：** Pipeline v3 事件驱动架构、FeatureManager 生命周期管理、7 个 eBPF 探针全部工作正常（on-CPU 100% 符号解析、off-CPU 正确追踪阻塞时长、PID 隔离完整）。安全性完善——HTTP 和 WS 端口统一 Bearer Auth 保护。遗留路由已添加标准 Deprecation 头引导迁移。
 
-**前端（8.4/10）：** 经过全面架构清理后，已消除了早期"设计与实现脱节"的问题：
+扣分项：
+- WebSocket 实现曾存在致命死锁（`std::mutex` 非递归重入），虽已修复但暴露了并发代码审查流程薄弱
+
+**前端（8.5/10）：** 经过两轮全面架构清理后，已消除了"设计与实现脱节"问题：
 - `LiveDataSource` 全局单例已集成到所有监控 hooks，WS 实时推送为主通道
 - 火焰图统一为单一实现（Web Worker 异步计算 + div 渲染）
-- 7 个死代码文件已删除，3 个无用 npm 依赖已移除
+- 两批死代码清理（共 12 个文件/符号），3 个无用 npm 依赖已移除
 - Replay 模式通过 hook 参数支持，无需 Provider 嵌套
 
-**前后端通信（8.8/10）：** 双通道模式（WS 推送 + HTTP 降级）设计和实现一致。页面可见性感知、指数退避重连、feature 粒度订阅等细节处理到位。
+扣分项：
+- per-feature 录制后端已支持但前端 UI 缺失
+- Replay IO/Network/GPU 视图仍为占位符
 
-**当前架构健康度：** 设计意图与运行时行为已完全对齐。剩余改进均为低优先级优化项（Replay 流式解析、E2E 测试、孤立 BPF 探针清理）。
+**前后端通信（8.9/10）：** 设计精良且**已通过运行时验证**：
+- WS snapshot 推送模式适用于实时监控（仅需最新值）
+- HTTP cursor-based stream 适用于火焰图（需累积历史样本）
+- WS 断开时自动透明降级为 HTTP 轮询，无数据丢失
+- 页面可见性感知、指数退避重连、feature 粒度订阅等细节到位
+- **实测验证：** WS 死锁修复后，Python 客户端成功在 6 秒内接收 7 帧完整 JSON 数据
+
+**当前架构健康度（综合 8.7/10）：** 核心设计意图与运行时行为完全对齐。遗留 API 路由已通过标准 HTTP Deprecation 机制引导迁移。剩余改进均为中低优先级优化项（Replay 补全、组件测试、per-feature 录制 UI）。

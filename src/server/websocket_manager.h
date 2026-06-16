@@ -190,10 +190,10 @@ private:
             RemoveConnection(fd);
     }
 
+    // REQUIRES: mu_ already held by caller (ProcessIncoming)
     void HandleTextMessage(int fd, const std::string& msg) {
         if (msg.find("subscribe:") == 0) {
             std::string new_key = msg.substr(10);
-            std::lock_guard<std::mutex> lk(mu_);
             auto it = connections_.find(fd);
             if (it == connections_.end()) return;
             auto& old_key = it->second.pipeline_key;
