@@ -48,6 +48,10 @@ public:
         allowed_dirs_ = std::move(dirs);
     }
 
+    const std::vector<std::string>& AllowedDirs() const {
+        return allowed_dirs_;
+    }
+
     Status LoadPlugin(const std::string& path) {
         if (!IsPathAllowed(path)) {
             return Status::Error(StatusCode::kPermissionDenied,

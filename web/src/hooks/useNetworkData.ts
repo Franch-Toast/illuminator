@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { api } from '../services/apiClient'
 import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
+import { getDataSource } from './useDataSource'
+import type { DataBatch } from '../services/dataSource'
 
 export interface NetworkDataPoint {
   timestamp: number
@@ -37,7 +38,7 @@ interface NetworkCollectResponse {
   }>
 }
 
-export function useNetworkMonitor(active: boolean, intervalMs = 1000) {
+export function useNetworkMonitor(active: boolean) {
   const [data, setData] = useState<NetworkDataPoint[]>([])
   const [summary, setSummary] = useState<NetworkSummary | null>(null)
   const buffer = useRef(new TimeSeriesBuffer<NetworkDataPoint>(60))
@@ -46,57 +47,39 @@ export function useNetworkMonitor(active: boolean, intervalMs = 1000) {
   useEffect(() => {
     if (!active || mode === 'paused') return
 
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const resp = await api.featureCollect('net_tracer') as NetworkCollectResponse
-        if (cancelled || !resp?.records) return
+    const source = getDataSource()
+    const unsub = source.subscribe('net_tracer', (batch: DataBatch) => {
+      const resp = batch.data as NetworkCollectResponse
+      if (!resp?.records) return
 
-        const now = Date.now()
-        let rxBytes = 0, txBytes = 0
-        let rxPackets = 0, txPackets = 0
-        let connections = 0, retransmits = 0
+      const now = batch.timestamp
+      let rxBytes = 0, txBytes = 0, rxPackets = 0, txPackets = 0
+      let connections = 0, retransmits = 0
 
-        for (const rec of resp.records) {
-          const type = rec.labels?.type
-          if (type === 'net_total') {
-            rxBytes = (rec.fields?.rx_bytes_per_sec as number) ?? 0
-            txBytes = (rec.fields?.tx_bytes_per_sec as number) ?? 0
-            rxPackets = (rec.fields?.rx_packets_per_sec as number) ?? 0
-            txPackets = (rec.fields?.tx_packets_per_sec as number) ?? 0
-          } else if (type === 'tcp_stats') {
-            connections = (rec.fields?.active_connections as number) ?? 0
-            retransmits = (rec.fields?.retransmits_per_sec as number) ?? 0
-          }
+      for (const rec of resp.records) {
+        const type = rec.labels?.type
+        if (type === 'net_total') {
+          rxBytes = (rec.fields?.rx_bytes_per_sec as number) ?? 0
+          txBytes = (rec.fields?.tx_bytes_per_sec as number) ?? 0
+          rxPackets = (rec.fields?.rx_packets_per_sec as number) ?? 0
+          txPackets = (rec.fields?.tx_packets_per_sec as number) ?? 0
+        } else if (type === 'tcp_stats') {
+          connections = (rec.fields?.active_connections as number) ?? 0
+          retransmits = (rec.fields?.retransmits_per_sec as number) ?? 0
         }
-
-        const point: NetworkDataPoint = {
-          timestamp: now,
-          rx_bytes_per_sec: rxBytes,
-          tx_bytes_per_sec: txBytes,
-          rx_packets_per_sec: rxPackets,
-          tx_packets_per_sec: txPackets,
-          tcp_connections: connections,
-          retransmits_per_sec: retransmits,
-        }
-        buffer.current.push(point)
-        setData([...buffer.current.getAll()])
-
-        setSummary({
-          rxRate: rxBytes,
-          txRate: txBytes,
-          connections,
-          retransmits,
-        })
-      } catch {
-        // retry
       }
-    }
 
-    poll()
-    const timer = setInterval(poll, intervalMs)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [active, intervalMs, mode])
+      const point: NetworkDataPoint = {
+        timestamp: now, rx_bytes_per_sec: rxBytes, tx_bytes_per_sec: txBytes,
+        rx_packets_per_sec: rxPackets, tx_packets_per_sec: txPackets,
+        tcp_connections: connections, retransmits_per_sec: retransmits,
+      }
+      buffer.current.push(point)
+      setData([...buffer.current.getAll()])
+      setSummary({ rxRate: rxBytes, txRate: txBytes, connections, retransmits })
+    })
+    return unsub
+  }, [active, mode])
 
   const clear = useCallback(() => {
     buffer.current.clear()
@@ -107,7 +90,7 @@ export function useNetworkMonitor(active: boolean, intervalMs = 1000) {
   return { data, summary, clear }
 }
 
-export function useNetworkProcesses(active: boolean, intervalMs = 2000) {
+export function useNetworkProcesses(active: boolean) {
   const [processes, setProcesses] = useState<NetworkProcess[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)
@@ -115,44 +98,33 @@ export function useNetworkProcesses(active: boolean, intervalMs = 2000) {
   useEffect(() => {
     if (!active || mode === 'paused') return
 
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const resp = await api.featureCollect('net_tracer') as NetworkCollectResponse
-        if (cancelled || !resp?.records) return
+    const source = getDataSource()
+    const unsub = source.subscribe('net_tracer', (batch: DataBatch) => {
+      const resp = batch.data as NetworkCollectResponse
+      if (!resp?.records) return
 
-        const result: NetworkProcess[] = []
-        for (const rec of resp.records) {
-          if (rec.labels?.type !== 'process_net') continue
-          const pid = parseInt(rec.labels?.pid ?? '0', 10)
-          const total = ((rec.fields?.rx_mb as number) ?? 0) + ((rec.fields?.tx_mb as number) ?? 0)
+      const result: NetworkProcess[] = []
+      for (const rec of resp.records) {
+        if (rec.labels?.type !== 'process_net') continue
+        const pid = parseInt(rec.labels?.pid ?? '0', 10)
+        const total = ((rec.fields?.rx_mb as number) ?? 0) + ((rec.fields?.tx_mb as number) ?? 0)
 
-          const hist = historyMap.current.get(pid) ?? []
-          hist.push(total)
-          if (hist.length > 30) hist.shift()
-          historyMap.current.set(pid, hist)
+        const hist = historyMap.current.get(pid) ?? []
+        hist.push(total)
+        if (hist.length > 30) hist.shift()
+        historyMap.current.set(pid, hist)
 
-          result.push({
-            pid,
-            comm: (rec.labels?.comm as string) ?? '?',
-            rx_mb: (rec.fields?.rx_mb as number) ?? 0,
-            tx_mb: (rec.fields?.tx_mb as number) ?? 0,
-            connections: (rec.fields?.connections as number) ?? 0,
-            history: [...hist],
-          })
-        }
-
-        result.sort((a, b) => (b.rx_mb + b.tx_mb) - (a.rx_mb + a.tx_mb))
-        setProcesses(result)
-      } catch {
-        // retry
+        result.push({
+          pid, comm: (rec.labels?.comm as string) ?? '?',
+          rx_mb: (rec.fields?.rx_mb as number) ?? 0, tx_mb: (rec.fields?.tx_mb as number) ?? 0,
+          connections: (rec.fields?.connections as number) ?? 0, history: [...hist],
+        })
       }
-    }
-
-    poll()
-    const timer = setInterval(poll, intervalMs)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [active, intervalMs, mode])
+      result.sort((a, b) => (b.rx_mb + b.tx_mb) - (a.rx_mb + a.tx_mb))
+      setProcesses(result)
+    })
+    return unsub
+  }, [active, mode])
 
   const clear = useCallback(() => {
     historyMap.current.clear()

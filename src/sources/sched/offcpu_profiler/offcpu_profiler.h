@@ -66,6 +66,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <sys/stat.h>
+#include <linux/limits.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -130,6 +132,9 @@ public:
         start_delay_seconds_ =
             static_cast<int>(config["start_delay_seconds"].AsInt(3));
         bpf_obj_path_ = config["bpf_object"].AsString("");
+        if (bpf_obj_path_.empty()) {
+            bpf_obj_path_ = AutoDiscoverBpfObject("offcpu_profiler.bpf.o");
+        }
         target_pids_ = ParseCommaSeparated<uint32_t>(
             config["target_pids"].AsString(""));
         target_pid_allow_.clear();
@@ -169,12 +174,15 @@ public:
         if (cfg_fd_ >= 0) {
             // 启动时先写 flags 但 bit4=0（禁用），等延迟后再启用
             uint32_t k0 = 0;
+            // 在 PID namespace 环境中，BPF 看到的 TGID 是宿主机 PID，
+            // 与容器内 PID 不同。当有 target_comms 时，优先使用 comm 过滤
+            // （进程名不受 namespace 影响），跳过 PID 过滤以避免错误匹配。
+            bool use_pid_filter = !target_pid_allow_.empty() && target_comms_.empty();
             uint32_t cfg_flags = (user_stacks_ ? 1u : 0u)
                                | (kernel_stacks_ ? 2u : 0u)
-                               | (!target_pid_allow_.empty() ? 4u : 0u)
+                               | (use_pid_filter ? 4u : 0u)
                                | (!target_comms_.empty() ? 8u : 0u);
             cfg_flags_base_ = cfg_flags;
-            // 暂不设 bit4，探针已 attach 但不采集
             bpf_map_update_elem(cfg_fd_, &k0, &cfg_flags, BPF_ANY);
 
             // slot 1+2: min_duration_ns (64-bit split into two 32-bit)
@@ -294,14 +302,197 @@ public:
         return Status::Ok();
     }
 
+    // ========================================================================
+    // Reconfigure — 运行时更新目标 PID/进程名过滤器
+    // ========================================================================
+    Status Reconfigure(const ConfigValue& params) override {
+        auto pid_str = params["target_pids"].AsString("");
+        auto comm_str = params["target_comms"].AsString("");
+
+        target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
+        target_pid_allow_.clear();
+        host_to_local_pid_.clear();
+        for (uint32_t p : target_pids_)
+            target_pid_allow_.insert(p);
+
+        target_comms_.clear();
+        if (!comm_str.empty()) {
+            auto parts = ParseCommaSeparated<std::string>(comm_str);
+            for (auto& s : parts)
+                if (!s.empty()) target_comms_.push_back(s);
+        }
+
+        // Clear and repopulate BPF PID map
+        int pids_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_target_pids");
+        if (pids_fd >= 0) {
+            uint32_t cur{}, next{};
+            std::vector<uint32_t> old_keys;
+            int err = bpf_map_get_next_key(pids_fd, nullptr, &cur);
+            while (err == 0) {
+                old_keys.push_back(cur);
+                err = bpf_map_get_next_key(pids_fd, &cur, &next);
+                cur = next;
+            }
+            for (auto k : old_keys)
+                bpf_map_delete_elem(pids_fd, &k);
+
+            uint8_t val = 1;
+            for (uint32_t pid : target_pid_allow_)
+                bpf_map_update_elem(pids_fd, &pid, &val, BPF_ANY);
+        }
+
+        // Clear and repopulate BPF comm map
+        int comms_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_target_comms");
+        if (comms_fd >= 0) {
+            char cur_key[16] = {}, next_key[16] = {};
+            std::vector<std::string> old_comms;
+            int err = bpf_map_get_next_key(comms_fd, nullptr, cur_key);
+            while (err == 0) {
+                old_comms.emplace_back(cur_key);
+                err = bpf_map_get_next_key(comms_fd, cur_key, next_key);
+                std::memcpy(cur_key, next_key, 16);
+            }
+            for (auto& c : old_comms) {
+                char k[16] = {};
+                std::memcpy(k, c.c_str(), std::min(c.size(), sizeof(k) - 1));
+                bpf_map_delete_elem(comms_fd, k);
+            }
+
+            uint8_t val = 1;
+            for (const auto& comm : target_comms_) {
+                char key[16] = {};
+                std::memcpy(key, comm.c_str(), std::min(comm.size(), sizeof(key) - 1));
+                bpf_map_update_elem(comms_fd, key, &val, BPF_ANY);
+            }
+        }
+
+        // Update cfg flags to reflect new filter state
+        if (cfg_fd_ >= 0) {
+            uint32_t k0 = 0;
+            bool use_pid_filter = !target_pid_allow_.empty() && target_comms_.empty();
+            uint32_t new_flags = (user_stacks_ ? 1u : 0u)
+                               | (kernel_stacks_ ? 2u : 0u)
+                               | (use_pid_filter ? 4u : 0u)
+                               | (!target_comms_.empty() ? 8u : 0u)
+                               | 16u;  // keep enabled (bit4)
+            cfg_flags_base_ = new_flags & ~16u;
+            bpf_map_update_elem(cfg_fd_, &k0, &new_flags, BPF_ANY);
+        }
+
+        // 清空内部数据缓存，避免旧目标的样本残留
+        {
+            std::lock_guard<std::mutex> lk(cache_mu_);
+            cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        }
+        {
+            std::lock_guard<std::mutex> lk(snapshot_mu_);
+            latest_json_snapshot_ = "{\"stack_samples\":[]}";
+        }
+
+        IL_INFO("offcpu_profiler: reconfigured filters (pids={}, comms={})",
+                target_pid_allow_.size(), target_comms_.size());
+        return Status::Ok();
+    }
+
 private:
+    static std::string AutoDiscoverBpfObject(const char* filename) {
+        auto try_path = [](const std::string& p) -> std::string {
+            struct stat st;
+            if (stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+                return p;
+            return {};
+        };
+
+        auto r = try_path(std::string("build/bpf/") + filename);
+        if (!r.empty()) return r;
+
+        char exe_path[PATH_MAX] = {};
+        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (len > 0) {
+            exe_path[len] = '\0';
+            std::string dir(exe_path);
+            auto slash = dir.rfind('/');
+            if (slash != std::string::npos) {
+                dir = dir.substr(0, slash);
+                r = try_path(dir + "/bpf/" + filename);
+                if (!r.empty()) return r;
+                r = try_path(dir + "/../build/bpf/" + filename);
+                if (!r.empty()) return r;
+                r = try_path(dir + "/" + filename);
+                if (!r.empty()) return r;
+            }
+        }
+
+        r = try_path(std::string("/usr/lib/illuminator/bpf/") + filename);
+        if (!r.empty()) return r;
+        r = try_path(std::string("/opt/illuminator/bpf/") + filename);
+        if (!r.empty()) return r;
+
+        return {};
+    }
+
     // ========================================================================
     // AllowPid — 检查 PID 是否在采集白名单中
     // ========================================================================
+    // 当 BPF 侧已通过 comm 过滤（target_comms_ 非空）时，跳过用户态 PID 检查。
+    // 原因：BPF 中 bpf_get_current_pid_tgid() 返回 host namespace PID，
+    // 与容器内 target_pid_allow_ 中的 container PID 不匹配。
+    // BPF comm 过滤已确保只有目标进程的数据通过。
     bool AllowPid(uint32_t pid) const {
-        if (target_pid_allow_.empty())
+        if (target_pid_allow_.empty() || !target_comms_.empty())
             return true;
         return target_pid_allow_.find(pid) != target_pid_allow_.end();
+    }
+
+    // ========================================================================
+    // ResolveLocalPid — 将 host namespace PID 映射为 container-local PID
+    // ========================================================================
+    uint32_t ResolveLocalPid(uint32_t host_pid, const char* comm) {
+        if (target_pids_.empty())
+            return host_pid;
+
+        auto it = host_to_local_pid_.find(host_pid);
+        if (it != host_to_local_pid_.end())
+            return it->second;
+
+        // 检查 /proc/<host_pid>/maps 是否可访问
+        {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/%u/maps", host_pid);
+            std::ifstream f(path);
+            if (f.good()) {
+                host_to_local_pid_[host_pid] = host_pid;
+                return host_pid;
+            }
+        }
+
+        // 容器环境：通过 comm 匹配 container-local PID
+        std::string_view target_comm(comm, strnlen(comm, 16));
+        for (uint32_t local_pid : target_pids_) {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/%u/comm", local_pid);
+            std::ifstream f(path);
+            if (!f) continue;
+            std::string proc_comm;
+            std::getline(f, proc_comm);
+            while (!proc_comm.empty() && proc_comm.back() == '\n')
+                proc_comm.pop_back();
+            if (proc_comm == target_comm) {
+                host_to_local_pid_[host_pid] = local_pid;
+                return local_pid;
+            }
+        }
+
+        for (uint32_t local_pid : target_pids_) {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/%u/maps", local_pid);
+            std::ifstream f(path);
+            if (f.good()) {
+                host_to_local_pid_[host_pid] = local_pid;
+                return local_pid;
+            }
+        }
+        return host_pid;
     }
 
     // ========================================================================
@@ -357,8 +548,8 @@ private:
                         LookupBpfStackTrace(stacks_fd_, next_key.user_stack_id);
 
                     auto& cs = batch->AddStackSample();
-                    cs.pid = next_key.tgid;  // 进程组 ID（用户态 PID）
-                    cs.tid = next_key.tid;   // 线程 ID（区分不同线程）
+                    cs.pid = ResolveLocalPid(next_key.tgid, val.comm);
+                    cs.tid = next_key.tid;
                     cs.cpu = val.cpu;
                     cs.comm = batch->InternString(std::string_view(
                         val.comm, strnlen(val.comm, 16)));
@@ -725,6 +916,7 @@ private:
     std::vector<uint32_t> target_pids_;
     std::unordered_set<uint32_t> target_pid_allow_;
     std::vector<std::string> target_comms_;
+    std::unordered_map<uint32_t, uint32_t> host_to_local_pid_;
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};

@@ -291,7 +291,36 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
     srv.Post("/api/v1/features/:name/start",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
-                 auto status = features.Start(name);
+                 FeatureManager::StartParams params;
+
+                 // Parse optional target_pids and target_comms from request body
+                 if (!req.body.empty()) {
+                     try {
+                         auto body = json::parse(req.body);
+                         if (body.contains("target_pids")) {
+                             if (body["target_pids"].is_array()) {
+                                 for (const auto& p : body["target_pids"])
+                                     params.target_pids.push_back(p.get<uint32_t>());
+                             } else if (body["target_pids"].is_number()) {
+                                 params.target_pids.push_back(
+                                     body["target_pids"].get<uint32_t>());
+                             }
+                         }
+                         if (body.contains("target_comms")) {
+                             if (body["target_comms"].is_array()) {
+                                 for (const auto& c : body["target_comms"])
+                                     params.target_comms.push_back(c.get<std::string>());
+                             } else if (body["target_comms"].is_string()) {
+                                 params.target_comms.push_back(
+                                     body["target_comms"].get<std::string>());
+                             }
+                         }
+                     } catch (...) {
+                         // Non-JSON body is acceptable (backward compat)
+                     }
+                 }
+
+                 auto status = features.Start(name, params);
                  if (!status.ok()) {
                      int code = (status.code() == StatusCode::kNotFound) ? 404 : 400;
                      JsonError(res, status.message(), code);
@@ -345,6 +374,52 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                  res.set_content(
                      json{{"status", "ok"}, {"feature", name},
                           {"state", "active"}}.dump() + "\n",
+                     "application/json");
+             });
+
+    // Runtime filter reconfiguration (update target_pids without restart)
+    srv.Post("/api/v1/features/:name/reconfigure",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 auto name = req.path_params.at("name");
+                 if (req.body.empty()) {
+                     JsonError(res, "request body required", 400);
+                     return;
+                 }
+                 FeatureManager::StartParams params;
+                 try {
+                     auto body = json::parse(req.body);
+                     if (body.contains("target_pids")) {
+                         if (body["target_pids"].is_array()) {
+                             for (const auto& p : body["target_pids"])
+                                 params.target_pids.push_back(p.get<uint32_t>());
+                         } else if (body["target_pids"].is_number()) {
+                             params.target_pids.push_back(
+                                 body["target_pids"].get<uint32_t>());
+                         }
+                     }
+                     if (body.contains("target_comms")) {
+                         if (body["target_comms"].is_array()) {
+                             for (const auto& c : body["target_comms"])
+                                 params.target_comms.push_back(c.get<std::string>());
+                         } else if (body["target_comms"].is_string()) {
+                             params.target_comms.push_back(
+                                 body["target_comms"].get<std::string>());
+                         }
+                     }
+                 } catch (const std::exception& e) {
+                     JsonError(res, std::string("invalid JSON: ") + e.what(), 400);
+                     return;
+                 }
+
+                 auto status = features.ReconfigureFilter(name, params);
+                 if (!status.ok()) {
+                     int code = (status.code() == StatusCode::kNotFound) ? 404 : 400;
+                     JsonError(res, status.message(), code);
+                     return;
+                 }
+                 res.set_content(
+                     json{{"status", "ok"}, {"feature", name},
+                          {"message", "filter updated"}}.dump() + "\n",
                      "application/json");
              });
 

@@ -102,7 +102,12 @@ public:
         IL_INFO("Feature registered: {}", entry.config.name);
     }
 
-    Status Start(const std::string& name) {
+    struct StartParams {
+        std::vector<uint32_t> target_pids;
+        std::vector<std::string> target_comms;
+    };
+
+    Status Start(const std::string& name, const StartParams& params = {}) {
         std::unique_lock lock(mutex_);
         auto it = features_.find(name);
         if (it == features_.end()) {
@@ -111,6 +116,10 @@ public:
         }
         auto& entry = it->second;
         if (entry.state == FeatureState::kActive) {
+            if (!params.target_pids.empty()) {
+                lock.unlock();
+                return ReconfigureFilter(name, params);
+            }
             return Status::Ok();
         }
         if (entry.state != FeatureState::kInactive &&
@@ -124,12 +133,22 @@ public:
             return ResumeInternal(entry);
         }
 
+        // Safety: Tier 3 profiling features MUST have target_pids
+        if (entry.config.tier == FeatureTier::kProfiling &&
+            params.target_pids.empty() &&
+            entry.config.pipeline.source.config["target_pids"].AsString("").empty()) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                                 "Profiling features require target_pids to prevent "
+                                 "system-wide sampling (which may freeze the system). "
+                                 "Pass target_pids in the request body.");
+        }
+
         auto prev = entry.state;
         entry.state = FeatureState::kStarting;
         lock.unlock();
         NotifyStateChange(name, prev, FeatureState::kStarting);
 
-        auto status = CreateAndStartPipeline(name);
+        auto status = CreateAndStartPipeline(name, params);
         lock.lock();
 
         if (!status.ok()) {
@@ -142,8 +161,41 @@ public:
         entry.started_at = std::chrono::steady_clock::now();
         lock.unlock();
         NotifyStateChange(name, FeatureState::kStarting, FeatureState::kActive);
-        IL_INFO("Feature started: {}", name);
+        IL_INFO("Feature started: {} (target_pids={})", name, params.target_pids.size());
         return Status::Ok();
+    }
+
+    Status ReconfigureFilter(const std::string& name, const StartParams& params) {
+        std::shared_lock lock(mutex_);
+        auto it = features_.find(name);
+        if (it == features_.end() || !it->second.pipeline) {
+            return Status::Error(StatusCode::kNotFound, "Feature not found or not running");
+        }
+        auto* source = it->second.pipeline->GetSource();
+        if (!source) {
+            return Status::Error(StatusCode::kInternal, "No source in pipeline");
+        }
+        lock.unlock();
+
+        std::string pid_str;
+        for (size_t i = 0; i < params.target_pids.size(); ++i) {
+            if (i > 0) pid_str += ",";
+            pid_str += std::to_string(params.target_pids[i]);
+        }
+        std::string comm_str;
+        for (size_t i = 0; i < params.target_comms.size(); ++i) {
+            if (i > 0) comm_str += ",";
+            comm_str += params.target_comms[i];
+        }
+
+        ConfigValue recfg;
+        recfg.Set("target_pids", pid_str);
+        recfg.Set("target_comms", comm_str);
+        auto st = source->Reconfigure(recfg);
+        if (st.ok()) {
+            StreamSinkStore::Instance().RemoveBuffer(name);
+        }
+        return st;
     }
 
     Status Stop(const std::string& name) {
@@ -284,7 +336,8 @@ private:
         bool paused = false;
     };
 
-    Status CreateAndStartPipeline(const std::string& name) {
+    Status CreateAndStartPipeline(const std::string& name,
+                                   const StartParams& params = {}) {
         std::shared_lock lock(mutex_);
         auto it = features_.find(name);
         if (it == features_.end()) {
@@ -303,7 +356,27 @@ private:
             return Status::Error(StatusCode::kInternal,
                                  "Failed to create source: " + cfg.source.type);
         }
-        auto init_status = source->Init(cfg.source.config);
+
+        // Merge runtime params into source config (target_pids override)
+        ConfigValue source_cfg = cfg.source.config;
+        if (!params.target_pids.empty()) {
+            std::string pid_str;
+            for (size_t i = 0; i < params.target_pids.size(); ++i) {
+                if (i > 0) pid_str += ",";
+                pid_str += std::to_string(params.target_pids[i]);
+            }
+            source_cfg.Set("target_pids", pid_str);
+        }
+        if (!params.target_comms.empty()) {
+            std::string comm_str;
+            for (size_t i = 0; i < params.target_comms.size(); ++i) {
+                if (i > 0) comm_str += ",";
+                comm_str += params.target_comms[i];
+            }
+            source_cfg.Set("target_comms", comm_str);
+        }
+
+        auto init_status = source->Init(source_cfg);
         if (!init_status.ok()) return init_status;
 
         pipeline->SetSource(std::move(source));
@@ -396,6 +469,9 @@ private:
     void StopAndDestroyPipeline(const std::string& name) {
         // 先注销 RecordingSink 引用（避免悬挂指针）
         RecordingSinkRegistry::Instance().Unregister(name);
+
+        // 清除 StreamSinkStore 中的旧数据，避免重启后返回过期采样
+        StreamSinkStore::Instance().RemoveBuffer(name);
 
         std::unique_lock lock(mutex_);
         auto it = features_.find(name);

@@ -51,7 +51,10 @@ public:
         std::lock_guard<std::mutex> lk(mu_);
         std::vector<DataBatchPtr> out;
         uint64_t available = seq_;
-        if (cursor >= available) return out;
+        if (cursor >= available) {
+            cursor = available;
+            return out;
+        }
 
         size_t skip = 0;
         if (available - cursor > batches_.size()) {

@@ -62,6 +62,12 @@ public:
         return Status::Error(StatusCode::kUnimplemented, "no extra queries");
     }
 
+    // Runtime reconfiguration of filter parameters (e.g. target_pids) without
+    // restarting the pipeline. Used when user switches target process in the UI.
+    virtual Status Reconfigure(const ConfigValue& /*params*/) {
+        return Status::Error(StatusCode::kUnimplemented, "reconfigure not supported");
+    }
+
 protected:
     SourceCallback callback_;
 };

@@ -69,11 +69,14 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <linux/limits.h>
 #include <linux/perf_event.h>
 #include <unistd.h>
 
@@ -226,6 +229,9 @@ public:
         stream_mode_ = (mode == "stream");
 
         bpf_obj_path_ = config["bpf_object"].AsString("");
+        if (bpf_obj_path_.empty()) {
+            bpf_obj_path_ = AutoDiscoverBpfObject("cpu_profiler.bpf.o");
+        }
 
         target_pids_ =
             ParseCommaSeparated<uint32_t>(config["target_pids"].AsString(""));
@@ -273,7 +279,11 @@ public:
         stacks_fd_ = stacks_fd;
         counts_fd_ = counts_fd;
 
-        // 向 eBPF 侧下发过滤配置（PID 白名单、进程名白名单）
+        // 确定 perf event 挂载模式（必须在 ApplyFilterMaps 之前设置）
+        per_pid_mode_ = !target_pids_.empty();
+
+        // 向 eBPF 侧下发过滤配置
+        // per-PID 模式下不启用 BPF PID 过滤（perf event 本身即过滤器）
         ApplyFilterMaps();
 
         // 获取 eBPF 程序的文件描述符（perf_event 回调入口）
@@ -283,55 +293,101 @@ public:
                                  "cpu_profiler: on_cpu_sample program missing");
         }
 
-        // 解析在线 CPU 列表
-        auto cpus = ParseOnlineCpuIds();
-        if (cpus.empty()) {
-            IL_WARN("cpu_profiler: could not read online CPUs; defaulting to cpu 0");
-            cpus.push_back(0);
-        }
+        // 根据模式选择 per-PID 或 per-CPU 挂载
+        // per-PID：为每个目标进程创建 perf_event（pid=target, cpu=-1）
+        //   在容器/cgroup/PID namespace 环境中正确采样
+        // per-CPU：为每个 CPU 核心创建 perf_event（pid=-1, cpu=N）
+        //   系统全局采样，配合 BPF 侧 PID 过滤
+        if (per_pid_mode_) {
+            // Per-PID 模式：直接追踪目标进程，无需 BPF 侧过滤
+            for (uint32_t target_pid : target_pids_) {
+                struct perf_event_attr attr = {};
+                attr.size = sizeof(attr);
+                attr.type = PERF_TYPE_SOFTWARE;
+                attr.config = PERF_COUNT_SW_CPU_CLOCK;
+                attr.freq = 1;
+                attr.sample_freq = static_cast<uint64_t>(frequency_hz_);
+                attr.sample_type = PERF_SAMPLE_CALLCHAIN;
+                attr.disabled = 1;
+                attr.exclude_user = user_stacks_ ? 0 : 1;
+                attr.exclude_kernel = kernel_stacks_ ? 0 : 1;
+                attr.inherit = 1;  // 追踪子线程
 
-        // 为每个 CPU 核心创建 perf_event 并挂载 eBPF 程序
-        for (int cpu : cpus) {
-            struct perf_event_attr attr = {};
-            attr.size = sizeof(attr);
-            attr.type = PERF_TYPE_SOFTWARE;                // 软件事件类型
-            attr.config = PERF_COUNT_SW_CPU_CLOCK;         // CPU 时钟事件（按时钟周期触发）
-            attr.freq = 1;                                 // 使用频率模式（非周期模式）
-            attr.sample_freq = static_cast<uint64_t>(frequency_hz_);  // 采样频率
-            attr.sample_type = PERF_SAMPLE_CALLCHAIN;      // 需要采集调用链
-            attr.disabled = 1;                             // 创建后先禁用，等待 BPF 挂载
-            attr.exclude_user = user_stacks_ ? 0 : 1;      // 是否排除用户态
-            attr.exclude_kernel = kernel_stacks_ ? 0 : 1;  // 是否排除内核态
+                int fd = static_cast<int>(
+                    PerfEventOpenSys(&attr, static_cast<pid_t>(target_pid),
+                                     /*cpu=*/-1, /*group=*/-1,
+                                     PERF_FLAG_FD_CLOEXEC));
+                if (fd < 0) {
+                    IL_WARN("cpu_profiler: perf_event_open per-pid={} failed errno={}",
+                            target_pid, errno);
+                    continue;
+                }
 
-            // 打开 perf_event
-            int fd = static_cast<int>(
-                PerfEventOpenSys(&attr, /*pid=*/-1, cpu, /*group=*/-1,
-                                 PERF_FLAG_FD_CLOEXEC));
-            if (fd < 0) {
-                IL_WARN("cpu_profiler: perf_event_open failed for cpu {} errno={}",
-                        cpu, errno);
-                continue;
+                if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0) {
+                    IL_WARN("cpu_profiler: SET_BPF per-pid={} failed errno={}",
+                            target_pid, errno);
+                    close(fd);
+                    continue;
+                }
+
+                if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
+                    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
+                    IL_WARN("cpu_profiler: ENABLE per-pid={} failed errno={}",
+                            target_pid, errno);
+                    close(fd);
+                    continue;
+                }
+
+                perf_fds_.push_back(fd);
+            }
+            IL_INFO("cpu_profiler: per-PID mode, {} targets, {} perf fds",
+                    target_pids_.size(), perf_fds_.size());
+        } else {
+            // Per-CPU 模式：系统全局采样（fallback，需配合 BPF PID 过滤）
+            auto cpus = ParseOnlineCpuIds();
+            if (cpus.empty()) {
+                IL_WARN("cpu_profiler: could not read online CPUs; defaulting to cpu 0");
+                cpus.push_back(0);
             }
 
-            // 将 eBPF 程序挂载到 perf_event
-            if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0) {
-                IL_WARN("cpu_profiler: PERF_EVENT_IOC_SET_BPF failed cpu {} errno={}",
-                        cpu, errno);
-                close(fd);
-                continue;
-            }
+            for (int cpu : cpus) {
+                struct perf_event_attr attr = {};
+                attr.size = sizeof(attr);
+                attr.type = PERF_TYPE_SOFTWARE;
+                attr.config = PERF_COUNT_SW_CPU_CLOCK;
+                attr.freq = 1;
+                attr.sample_freq = static_cast<uint64_t>(frequency_hz_);
+                attr.sample_type = PERF_SAMPLE_CALLCHAIN;
+                attr.disabled = 1;
+                attr.exclude_user = user_stacks_ ? 0 : 1;
+                attr.exclude_kernel = kernel_stacks_ ? 0 : 1;
 
-            // 启用 perf_event
-            if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
-                ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-                IL_WARN("cpu_profiler: PERF_EVENT_IOC_ENABLE failed cpu {} errno={}",
-                        cpu, errno);
-                close(fd);
-                continue;
-            }
+                int fd = static_cast<int>(
+                    PerfEventOpenSys(&attr, /*pid=*/-1, cpu, /*group=*/-1,
+                                     PERF_FLAG_FD_CLOEXEC));
+                if (fd < 0) {
+                    IL_WARN("cpu_profiler: perf_event_open cpu={} failed errno={}",
+                            cpu, errno);
+                    continue;
+                }
 
-            // 记录成功的 fd 用于后续清理
-            perf_fds_.push_back(fd);
+                if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0) {
+                    IL_WARN("cpu_profiler: SET_BPF cpu={} failed errno={}",
+                            cpu, errno);
+                    close(fd);
+                    continue;
+                }
+
+                if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
+                    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
+                    IL_WARN("cpu_profiler: ENABLE cpu={} failed errno={}",
+                            cpu, errno);
+                    close(fd);
+                    continue;
+                }
+
+                perf_fds_.push_back(fd);
+            }
         }
 
         if (perf_fds_.empty()) {
@@ -364,8 +420,10 @@ public:
             });
         }
 
-        IL_INFO("cpu_profiler started ({} mode, {} perf fds)",
-                stream_mode_ ? "stream" : "aggregated", perf_fds_.size());
+        IL_INFO("cpu_profiler started ({} mode, {} attach, {} perf fds)",
+                stream_mode_ ? "stream" : "aggregated",
+                target_pids_.empty() ? "per-cpu" : "per-pid",
+                perf_fds_.size());
         return Status::Ok();
     }
 
@@ -398,7 +456,202 @@ public:
         return Status::Ok();
     }
 
+    // ========================================================================
+    // Reconfigure — 运行时更新目标 PID/进程名过滤器
+    // ========================================================================
+    // 在 profiler 运行期间动态更新 BPF map 中的过滤规则。
+    // 先清空旧的 map 条目，再写入新的，最后更新 flags。
+    // 线程安全：BPF map 操作是原子的。
+    Status Reconfigure(const ConfigValue& params) override {
+        auto pid_str = params["target_pids"].AsString("");
+        auto comm_str = params["target_comms"].AsString("");
+
+        target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
+        target_comms_.clear();
+        ParseCommaSeparatedStrings(comm_str, &target_comms_);
+        host_to_local_pid_.clear();
+
+        // Clear existing PID map entries
+        int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
+        if (pid_fd >= 0) {
+            uint32_t cur{};
+            uint32_t next{};
+            std::vector<uint32_t> old_keys;
+            int err = bpf_map_get_next_key(pid_fd, nullptr, &cur);
+            while (err == 0) {
+                old_keys.push_back(cur);
+                err = bpf_map_get_next_key(pid_fd, &cur, &next);
+                cur = next;
+            }
+            for (auto k : old_keys)
+                bpf_map_delete_elem(pid_fd, &k);
+        }
+
+        // Clear existing comm map entries
+        int comm_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_comms");
+        if (comm_fd >= 0) {
+            char cur_key[TASK_COMM_LEN] = {};
+            char next_key[TASK_COMM_LEN] = {};
+            std::vector<std::string> old_comms;
+            int err = bpf_map_get_next_key(comm_fd, nullptr, cur_key);
+            while (err == 0) {
+                old_comms.emplace_back(cur_key);
+                err = bpf_map_get_next_key(comm_fd, cur_key, next_key);
+                std::memcpy(cur_key, next_key, TASK_COMM_LEN);
+            }
+            for (auto& c : old_comms) {
+                char k[TASK_COMM_LEN] = {};
+                std::memcpy(k, c.c_str(), std::min(c.size(), sizeof(k) - 1));
+                bpf_map_delete_elem(comm_fd, k);
+            }
+        }
+
+        ApplyFilterMaps();
+
+        // 清空 stack_counts BPF map 中旧目标的残留样本
+        if (counts_fd_ >= 0) {
+            il_stack_key cur{}, next{};
+            std::vector<il_stack_key> stale_keys;
+            int err = bpf_map_get_next_key(counts_fd_, nullptr, &cur);
+            while (err == 0) {
+                stale_keys.push_back(cur);
+                err = bpf_map_get_next_key(counts_fd_, &cur, &next);
+                cur = next;
+            }
+            for (auto& k : stale_keys)
+                bpf_map_delete_elem(counts_fd_, &k);
+        }
+
+        // 重建 perf events（per-PID 模式需要为新 PID 重新创建 perf_event）
+        RebuildPerfEvents();
+
+        // 清空内部数据缓存，避免旧目标的样本残留
+        {
+            std::lock_guard<std::mutex> lock(last_batch_mu_);
+            last_batch_.reset();
+            latest_json_snapshot_ = R"({"stack_samples":[]})";
+        }
+
+        IL_INFO("cpu_profiler: reconfigured (pids={}, comms={}, perf_fds={})",
+                target_pids_.size(), target_comms_.size(), perf_fds_.size());
+        return Status::Ok();
+    }
+
 private:
+    static std::string AutoDiscoverBpfObject(const char* filename) {
+        auto try_path = [](const std::string& p) -> std::string {
+            struct stat st;
+            if (stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode))
+                return p;
+            return {};
+        };
+
+        // 1. Relative to CWD
+        auto r = try_path(std::string("build/bpf/") + filename);
+        if (!r.empty()) return r;
+
+        // 2. Relative to binary location
+        char exe_path[PATH_MAX] = {};
+        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (len > 0) {
+            exe_path[len] = '\0';
+            std::string dir(exe_path);
+            auto slash = dir.rfind('/');
+            if (slash != std::string::npos) {
+                dir = dir.substr(0, slash);
+                r = try_path(dir + "/bpf/" + filename);
+                if (!r.empty()) return r;
+                r = try_path(dir + "/../build/bpf/" + filename);
+                if (!r.empty()) return r;
+                r = try_path(dir + "/" + filename);
+                if (!r.empty()) return r;
+            }
+        }
+
+        // 3. Common system paths
+        r = try_path(std::string("/usr/lib/illuminator/bpf/") + filename);
+        if (!r.empty()) return r;
+        r = try_path(std::string("/opt/illuminator/bpf/") + filename);
+        if (!r.empty()) return r;
+
+        return {};
+    }
+
+    // ========================================================================
+    // RebuildPerfEvents — 根据当前 target_pids_ 重建 perf events
+    // ========================================================================
+    // 在 Reconfigure 时调用。关闭旧的 perf_event FDs，根据新的
+    // target_pids_ 重新创建（per-PID 或 per-CPU 模式）。
+    void RebuildPerfEvents() {
+        int prog_fd = bpf_mgr_.GetProgFd("cpu_profiler", "on_cpu_sample");
+        if (prog_fd < 0) return;
+
+        for (int fd : perf_fds_) {
+            ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+            close(fd);
+        }
+        perf_fds_.clear();
+
+        per_pid_mode_ = !target_pids_.empty();
+        if (per_pid_mode_) {
+            for (uint32_t target_pid : target_pids_) {
+                struct perf_event_attr attr = {};
+                attr.size = sizeof(attr);
+                attr.type = PERF_TYPE_SOFTWARE;
+                attr.config = PERF_COUNT_SW_CPU_CLOCK;
+                attr.freq = 1;
+                attr.sample_freq = static_cast<uint64_t>(frequency_hz_);
+                attr.sample_type = PERF_SAMPLE_CALLCHAIN;
+                attr.disabled = 1;
+                attr.exclude_user = user_stacks_ ? 0 : 1;
+                attr.exclude_kernel = kernel_stacks_ ? 0 : 1;
+                attr.inherit = 1;
+
+                int fd = static_cast<int>(
+                    PerfEventOpenSys(&attr, static_cast<pid_t>(target_pid),
+                                     /*cpu=*/-1, /*group=*/-1,
+                                     PERF_FLAG_FD_CLOEXEC));
+                if (fd < 0) continue;
+
+                if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0 ||
+                    ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
+                    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
+                    close(fd);
+                    continue;
+                }
+                perf_fds_.push_back(fd);
+            }
+        } else {
+            auto cpus = ParseOnlineCpuIds();
+            if (cpus.empty()) cpus.push_back(0);
+            for (int cpu : cpus) {
+                struct perf_event_attr attr = {};
+                attr.size = sizeof(attr);
+                attr.type = PERF_TYPE_SOFTWARE;
+                attr.config = PERF_COUNT_SW_CPU_CLOCK;
+                attr.freq = 1;
+                attr.sample_freq = static_cast<uint64_t>(frequency_hz_);
+                attr.sample_type = PERF_SAMPLE_CALLCHAIN;
+                attr.disabled = 1;
+                attr.exclude_user = user_stacks_ ? 0 : 1;
+                attr.exclude_kernel = kernel_stacks_ ? 0 : 1;
+
+                int fd = static_cast<int>(
+                    PerfEventOpenSys(&attr, /*pid=*/-1, cpu, /*group=*/-1,
+                                     PERF_FLAG_FD_CLOEXEC));
+                if (fd < 0) continue;
+
+                if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0 ||
+                    ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
+                    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
+                    close(fd);
+                    continue;
+                }
+                perf_fds_.push_back(fd);
+            }
+        }
+    }
+
     // ========================================================================
     // ApplyFilterMaps — 将过滤配置写入 eBPF 侧的配置 map
     // ========================================================================
@@ -411,9 +664,13 @@ private:
     //   位 2 (4): 启用进程名过滤
     void ApplyFilterMaps() {
         int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        // Per-PID 模式下不启用 BPF 侧 PID 过滤：perf_event 已绑定目标进程，
+        // 且 bpf_get_current_pid_tgid() 返回宿主 PID 命名空间的 PID，
+        // 与容器内可见的 PID 不同，会导致所有采样被错误过滤。
+        bool use_bpf_pid_filter = !target_pids_.empty() && !per_pid_mode_;
         uint32_t flags =
             (stream_mode_ ? 1u : 0u) |
-            (!target_pids_.empty() ? 2u : 0u) |
+            (use_bpf_pid_filter ? 2u : 0u) |
             (!target_comms_.empty() ? 4u : 0u);
         if (cfg_fd >= 0) {
             uint32_t k = 0;
@@ -496,9 +753,11 @@ private:
             if (bpf_map_lookup_elem(counts_fd_, &key, &count) != 0)
                 continue;
 
-            // 构造一条堆栈采样样本
             auto& sample = batch->AddStackSample();
-            sample.pid = key.pid;
+            // Per-PID 模式下 bpf_get_current_pid_tgid() 返回 host namespace PID，
+            // 但 symbolizer 需要 container-local PID 才能读取 /proc/<pid>/maps。
+            // 通过 host→container PID 映射表将 PID 转换为本地可见的 PID。
+            sample.pid = ResolveLocalPid(key.pid, key.comm);
             sample.tid = key.tid;
             sample.comm = batch->InternString(std::string_view(
                 key.comm, strnlen(key.comm, TASK_COMM_LEN)));
@@ -607,7 +866,7 @@ private:
 
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
         auto& sample = batch->AddStackSample();
-        sample.pid = ev->pid;
+        sample.pid = self->ResolveLocalPid(ev->pid, ev->comm);
         sample.tid = ev->tid;
         sample.cpu = ev->cpu;
         sample.comm = batch->InternString(std::string_view(
@@ -626,6 +885,66 @@ private:
 
         self->callback_(std::move(batch));
         return 0;
+    }
+
+    // ========================================================================
+    // ResolveLocalPid — 将 host namespace PID 映射为 container-local PID
+    // ========================================================================
+    // 在容器环境中，bpf_get_current_pid_tgid() 返回的是 host namespace 的 PID，
+    // 但 /proc 文件系统只能通过 container-local PID 访问进程信息。
+    // 本函数维护一个 host→local PID 映射缓存，确保 symbolizer 能正确读取
+    // /proc/<pid>/maps 进行符号解析。
+    uint32_t ResolveLocalPid(uint32_t host_pid, const char* comm) {
+        if (!per_pid_mode_)
+            return host_pid;
+
+        // 检查 /proc/<host_pid>/maps 是否可直接访问（非容器或 host ns）
+        auto it = host_to_local_pid_.find(host_pid);
+        if (it != host_to_local_pid_.end())
+            return it->second;
+
+        // 尝试直接访问 /proc/<host_pid>/maps
+        {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/%u/maps", host_pid);
+            std::ifstream f(path);
+            if (f.good()) {
+                host_to_local_pid_[host_pid] = host_pid;
+                return host_pid;
+            }
+        }
+
+        // 容器环境：通过 comm 匹配找到对应的 container-local PID
+        std::string_view target_comm(comm, strnlen(comm, TASK_COMM_LEN));
+        for (uint32_t local_pid : target_pids_) {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/%u/comm", local_pid);
+            std::ifstream f(path);
+            if (!f) continue;
+            std::string proc_comm;
+            std::getline(f, proc_comm);
+            while (!proc_comm.empty() && proc_comm.back() == '\n')
+                proc_comm.pop_back();
+            if (proc_comm == target_comm) {
+                host_to_local_pid_[host_pid] = local_pid;
+                IL_INFO("cpu_profiler: PID namespace mapping: host {} -> local {} (comm={})",
+                        host_pid, local_pid, proc_comm);
+                return local_pid;
+            }
+        }
+
+        // 回退：使用第一个存在的 target_pid
+        for (uint32_t local_pid : target_pids_) {
+            char path[64];
+            std::snprintf(path, sizeof(path), "/proc/%u/maps", local_pid);
+            std::ifstream f(path);
+            if (f.good()) {
+                host_to_local_pid_[host_pid] = local_pid;
+                return local_pid;
+            }
+        }
+
+        return host_pid;
     }
 
     // ---- 反压响应 ----
@@ -652,10 +971,12 @@ private:
     bool kernel_stacks_ = true;               // 是否采集内核态堆栈
     bool stream_mode_ = false;
     bool stub_mode_ = false;
+    bool per_pid_mode_ = false;            // per-PID perf event 模式（无需 BPF PID 过滤）
 
     std::string bpf_obj_path_;                // eBPF 目标文件路径
     std::vector<uint32_t> target_pids_;       // 目标 PID 列表
     std::vector<std::string> target_comms_;   // 目标进程名列表
+    std::unordered_map<uint32_t, uint32_t> host_to_local_pid_;  // host PID → container PID 映射缓存
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};        // 运行中标志（线程安全）

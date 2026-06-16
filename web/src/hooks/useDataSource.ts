@@ -5,7 +5,7 @@ import { LiveDataSource } from '../services/liveDataSource'
 let globalDataSource: LiveDataSource | null = null
 let connectionListeners = new Set<(s: ConnectionStatus) => void>()
 
-function getDataSource(): LiveDataSource {
+export function getDataSource(): LiveDataSource {
   if (!globalDataSource) {
     globalDataSource = new LiveDataSource({
       onConnectionChange: (s) => {

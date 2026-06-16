@@ -27,7 +27,7 @@ export default function ReplayCpuView({ engine }: { engine: ReplayEngine }) {
 }
 
 function ReplaySystemSubTab({ engine }: { engine: ReplayEngine }) {
-  const { areaData, coreData, summary } = useCpuUtilization(true, 1000, engine)
+  const { areaData, coreData, summary } = useCpuUtilization(true, engine)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -59,7 +59,7 @@ function ReplaySystemSubTab({ engine }: { engine: ReplayEngine }) {
 }
 
 function ReplayProcessSubTab({ engine }: { engine: ReplayEngine }) {
-  const { processes } = useCpuProcesses(true, 2000, engine)
+  const { processes } = useCpuProcesses(true, engine)
 
   return (
     <div style={{ marginTop: 8 }}>

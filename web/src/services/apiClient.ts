@@ -52,11 +52,17 @@ export const api = {
 
   // Feature management API
   features: () => get<{ features: FeatureEntry[] }>('/api/v1/features'),
-  featureStart: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/start`, {}),
+  featureStart: (name: string, opts?: { target_pids?: number[]; target_comms?: string[] }) =>
+    post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/start`, opts ?? {}),
+  featureReconfigure: (name: string, opts: { target_pids?: number[]; target_comms?: string[] }) =>
+    post<{ status: string; feature: string; message: string }>(`/api/v1/features/${name}/reconfigure`, opts),
   featureStop: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/stop`, {}),
   featurePause: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/pause`, {}),
   featureResume: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/resume`, {}),
   featureCollect: (name: string) => get(`/api/v1/features/${name}/collect`),
+  featureStream: (name: string, cursor: number, signal?: AbortSignal) =>
+    fetch(`/api/v1/features/${name}/stream?cursor=${cursor}`, { signal })
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<{ cursor: number; batches: Array<Record<string, unknown>> }> }),
 
   // Recording API
   featureRecordStart: (name: string) =>

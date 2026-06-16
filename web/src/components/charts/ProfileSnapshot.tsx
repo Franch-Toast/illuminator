@@ -1,12 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useTimeStore } from '../../stores/useTimeStore'
 import { colors } from '../../styles/theme'
-
-interface FlameNode {
-  name: string
-  value: number
-  children?: FlameNode[]
-}
+import { api } from '../../services/apiClient'
+import type { FlameNode, StackSample as WorkerSample } from '../../workers/flameGraphWorker'
 
 interface StackSample {
   comm: string
@@ -31,7 +27,36 @@ interface ProfileSnapshotProps {
   threadComms?: string[]
 }
 
-export default function ProfileSnapshot({ pid, comm, profileType, timeSelection, threadComms }: ProfileSnapshotProps) {
+let worker: Worker | null = null
+let pendingCallbacks = new Map<string, (result: unknown) => void>()
+
+function getWorker(): Worker {
+  if (!worker) {
+    worker = new Worker(
+      new URL('../../workers/flameGraphWorker.ts', import.meta.url),
+      { type: 'module' }
+    )
+    worker.onmessage = (e) => {
+      const { id, payload } = e.data
+      const cb = pendingCallbacks.get(id)
+      if (cb) {
+        pendingCallbacks.delete(id)
+        cb(payload)
+      }
+    }
+  }
+  return worker
+}
+
+function buildFlameTreeAsync(samples: WorkerSample[]): Promise<FlameNode> {
+  return new Promise((resolve) => {
+    const id = `build_${Date.now()}_${Math.random().toString(36).slice(2)}`
+    pendingCallbacks.set(id, resolve as (r: unknown) => void)
+    getWorker().postMessage({ type: 'build', id, payload: { samples } })
+  })
+}
+
+export default function ProfileSnapshot({ pid, comm, profileType, timeSelection }: ProfileSnapshotProps) {
   const [root, setRoot] = useState<FlameNode | null>(null)
   const [topFunctions, setTopFunctions] = useState<{ name: string; pct: number }[]>([])
   const [totalSamples, setTotalSamples] = useState(0)
@@ -40,32 +65,19 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
   const [error, setError] = useState<string | null>(null)
   const accumulatedRef = useRef<StackSample[]>([])
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const cursorRef = useRef<number>(0)
+  const abortRef = useRef<AbortController | null>(null)
+  const buildVersionRef = useRef(0)
   const mode = useTimeStore(s => s.mode)
 
-  const hostPidRef = useRef<number | null>(null)
   const MAX_SAMPLES = 5000
 
   const processCollectedData = useCallback((rawSamples: Array<Record<string, unknown>>) => {
-    const knownComms = new Set<string>([comm, ...(threadComms ?? [])])
+    if (rawSamples.length === 0) return
+
     const now = Date.now()
 
-    if (hostPidRef.current === null) {
-      for (const s of rawSamples) {
-        const sComm = (s.comm as string) ?? ''
-        if (knownComms.has(sComm)) {
-          hostPidRef.current = s.pid as number
-          break
-        }
-      }
-    }
-
     const newSamples: StackSample[] = rawSamples
-      .filter((s) => {
-        const sPid = s.pid as number
-        if (sPid === pid) return true
-        if (hostPidRef.current !== null && sPid === hostPidRef.current) return true
-        return false
-      })
       .map((s) => {
         const kernelStack = (s.kernel_stack as Array<{ function_name?: string; address?: number }>) ?? []
         const userStack = (s.user_stack as Array<{ function_name?: string; address?: number }>) ?? []
@@ -75,9 +87,9 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
           count: (s.count as number) ?? ((s.duration_ns as number) ? Math.round((s.duration_ns as number) / 1000) : 1),
           timestamp: now,
           stack: [
-            ...kernelStack.map(f => f.function_name || `0x${(f.address ?? 0).toString(16)}`),
-            ...userStack.map(f => f.function_name || `0x${(f.address ?? 0).toString(16)}`),
-          ],
+            ...kernelStack.map(f => cleanFrameName(f.function_name, f.address)),
+            ...userStack.map(f => cleanFrameName(f.function_name, f.address)),
+          ].filter(f => f !== ''),
         }
       })
 
@@ -90,7 +102,7 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
 
     setTotalSamples(accumulatedRef.current.length)
     setPollCount(c => c + 1)
-  }, [pid, comm, threadComms])
+  }, [])
 
   useEffect(() => {
     const samples = accumulatedRef.current
@@ -109,9 +121,18 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
 
     setFilteredSamples(filtered.length)
     if (filtered.length > 0) {
-      const tree = buildFlameTree(filtered)
-      setRoot(tree)
-      setTopFunctions(extractTopFunctions(tree, 10))
+      const version = ++buildVersionRef.current
+      const workerSamples: WorkerSample[] = filtered.map(s => ({
+        stack: s.stack,
+        count: s.count,
+      }))
+
+      buildFlameTreeAsync(workerSamples).then((tree) => {
+        if (buildVersionRef.current === version) {
+          setRoot(tree)
+          setTopFunctions(extractTopFunctions(tree, 10))
+        }
+      })
     } else {
       setRoot(null)
       setTopFunctions([])
@@ -120,13 +141,19 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
 
   useEffect(() => {
     accumulatedRef.current = []
-    hostPidRef.current = null
     setRoot(null)
     setTopFunctions([])
     setTotalSamples(0)
     setFilteredSamples(0)
     setPollCount(0)
     setError(null)
+
+    const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
+    api.featureStream(featureName, 999999999)
+      .then(data => {
+        cursorRef.current = data?.cursor ?? 0
+      })
+      .catch(() => { cursorRef.current = 0 })
   }, [pid, profileType])
 
   useEffect(() => {
@@ -138,21 +165,33 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
     const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
 
     const poll = async () => {
+      abortRef.current?.abort()
+      abortRef.current = new AbortController()
+
       try {
-        const resp = await fetch(`/api/v1/features/${featureName}/collect`)
-        if (!resp.ok) return
-        const data = await resp.json()
-        const rawSamples = data.stack_samples ?? []
-        processCollectedData(rawSamples)
+        const data = await api.featureStream(featureName, cursorRef.current, abortRef.current.signal)
+        if (data.cursor) cursorRef.current = data.cursor
+        const batches = data.batches ?? []
+        for (const batch of batches) {
+          const rawSamples = (batch as Record<string, unknown>).stack_samples as Array<Record<string, unknown>> ?? []
+          processCollectedData(rawSamples)
+        }
+        if (batches.length === 0) {
+          const fdata = await api.featureCollect(featureName) as Record<string, unknown>
+          const rawSamples = (fdata.stack_samples as Array<Record<string, unknown>>) ?? []
+          processCollectedData(rawSamples)
+        }
       } catch (e) {
+        if (e instanceof Error && e.name === 'AbortError') return
         setError(e instanceof Error ? e.message : 'Fetch failed')
       }
     }
 
     poll()
-    timerRef.current = setInterval(poll, 2000)
+    timerRef.current = setInterval(poll, 1500)
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
+      abortRef.current?.abort()
     }
   }, [pid, profileType, processCollectedData, mode])
 
@@ -170,14 +209,14 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
           Polls: {pollCount} | Accumulated samples: {totalSamples}
         </div>
         <div style={{ fontSize: 11, marginTop: 4 }}>
-          Waiting for target process to be sampled (system-wide profiling at 49Hz)
+          Waiting for target process to be sampled (profiling at 49Hz)
         </div>
       </div>
     )
   }
 
   return (
-    <div>
+    <div style={{ width: '100%', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 4 }}>
         <span style={{ fontSize: 12, color: colors.textMuted }}>
           {profileType === 'on_cpu' ? 'On-CPU' : 'Off-CPU'} Profile —{' '}
@@ -193,25 +232,25 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
             </span>
           )}
           <button
-            onClick={() => { accumulatedRef.current = []; setRoot(null); setTotalSamples(0); setFilteredSamples(0) }}
+            onClick={() => { accumulatedRef.current = []; cursorRef.current = 0; setRoot(null); setTotalSamples(0); setFilteredSamples(0) }}
             style={{ fontSize: 11, padding: '2px 8px', borderRadius: 3, border: `1px solid ${colors.cardBorder}`, background: 'transparent', color: colors.textMuted, cursor: 'pointer' }}
           >
             Reset
           </button>
         </div>
       </div>
-      <div style={{ display: 'flex', gap: 16 }}>
-        <div style={{ flex: 1 }}>
-          <SimplifiedFlameGraph root={root} />
+      <div style={{ display: 'flex', gap: 16, width: '100%', minWidth: 0 }}>
+        <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+          <FlameGraph root={root} />
         </div>
-        <div style={{ width: 240, flexShrink: 0 }}>
+        <div style={{ width: 220, flexShrink: 0 }}>
           <h5 style={{ margin: '0 0 8px', fontSize: 12, color: colors.textSecondary }}>Top Functions</h5>
           {topFunctions.map((fn, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 12, borderBottom: `1px solid ${colors.cardBorder}22` }}>
-              <span style={{ color: colors.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }} title={fn.name}>
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '3px 0', fontSize: 11, borderBottom: `1px solid ${colors.cardBorder}22` }}>
+              <span style={{ color: colors.textPrimary, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 160 }} title={fn.name}>
                 {fn.name}
               </span>
-              <span style={{ color: colors.accent, fontFamily: 'monospace', flexShrink: 0 }}>
+              <span style={{ color: colors.accent, fontFamily: 'monospace', flexShrink: 0, marginLeft: 4 }}>
                 {fn.pct.toFixed(1)}%
               </span>
             </div>
@@ -222,38 +261,54 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection,
   )
 }
 
-function SimplifiedFlameGraph({ root }: { root: FlameNode }) {
-  const maxDepth = 12
+function FlameGraph({ root }: { root: FlameNode }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const maxDepth = 20
   const rows = flattenToRows(root, maxDepth)
   const totalValue = root.value
+  const rowHeight = 18
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+    <div
+      ref={containerRef}
+      style={{
+        width: '100%',
+        maxWidth: '100%',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 1,
+        maxHeight: maxDepth * (rowHeight + 1),
+        overflowY: 'auto',
+      }}
+    >
       {rows.map((row, depth) => (
-        <div key={depth} style={{ display: 'flex', height: 20 }}>
+        <div key={depth} style={{ display: 'flex', height: rowHeight, width: '100%', maxWidth: '100%', overflow: 'hidden', flexShrink: 0 }}>
           {row.map((node, i) => {
             const widthPct = (node.value / totalValue) * 100
-            if (widthPct < 0.5) return null
+            if (widthPct < 0.3) return null
             return (
               <div
                 key={i}
-                title={`${node.name} (${node.value} samples, ${widthPct.toFixed(1)}%)`}
+                title={`${node.name}\n${node.value} samples (${widthPct.toFixed(1)}%)`}
                 style={{
                   width: `${widthPct}%`,
+                  minWidth: 0,
                   background: frameColor(node.name, depth),
                   borderRadius: 2,
-                  padding: '0 4px',
+                  padding: '0 3px',
                   overflow: 'hidden',
                   whiteSpace: 'nowrap',
                   textOverflow: 'ellipsis',
                   fontSize: 10,
-                  lineHeight: '20px',
+                  lineHeight: `${rowHeight}px`,
                   color: '#fff',
                   cursor: 'pointer',
                   marginRight: 1,
+                  boxSizing: 'border-box',
                 }}
               >
-                {widthPct > 3 ? node.name : ''}
+                {widthPct > 4 ? node.name : ''}
               </div>
             )
           })}
@@ -261,6 +316,39 @@ function SimplifiedFlameGraph({ root }: { root: FlameNode }) {
       ))}
     </div>
   )
+}
+
+function cleanFrameName(functionName?: string, address?: number): string {
+  if (!functionName && !address) return ''
+  if (!functionName || functionName === '0x0') {
+    return address ? `0x${address.toString(16)}` : ''
+  }
+
+  let name = functionName
+
+  const binaryOffsetMatch = name.match(/^\[(.+?)\+0x[0-9a-f]+\]$/)
+  if (binaryOffsetMatch) {
+    const path = binaryOffsetMatch[1]
+    const binary = path.split('/').pop() ?? path
+    return `[${binary}]`
+  }
+
+  if (name.match(/^\[0x[0-9a-f]+\]$/)) {
+    return name.length > 14 ? name.slice(0, 14) + '…' : name
+  }
+
+  if (name.startsWith('[kernel ')) {
+    return '[kernel]'
+  }
+
+  name = name.replace(/\s*\[inlined\]$/, '')
+
+  const templateIdx = name.indexOf('<')
+  if (templateIdx > 0 && name.length > 40) {
+    name = name.slice(0, templateIdx) + '<…>'
+  }
+
+  return name
 }
 
 function flattenToRows(root: FlameNode, maxDepth: number): FlameNode[][] {
@@ -277,32 +365,6 @@ function flattenToRows(root: FlameNode, maxDepth: number): FlameNode[][] {
     }
   }
   return rows
-}
-
-function buildFlameTree(samples: StackSample[]): FlameNode {
-  const root: FlameNode = { name: 'root', value: 0, children: [] }
-  let total = 0
-
-  for (const sample of samples) {
-    const weight = sample.count || 1
-    total += weight
-
-    let current = root
-    const stack = [...sample.stack].reverse()
-    for (const frame of stack) {
-      if (!frame || frame === '0x0') continue
-      let child = current.children?.find(c => c.name === frame)
-      if (!child) {
-        child = { name: frame, value: 0, children: [] }
-        if (!current.children) current.children = []
-        current.children.push(child)
-      }
-      child.value += weight
-      current = child
-    }
-  }
-  root.value = total
-  return root
 }
 
 function extractTopFunctions(root: FlameNode, n: number): { name: string; pct: number }[] {
@@ -326,12 +388,14 @@ function extractTopFunctions(root: FlameNode, n: number): { name: string; pct: n
 
 function frameColor(name: string, depth: number): string {
   if (name === 'root') return '#374151'
-  if (name.includes('[kernel]') || name.startsWith('__')) return '#7c3aed'
+  if (name.startsWith('[kernel') || name.startsWith('__sched')) return '#7c3aed'
   if (name.includes('std::') || name.includes('__cxa')) return '#0d9488'
   if (name.includes('epoll') || name.includes('futex') || name.includes('poll')) return '#b45309'
+  if (name.includes('schedule') || name.includes('wait')) return '#6d28d9'
+  if (name.startsWith('[') && name.endsWith(']')) return '#4b5563'
   const hue = (hashCode(name) % 40) + 10
-  const sat = 60 + (depth * 3)
-  const lum = 35 + (depth * 2)
+  const sat = 60 + (depth * 2)
+  const lum = 38 + (depth * 1.5)
   return `hsl(${hue}, ${sat}%, ${lum}%)`
 }
 

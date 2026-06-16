@@ -126,13 +126,22 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
     startedRef.current = true
     setProfilingStatus('starting')
     try {
+      const targetOpts = { target_pids: [pid], target_comms: [comm] }
       const resp = await api.features()
       const cpuProf = resp.features?.find(f => f.name === 'cpu_profile')
       const offcpuProf = resp.features?.find(f => f.name === 'offcpu_profile')
 
       const starts: Promise<unknown>[] = []
-      if (cpuProf && cpuProf.state === 'inactive') starts.push(api.featureStart('cpu_profile'))
-      if (offcpuProf && offcpuProf.state === 'inactive') starts.push(api.featureStart('offcpu_profile'))
+      if (cpuProf && cpuProf.state === 'inactive') {
+        starts.push(api.featureStart('cpu_profile', targetOpts))
+      } else if (cpuProf && cpuProf.state === 'active') {
+        starts.push(api.featureReconfigure('cpu_profile', targetOpts))
+      }
+      if (offcpuProf && offcpuProf.state === 'inactive') {
+        starts.push(api.featureStart('offcpu_profile', targetOpts))
+      } else if (offcpuProf && offcpuProf.state === 'active') {
+        starts.push(api.featureReconfigure('offcpu_profile', targetOpts))
+      }
       if (starts.length > 0) await Promise.all(starts)
       setProfilingStatus('active')
     } catch {

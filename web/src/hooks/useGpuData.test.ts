@@ -78,11 +78,11 @@ describe('useGpuMonitor', () => {
       }
     })
 
-    const { result } = renderHook(() => useGpuMonitor(true, 500))
+    const { result } = renderHook(() => useGpuMonitor(true))
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
     expect(result.current.data.length).toBe(1)
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
     expect(result.current.data.length).toBe(2)
     expect(result.current.data[1].compute_pct).toBe(20)
   })
@@ -125,10 +125,10 @@ describe('useGpuProcesses', () => {
       }
     })
 
-    const { result } = renderHook(() => useGpuProcesses(true, 500))
+    const { result } = renderHook(() => useGpuProcesses(true))
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
-    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
-    await act(async () => { await vi.advanceTimersByTimeAsync(500) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
 
     expect(result.current.processes[0].history.length).toBe(3)
     expect(result.current.processes[0].history).toEqual([20, 30, 40])

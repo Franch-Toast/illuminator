@@ -30,6 +30,7 @@ class WebSocketManager {
 public:
     void SetBroadcastInterval(int ms) { broadcast_interval_ms_ = ms; }
     void SetSerializer(WsBroadcastSerializer fn) { serializer_ = std::move(fn); }
+    void SetAuthToken(const std::string& token) { auth_token_ = token; }
 
     void AddConnection(int fd, const std::string& subscribe_path) {
         std::string key = PathToPipelineKey(subscribe_path);
@@ -269,6 +270,37 @@ private:
         return "default";
     }
 
+    bool ValidateAuth(const std::string& request) const {
+        if (auth_token_.empty()) return true;
+
+        auto auth_header = detail::ExtractHeader(request, "Authorization");
+        if (auth_header == "Bearer " + auth_token_) return true;
+
+        auto token_param = ExtractQueryParam(request, "token");
+        if (!token_param.empty() && token_param == auth_token_) return true;
+
+        return false;
+    }
+
+    static std::string ExtractQueryParam(const std::string& request,
+                                          const std::string& param) {
+        auto sp1 = request.find(' ');
+        if (sp1 == std::string::npos) return "";
+        auto sp2 = request.find(' ', sp1 + 1);
+        if (sp2 == std::string::npos) return "";
+        auto uri = request.substr(sp1 + 1, sp2 - sp1 - 1);
+        auto q = uri.find('?');
+        if (q == std::string::npos) return "";
+        auto query = uri.substr(q + 1);
+
+        std::string key = param + "=";
+        auto pos = query.find(key);
+        if (pos == std::string::npos) return "";
+        pos += key.size();
+        auto end = query.find('&', pos);
+        return (end == std::string::npos) ? query.substr(pos) : query.substr(pos, end - pos);
+    }
+
     void AcceptLoop() {
         while (running_.load()) {
             struct sockaddr_in client_addr{};
@@ -286,6 +318,14 @@ private:
                 const char* resp = "HTTP/1.1 400 Bad Request\r\n\r\n";
                 ::write(client_fd, resp, strlen(resp));
                 ::close(client_fd);
+                continue;
+            }
+
+            if (!ValidateAuth(request)) {
+                const char* resp = "HTTP/1.1 401 Unauthorized\r\n\r\n";
+                ::write(client_fd, resp, strlen(resp));
+                ::close(client_fd);
+                IL_WARN("WebSocket: rejected connection - invalid auth token");
                 continue;
             }
 
@@ -310,6 +350,7 @@ private:
     int ws_port_ = 0;
     int broadcast_interval_ms_ = 1000;
     WsBroadcastSerializer serializer_;
+    std::string auth_token_;
 };
 
 }  // namespace illuminator

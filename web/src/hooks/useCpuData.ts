@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { api } from '../services/apiClient'
 import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
+import { getDataSource } from './useDataSource'
 import type { DataBatch, DataSource } from '../services/dataSource'
 import type { CpuDataPoint } from '../components/charts/StackedAreaChart'
 import type { CoreDataPoint } from '../components/charts/CoreHeatmap'
@@ -69,7 +69,7 @@ function parseCpuUtilization(resp: CpuCollectResponse, now: number) {
   }
 }
 
-export function useCpuUtilization(active: boolean, intervalMs = 1000, replaySource?: DataSource) {
+export function useCpuUtilization(active: boolean, replaySource?: DataSource) {
   const [areaData, setAreaData] = useState<CpuDataPoint[]>([])
   const [coreData, setCoreData] = useState<CoreDataPoint[]>([])
   const [summary, setSummary] = useState<CpuSummary | null>(null)
@@ -91,29 +91,16 @@ export function useCpuUtilization(active: boolean, intervalMs = 1000, replaySour
   }, [])
 
   useEffect(() => {
-    if (replaySource) {
-      const unsub = replaySource.subscribe('cpu_utilization', (batch: DataBatch) => {
-        const data = batch.data as CpuCollectResponse
-        if (data?.records) ingestBatch(data, batch.timestamp)
-      })
-      return unsub
-    }
+    const source = replaySource ?? getDataSource()
 
     if (!active || mode === 'paused') return
 
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const resp = await api.featureCollect('cpu_utilization') as CpuCollectResponse
-        if (cancelled || !resp?.records) return
-        ingestBatch(resp, Date.now())
-      } catch { /* retry next interval */ }
-    }
-
-    poll()
-    const timer = setInterval(poll, intervalMs)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [active, intervalMs, mode, replaySource, ingestBatch])
+    const unsub = source.subscribe('cpu_utilization', (batch: DataBatch) => {
+      const data = batch.data as CpuCollectResponse
+      if (data?.records) ingestBatch(data, batch.timestamp)
+    })
+    return unsub
+  }, [active, mode, replaySource, ingestBatch])
 
   const clear = useCallback(() => {
     areaBuffer.current.clear()
@@ -153,37 +140,24 @@ function parseCpuProcesses(resp: CpuCollectResponse, historyMap: Map<number, num
   return result
 }
 
-export function useCpuProcesses(active: boolean, intervalMs = 2000, replaySource?: DataSource) {
+export function useCpuProcesses(active: boolean, replaySource?: DataSource) {
   const [processes, setProcesses] = useState<ProcessEntry[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)
 
   useEffect(() => {
-    if (replaySource) {
-      const unsub = replaySource.subscribe('cpu_processes', (batch: DataBatch) => {
-        const data = batch.data as CpuCollectResponse
-        if (data?.records) {
-          setProcesses(parseCpuProcesses(data, historyMap.current))
-        }
-      })
-      return unsub
-    }
+    const source = replaySource ?? getDataSource()
 
     if (!active || mode === 'paused') return
 
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const resp = await api.featureCollect('cpu_processes') as CpuCollectResponse
-        if (cancelled || !resp?.records) return
-        setProcesses(parseCpuProcesses(resp, historyMap.current))
-      } catch { /* retry */ }
-    }
-
-    poll()
-    const timer = setInterval(poll, intervalMs)
-    return () => { cancelled = true; clearInterval(timer) }
-  }, [active, intervalMs, mode, replaySource])
+    const unsub = source.subscribe('cpu_processes', (batch: DataBatch) => {
+      const data = batch.data as CpuCollectResponse
+      if (data?.records) {
+        setProcesses(parseCpuProcesses(data, historyMap.current))
+      }
+    })
+    return unsub
+  }, [active, mode, replaySource])
 
   const clear = useCallback(() => {
     historyMap.current.clear()

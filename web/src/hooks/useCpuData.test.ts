@@ -46,7 +46,7 @@ describe('useCpuUtilization', () => {
   })
 
   it('should fetch and parse CPU utilization data', async () => {
-    const { result } = renderHook(() => useCpuUtilization(true, 1000))
+    const { result } = renderHook(() => useCpuUtilization(true))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
 
@@ -65,7 +65,7 @@ describe('useCpuUtilization', () => {
   })
 
   it('should accumulate data points over time', async () => {
-    const { result } = renderHook(() => useCpuUtilization(true, 1000))
+    const { result } = renderHook(() => useCpuUtilization(true))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
     expect(result.current.areaData.length).toBe(1)
@@ -75,14 +75,14 @@ describe('useCpuUtilization', () => {
   })
 
   it('should not poll when inactive', async () => {
-    renderHook(() => useCpuUtilization(false, 1000))
+    renderHook(() => useCpuUtilization(false))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
     expect(api.featureCollect).not.toHaveBeenCalled()
   })
 
   it('should clear data when clear() is called', async () => {
-    const { result } = renderHook(() => useCpuUtilization(true, 1000))
+    const { result } = renderHook(() => useCpuUtilization(true))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
     expect(result.current.areaData.length).toBe(1)
@@ -102,7 +102,7 @@ describe('useCpuUtilization', () => {
     })
     const replaySource = { subscribe: mockSubscribe, getLatest: () => null, getAvailableFeatures: () => [], destroy: () => {} }
 
-    const { result } = renderHook(() => useCpuUtilization(true, 1000, replaySource))
+    const { result } = renderHook(() => useCpuUtilization(true, replaySource))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
 
@@ -124,7 +124,7 @@ describe('useCpuProcesses', () => {
   })
 
   it('should fetch and parse process data', async () => {
-    const { result } = renderHook(() => useCpuProcesses(true, 2000))
+    const { result } = renderHook(() => useCpuProcesses(true))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
 
@@ -136,7 +136,7 @@ describe('useCpuProcesses', () => {
   })
 
   it('should build history over multiple polls', async () => {
-    const { result } = renderHook(() => useCpuProcesses(true, 1000))
+    const { result } = renderHook(() => useCpuProcesses(true))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(100) })
     expect(result.current.processes[0].history!.length).toBe(1)
@@ -146,7 +146,7 @@ describe('useCpuProcesses', () => {
   })
 
   it('should not poll when inactive', async () => {
-    renderHook(() => useCpuProcesses(false, 2000))
+    renderHook(() => useCpuProcesses(false))
 
     await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
     expect(api.featureCollect).not.toHaveBeenCalled()

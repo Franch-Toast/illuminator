@@ -249,6 +249,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
 
     illuminator::WebSocketManager ws_manager;
     ws_manager.SetBroadcastInterval(1000);
+    ws_manager.SetAuthToken(config.server.auth_token);
     ws_manager.SetSerializer([](const std::string& pipeline_key,
                                 illuminator::DataBatchPtr batch) {
         return illuminator::BatchToJson(*batch, pipeline_key);
