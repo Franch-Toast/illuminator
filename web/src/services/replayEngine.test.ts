@@ -5,6 +5,27 @@ function createMockFile(content: string): File {
   return new File([content], 'test.ilr', { type: 'application/json' })
 }
 
+function createStreamableFile(content: string): File {
+  const file = createMockFile(content)
+  const encoder = new TextEncoder()
+  const bytes = encoder.encode(content)
+  // Simulate chunked reading (split into 2 chunks)
+  const mid = Math.floor(bytes.length / 2)
+  const chunk1 = bytes.slice(0, mid)
+  const chunk2 = bytes.slice(mid)
+
+  Object.defineProperty(file, 'stream', {
+    value: () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(chunk1)
+        controller.enqueue(chunk2)
+        controller.close()
+      }
+    }),
+  })
+  return file
+}
+
 const SAMPLE_ILR = [
   '{"type":"header","version":1,"features":["cpu_utilization","cpu_processes"],"start_ts":1000,"end_ts":5000}',
   '{"ts":1000,"feature":"cpu_utilization","data":{"records":[{"labels":{"type":"cpu_total"},"fields":{"user_pct":10}}]}}',
@@ -138,5 +159,76 @@ describe('ReplayEngine', () => {
 
     engine.seek(3000)
     expect(cb).not.toHaveBeenCalled()
+  })
+})
+
+describe('ReplayEngine - Streaming', () => {
+  let engine: ReplayEngine
+
+  beforeEach(() => {
+    engine = new ReplayEngine()
+  })
+
+  afterEach(() => {
+    engine.destroy()
+  })
+
+  it('should load file via stream() when available', async () => {
+    const file = createStreamableFile(SAMPLE_ILR)
+    const meta = await engine.loadFile(file)
+
+    expect(meta.features).toContain('cpu_utilization')
+    expect(meta.features).toContain('cpu_processes')
+    expect(meta.frameCount).toBe(5)
+    expect(engine.getState()).toBe('ready')
+  })
+
+  it('should report progress during streaming load', async () => {
+    const file = createStreamableFile(SAMPLE_ILR)
+    const progressValues: number[] = []
+
+    await engine.loadFile(file, (pct) => {
+      progressValues.push(pct)
+    })
+
+    expect(progressValues.length).toBeGreaterThan(0)
+    expect(progressValues[progressValues.length - 1]).toBe(1)
+    for (const pct of progressValues) {
+      expect(pct).toBeGreaterThanOrEqual(0)
+      expect(pct).toBeLessThanOrEqual(1)
+    }
+  })
+
+  it('should parse frames correctly from chunked stream', async () => {
+    const file = createStreamableFile(SAMPLE_ILR)
+    await engine.loadFile(file)
+
+    // Seek past the ts=3000 cpu_utilization frame so it gets emitted
+    engine.seek(3500)
+    const latest = engine.getLatest('cpu_utilization')
+    expect(latest).not.toBeNull()
+    expect(latest!.feature).toBe('cpu_utilization')
+  })
+
+  it('should handle single-line files in streaming mode', async () => {
+    const content = '{"ts":1000,"feature":"test","data":{"val":1}}'
+    const file = createStreamableFile(content)
+    const meta = await engine.loadFile(file)
+    expect(meta.frameCount).toBe(1)
+  })
+
+  it('should handle large number of frames efficiently', async () => {
+    const lines: string[] = []
+    for (let i = 0; i < 1000; i++) {
+      lines.push(`{"ts":${i * 100},"feature":"perf","data":{"v":${i}}}`)
+    }
+    // Add trailing newline to ensure last line is flushed in streaming mode
+    const file = createStreamableFile(lines.join('\n') + '\n')
+    const start = performance.now()
+    const meta = await engine.loadFile(file)
+    const elapsed = performance.now() - start
+
+    expect(meta.frameCount).toBe(1000)
+    expect(elapsed).toBeLessThan(500)
   })
 })

@@ -67,17 +67,12 @@ export const api = {
     post<{ status: string; feature: string; file: string }>(`/api/v1/features/${name}/record/start`, {}),
   featureRecordStop: (name: string) =>
     post<{ status: string; feature: string; file: string; batches: number; bytes: number }>(`/api/v1/features/${name}/record/stop`, {}),
-  featureRecordStatus: (name: string) =>
-    get<{ recording: boolean; feature: string; file?: string; bytes_written?: number; batches_written?: number }>(
-      `/api/v1/features/${name}/record/status`
-    ),
 
   // Resource Budget
   budget: () => get<BudgetResponse>('/api/v1/budget'),
 
   // Plugin Hot-reload
   pluginsReload: () => post<{ status: string; loaded: number; plugins: string[] }>('/api/v1/plugins/reload', {}),
-  pluginsList: () => get<{ plugins: Array<{ name: string; type: string; source: string }> }>('/api/v1/plugins'),
 
   // Global Recording
   recordingStart: () => post<{ status: string; recording_features: string[] }>('/api/v1/recording/start', {}),

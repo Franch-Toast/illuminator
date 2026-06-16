@@ -233,10 +233,14 @@ private:
             }
         }
 
-        // Phase 2 (lock-free): serialize + send
+        // Phase 2 (lock-free): serialize + send (with dedup)
         for (auto& [key, fds] : snapshot) {
             auto batch = WebSocketSinkStore::Instance().Latest(key);
             if (!batch) continue;
+
+            // Dedup: skip if data hasn't changed since last broadcast
+            if (last_broadcast_[key] == batch) continue;
+            last_broadcast_[key] = batch;
 
             std::string json;
             if (serializer_)
@@ -369,6 +373,7 @@ private:
     int broadcast_interval_ms_ = 1000;
     WsBroadcastSerializer serializer_;
     std::string auth_token_;
+    std::unordered_map<std::string, DataBatchPtr> last_broadcast_;
 };
 
 }  // namespace illuminator

@@ -62,7 +62,8 @@ inline void SetupAuthMiddleware(httplib::Server& srv,
 }
 
 inline void RegisterApiRoutes(httplib::Server& srv,
-                              PipelineController& controller) {
+                              PipelineController& controller,
+                              FeatureManager* features = nullptr) {
     srv.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(
             json{{"status", "ok"}, {"version", kIlluminatorVersion},
@@ -71,13 +72,14 @@ inline void RegisterApiRoutes(httplib::Server& srv,
     });
 
     srv.Get("/api/v1/pipelines",
-            [&controller](const httplib::Request&, httplib::Response& res) {
+            [&controller, features](const httplib::Request&, httplib::Response& res) {
                 json arr = json::array();
                 for (auto& p : controller.Pipelines()) {
                     auto* src = p->GetSource();
                     arr.push_back({
                         {"name", p->name()},
                         {"running", p->IsRunning()},
+                        {"origin", "controller"},
                         {"stub", src ? src->IsStub() : false},
                         {"batches", p->BatchesProcessed()},
                         {"records", p->RecordsProcessed()},
@@ -94,8 +96,31 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                         }},
                     });
                 }
+
+                // Include active feature-managed pipelines
+                json active_arr = json::array();
+                if (features) {
+                    for (const auto& f : features->ListFeatures()) {
+                        if (f.state == FeatureState::kActive || f.state == FeatureState::kPaused) {
+                            active_arr.push_back({
+                                {"name", f.name},
+                                {"display_name", f.display_name},
+                                {"category", f.category},
+                                {"state", FeatureStateToString(f.state)},
+                                {"origin", "feature_manager"},
+                                {"running", f.state == FeatureState::kActive},
+                                {"batches", f.batches_processed},
+                                {"records", f.records_processed},
+                                {"errors", f.errors},
+                                {"uptime_ms", f.uptime_ms},
+                            });
+                        }
+                    }
+                }
+
                 res.set_content(
-                    json{{"pipelines", std::move(arr)}}.dump() + "\n",
+                    json{{"pipelines", std::move(arr)},
+                         {"active_features", std::move(active_arr)}}.dump() + "\n",
                     "application/json");
             });
 

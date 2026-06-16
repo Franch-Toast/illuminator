@@ -40,7 +40,6 @@ class RingBuffer {
 }
 
 const MAX_POINTS = 1800
-const MAX_AGE_MS = 30 * 60 * 1000
 
 class TimeSeriesStoreImpl {
   private series = new Map<string, RingBuffer>()
@@ -86,16 +85,6 @@ class TimeSeriesStoreImpl {
     const set = this.listeners.get(key)
     if (set) {
       for (const cb of set) cb()
-    }
-  }
-
-  gc() {
-    const cutoff = Date.now() - MAX_AGE_MS
-    for (const [, buf] of this.series) {
-      const data = buf.all()
-      while (data.length > 0 && data[0]!.time < cutoff) {
-        data.shift()
-      }
     }
   }
 }

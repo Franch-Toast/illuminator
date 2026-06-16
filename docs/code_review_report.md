@@ -1,8 +1,8 @@
 # Illuminator 全栈代码架构审查报告
 
-> **审查日期**: 2026-06-16 (第四版，WS 死锁修复 + 全量代码审计 + 运行时验证)  
+> **审查日期**: 2026-06-16 (第五版，架构全面审计 + P2-1 完成 + 新问题发现)  
 > **审查范围**: 后端 C++20 + 前端 React/TypeScript + eBPF 探针 + 前后端交互  
-> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证  
+> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计  
 
 ---
 
@@ -38,20 +38,22 @@
 │  │     ├── Web Worker (flameGraphWorker.ts → 火焰图异步计算)             │   │
 │  │     └── Chart Components (ECharts 6 / Worker-backed FlameGraph)       │   │
 │  │                                                                      │   │
-│  │   通信模式（已统一为 LiveDataSource 双通道）:                           │   │
-│  │   ├── WebSocket (:9528) → 主通道，实时推送 (subscribe:{feature})      │   │
-│  │   ├── HTTP REST (:9527) → 降级通道，1s 轮询 (WS 断开时自动切换)      │   │
-│  │   ├── HTTP REST (:9527) → Feature 管理 API (start/stop/reconfigure)  │   │
-│  │   └── Vite Proxy → 开发环境代理 (/api→:9527, /ws→:9528)             │   │
+│  │   通信模式（已统一为 LiveDataSource 双通道，同端口 :9527）:             │   │
+│  │   ├── WebSocket ws://host:9527/ws/features → 主通道，实时推送          │   │
+│  │   ├── HTTP REST :9527 → 降级通道，1s 轮询 (WS 断开时自动切换)        │   │
+│  │   ├── HTTP REST :9527 → Feature 管理 API (start/stop/reconfigure)    │   │
+│  │   └── Vite Proxy → 开发环境代理 (/api→:9527, /ws→:9527)             │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
-│                                    │ HTTP :9527 / WS :9528                   │
+│                                    │ HTTP + WS :9527 (同端口)                │
 │                                    ▼                                         │
 │  ┌────────────────────── 后端层 (C++20 + Bazel) ────────────────────────┐   │
 │  │                                                                      │   │
 │  │  CLI (main.cc) — daemon / collect / top / version / plugins         │   │
 │  │    │                                                                 │   │
-│  │    ├── HttpServer (cpp-httplib) ──▶ 39 个 REST 端点 + 静态 SPA       │   │
+│  │    ├── WsAwareServer (httplib 子类) ──▶ HTTP + WS 同端口 :9527       │   │
+│  │    │   ├── HTTP 路径: 31 个 REST 端点 + 静态 SPA                     │   │
+│  │    │   └── WS 路径: MSG_PEEK 检测 Upgrade → WebSocketManager        │   │
 │  │    ├── WebSocketManager (自定义 RFC6455 实现, 非 httplib WS)          │   │
 │  │    │                                                                 │   │
 │  │    └── FeatureManager + PipelineController (核心引擎)                 │   │
@@ -95,12 +97,12 @@
 
 | 维度 | 评分 | 说明 |
 |------|------|------|
-| 后端架构设计 | ⭐⭐⭐⭐⭐ | Pipeline v3 事件驱动引擎设计精良，对标 Vector/OTel Collector |
-| 后端代码质量 | ⭐⭐⭐⭐ | C++20 现代规范，Status/StatusOr 错误处理统一 |
-| **前端架构一致性** | ⭐⭐⭐⭐ | 死代码已清理，火焰图统一，WS+HTTP 降级已集成 |
-| 前后端通信 | ⭐⭐⭐⭐ | WS 实时推送为主，HTTP 降级为辅，认证统一 |
-| 测试覆盖 | ⭐⭐⭐ | 后端核心测试有，前端测试覆盖 hooks/services 但缺组件测试 |
-| **综合** | **⭐⭐⭐⭐ (4.2/5)** | 后端优秀，前端架构一致性经全面清理后显著提升 |
+| 后端架构设计 | ⭐⭐⭐⭐½ | Pipeline v3 + FeatureManager 设计精良；但存在双管道所有权过渡期混淆 |
+| 后端代码质量 | ⭐⭐⭐⭐ | C++20 现代规范，Status/StatusOr 统一；少量遗留未清理 |
+| **前端架构一致性** | ⭐⭐⭐⭐ | WS+HTTP 降级已集成；但存在 3 条独立数据路径 + 第三批死代码 |
+| 前后端通信 | ⭐⭐⭐⭐ | 同端口方案优雅，WS/HTTP 分层合理；useProcessDetail 旁路产生重复流量 |
+| 测试覆盖 | ⭐⭐⭐½ | 后端核心测试完善；前端 74 项测试 + E2E 配置；Replay 流式 16 项测试 |
+| **综合** | **⭐⭐⭐⭐ (4.2/5 → 8.4/10)** | 后端优秀，前端经全面清理后显著提升；中优先级问题可逐步解决 |
 
 ---
 
@@ -133,31 +135,38 @@ TimerWheel(1线程, timerfd+epoll)     CollectPool(M线程)      ProcessThread(�
 | Arena | `core/memory/arena.h` | 用于 DataBatch 的 string interning，零拷贝 |
 | SinkPool | `core/threading/thread_pool.h` | 固定线程池并行写入 |
 
-**FeatureManager 与 PipelineController 的关系（实测澄清）：**
+**FeatureManager 与 PipelineController 的关系（代码审计修正）：**
 
 ```
-PipelineController (共享基础设施所有者)
-├── TimerWheel (全局唯一)
-├── CollectPool (全局共享)
-├── SinkPool (全局共享)
-└── 管道模板 (从 YAML 配置构建)
+PipelineController (共享基础设施 + 管道模板)
+├── 拥有: TimerWheel (全局唯一)
+├── 拥有: CollectPool (全局共享)
+├── 拥有: SinkPool (全局共享)
+├── 拥有: 管道模板 (从 YAML 构建，auto_start: false 时始终空闲)
+├── 暴露: GET /api/v1/pipelines (⚠ 仅报告空闲模板，非活跃管道)
+└── 暴露: GET /api/v1/pipelines/:name/collect (⚠ 同步一次性采集，Deprecated)
 
-FeatureManager (Feature 生命周期管理)
+FeatureManager (Feature 生命周期，**真正运行管道的地方**)
 ├── 接收 HTTP API 请求 (start/stop/pause/resume/reconfigure)
-├── 按需创建独立 Pipeline 实例
-├── 自动注入 3 种运行时 Sink:
+├── 按需创建**独立** Pipeline 实例 (非 Controller 的模板管道)
+├── 自动注入 3 种运行时 Sink (不在 YAML 配置中):
 │   ├── StreamSink → StreamSinkStore (供 /collect 和 /stream API)
 │   ├── WebSocketSink → WebSocketSinkStore (供 WS 广播)
-│   └── RecordingSink (按需)
-└── 注册定时器到共享 TimerWheel
+│   └── RecordingSink (按需，可通过 record API 启停)
+├── 注册定时器到共享 TimerWheel
+└── ⚠ 创建 processor/sink 失败时静默跳过 (vs Controller 报错)
 ```
+
+**⚠ 架构过渡期混淆：** 在默认 `auto_start: false` 模式下，Controller 的管道始终空闲。
+前端和用户实际交互的是 FeatureManager 创建的管道。`/api/v1/pipelines` 端点返回的
+空闲管道可能让用户误以为系统无活跃管道。详见 [5.11 双管道所有权问题](#511-🟡-中后端双管道所有权问题pipelinecontroller-vs-featuremanager)。
 
 **默认运行模式：on-demand（按需启动）**
 - daemon 启动后管道已构建但不自动运行
 - 前端通过 `POST /api/v1/features/:name/start` 触发启动
 - 支持运行时 `reconfigure` 更新过滤器（PID/comm），自动清空旧数据
 
-### 2.2 HTTP API 完整清单（39 个端点，实测确认）
+### 2.2 HTTP API 完整清单（31 个端点，代码审计确认）
 
 **Feature 管理（核心交互路径）：**
 
@@ -208,20 +217,24 @@ FeatureManager (Feature 生命周期管理)
 | `/api/v1/cpu/sched/summary` | `sched_analysis` |
 | + 4 个 QueryExtra 端点 | snapshot/history/events/wakeups |
 
-### 2.3 WebSocket 实现（自定义 RFC6455）
+### 2.3 WebSocket 实现（自定义 RFC6455，同端口集成）
 
 | 方面 | 实现细节 |
 |------|----------|
-| 端口 | HTTP port + 1 (默认 9528) |
+| 端口 | **与 HTTP 共享 :9527**（通过 `WsAwareServer` 子类的 `MSG_PEEK` 检测 Upgrade 请求） |
 | 实现 | **非 httplib WS**，原始 BSD socket + 自行实现 RFC6455 握手 + 帧编解码 |
-| 线程 | `ws-accept` (连接接受) + `ws-broadcast` (数据推送 + 入站消息处理) |
+| 集成方式 | `WsAwareServer::process_and_close_socket()` 覆盖 → 检测 Upgrade 头 → 调用 `WebSocketManager::HandleUpgrade()` |
+| 线程 | `ws-broadcast` (数据推送 + 入站消息处理)；**不再有独立 accept 线程** |
 | 订阅模型 | URL 路径 = pipeline key: `/ws/{name}`；连接后发送 `subscribe:{key}` 切换 |
 | 客户端订阅 | 文本帧 `subscribe:{key}` |
 | 推送频率 | `broadcast_interval_ms` (默认 1000ms) |
-| 推送模式 | **Snapshot（最新快照）** — 仅推送 `Latest(key)` 而非增量历史 |
-| 数据来源 | `WebSocketSinkStore::Latest(key)` → `serializer_(key, batch)` → `BatchToJson` |
+| 推送模式 | **区分特性类型（已改进）：** |
+| | - 监控类 (cpu_utilization 等): **全量 BatchToJson** 快照推送 |
+| | - Profiling 类 (cpu_profile 等): **轻量 notify** `{"type":"notify","feature":...,"records":N,"ts":...}` |
+| 数据来源 | `WebSocketSinkStore::Latest(key)` → `serializer_(key, batch)` |
 | 认证 | ✅ Bearer Token (HTTP Upgrade 阶段验证 `Authorization` 头或 `?token=` 参数) |
 | 无 token 时 | 跳过验证（开发模式不强制认证） |
+| 遗留代码 | `Listen()` / `AcceptLoop()` 方法仍存在但**不再被 daemon 使用**，`--ws-port` 命令行参数已忽略 |
 
 **WS vs HTTP stream 的设计分工：**
 | 场景 | 通道 | 模式 | 适用场景 |
@@ -288,12 +301,11 @@ web/src/
 │   ├── QueryConsole.tsx, PluginManagerPage.tsx, ReplayPage.tsx
 │   └── replay/                    ReplayCpuView.tsx, ReplayMemoryView.tsx
 ├── services/
-│   ├── apiClient.ts               HTTP 客户端 (含 featureStream 支持)
-│   ├── liveDataSource.ts          WS 连接 (供 ConnectionIndicator 状态显示)
-│   ├── replayEngine.ts            离线回放引擎
+│   ├── apiClient.ts               HTTP 客户端 (21 个方法，含 featureStream 支持)
+│   ├── liveDataSource.ts          WS + HTTP 双通道数据源 (全局单例)
+│   ├── replayEngine.ts            离线回放引擎 (流式解析 + bulk fallback)
 │   ├── dataSource.ts              DataSource 接口定义
-│   ├── timeSeriesStore.ts         时序数据环形缓冲
-│   └── exportService.ts           导出功能
+│   └── timeSeriesStore.ts         时序数据环形缓冲 (SystemPage channel stats)
 ├── stores/
 │   ├── useTimeStore.ts            Zustand: live/paused 模式
 │   ├── usePipelineStore.ts        Zustand: pipeline 状态
@@ -321,35 +333,50 @@ ProfileSnapshot.tsx:
   过滤:     cleanFrameName() 清理地址/函数名
 ```
 
-### 3.3 DataSource 抽象（已集成）
+### 3.3 DataSource 抽象（已集成，但存在旁路）
 
 ```
-当前架构（已实现的双通道模式）:
-┌──────────────────────────────────────────────────────┐
-│  getDataSource() → 全局 LiveDataSource 单例            │
-│    ├── 主通道: WebSocket ws://host/ws/features         │
-│    │   连接成功 → 发送 subscribe:{feature} → 实时推送   │
-│    │   断开 → 自动降级到 HTTP 轮询                      │
-│    └── 降级通道: api.featureCollect(feature) 1s 轮询    │
-│                                                       │
-│  数据 Hooks 集成方式:                                   │
-│  useCpuData → getDataSource().subscribe('cpu_*')       │
-│  useMemoryData → getDataSource().subscribe('memory_*') │
-│  useIoData → getDataSource().subscribe('io_monitor')   │
-│  useNetworkData → getDataSource().subscribe('net_*')   │
-│  useGpuData → getDataSource().subscribe('gpu_monitor') │
-│                                                       │
-│  火焰图（独立路径，cursor-based 增量拉取）:              │
-│  ProfileSnapshot → api.featureStream(name, cursor)     │
-│    → 1.5s HTTP 轮询 + AbortController                  │
-│                                                       │
-│  Replay 模式:                                          │
-│  ReplayPage → ReplayEngine → 传入 replaySource 覆盖   │
-│  各 Hook 通过 replaySource?: DataSource 参数支持回放    │
-└──────────────────────────────────────────────────────┘
+当前架构（双通道模式 + 3 条独立数据路径）:
+┌──────────────────────────────────────────────────────────────────┐
+│  路径 1: LiveDataSource (全局单例，覆盖 5 个监控 hooks)             │
+│  getDataSource() → LiveDataSource                                 │
+│    ├── 主通道: WebSocket ws://host:9527/ws/features               │
+│    │   连接成功 → 发送 subscribe:{feature} → 实时推送 (1s 间隔)    │
+│    │   断开 → 自动降级到 HTTP 轮询                                 │
+│    └── 降级通道: api.featureCollect(feature) 1s 轮询               │
+│                                                                   │
+│  集成 Hooks:                                                       │
+│  useCpuUtilization   → subscribe('cpu_utilization')               │
+│  useCpuProcesses     → subscribe('cpu_processes')                 │
+│  useMemoryUtilization → subscribe('memory_utilization')           │
+│  useMemoryProcesses  → subscribe('memory_processes')              │
+│  useIoMonitor        → subscribe('io_monitor')                    │
+│  useNetworkMonitor   → subscribe('net_tracer')                    │
+│  useGpuMonitor       → subscribe('gpu_monitor')                   │
+├───────────────────────────────────────────────────────────────────┤
+│  路径 2: ProfileSnapshot (混合模式，WS notify + HTTP cursor)       │
+│  subscribe(feature) 收到 notify → 立即 featureStream(cursor) 拉取  │
+│  WS 断开时 → 退化为 1.5s HTTP 轮询 (5s 若 WS 活跃)               │
+│  + fetchInFlight 防并发 + AbortController                          │
+├───────────────────────────────────────────────────────────────────┤
+│  路径 3: useProcessDetail (⚠ 绕过 LiveDataSource)                  │
+│  直接调用 api.featureCollect('cpu_processes') 独立 1s 轮询         │
+│  → 与 useCpuProcesses 产生重复流量 (同一 feature，不同数据路径)    │
+├───────────────────────────────────────────────────────────────────┤
+│  Replay 模式:                                                      │
+│  ReplayPage → ReplayEngine (implements DataSource) → 传入覆盖      │
+│  ⚠ 仅 CPU hooks 支持 replaySource 参数                             │
+│  ⚠ Memory 有专用 ReplayMemoryView (直接 subscribe engine)          │
+│  ⚠ IO/Network/GPU replay 为 "coming soon" 占位符                   │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-**评价：** `LiveDataSource` 已完全集成到所有数据 hooks 中。通过全局单例模式（非 Context Provider）实现，设计简洁。各 hook 通过可选的 `replaySource` 参数支持 Replay 模式，做到了 Live/Replay 统一消费。`DataSourceContext.tsx` 已删除（不再需要 Provider 包装）。
+**评价：** `LiveDataSource` 已集成到主要监控 hooks 中，设计简洁。但存在 3 个架构旁路：
+1. `useProcessDetail` 直接 HTTP 轮询，绕过 WS 通道（重复流量）
+2. `ProfileSnapshot` 使用独立混合模式（合理——需要 cursor 增量累积）
+3. Replay 支持不完整——仅 CPU 页面通过 `replaySource` 参数实现了 Live/Replay 统一
+
+`DataSourceContext.tsx` 已删除（不再需要 Provider 包装）。
 
 ### 3.4 状态管理 (Zustand) — 实际使用
 
@@ -374,52 +401,62 @@ ProfileSnapshot.tsx:
 
 ## 四、前后端通信分析
 
-### 4.1 通信架构（已统一的双通道模式）
+### 4.1 通信架构（统一端口 :9527 双协议模式）
 
 ```
-┌──────── Frontend (活跃路径) ────────────┐     ┌─────── Backend ───────┐
-│                                          │     │                       │
-│  ┌─ LiveDataSource (全局单例) ────────┐ │ WS  │  ┌─ WS Manager ─────┐ │
-│  │ ws://host/ws/features               │─┼─────┼→│ 端口 9528          │ │
-│  │ → subscribe:{feature} 订阅          │ │     │  │ Bearer Auth 验证   │ │
-│  │ ← JSON 实时推送 (1s 间隔)           │ │     │  │ BatchToJson 广播   │ │
-│  │                                     │ │     │  └─────────────────┘ │
-│  │ [降级] WS 断开时:                    │ │HTTP │                       │
-│  │ → api.featureCollect(name) 轮询     │─┼─────┼→│                     │ │
-│  └────────────────────────────────────┘ │     │  │                     │ │
-│                                          │     │  ┌─ HttpServer ─────┐ │
-│  ┌─ apiClient.ts ─────────────────────┐ │HTTP │  │ 39 个 REST 端点   │ │
-│  │ featureStart/Stop/Reconfigure      │─┼─────┼→│ Bearer Auth 保护  │ │
-│  │ pipeline / healthz / budget        │ │     │  └─────────────────┘ │
-│  └────────────────────────────────────┘ │     │                       │
-│                                          │     │                       │
-│  ┌─ ProfileSnapshot ─────────────────┐ │HTTP │                       │
-│  │ api.featureStream(name, cursor)    │─┼─────┼→ /features/{name}/stream│
-│  │ 回退: api.featureCollect(name)     │ │     │  (cursor-based 增量)   │
-│  │ + AbortController 取消管理         │ │     │                       │
-│  └────────────────────────────────────┘ │     │                       │
-└──────────────────────────────────────────┘     └───────────────────────┘
+┌──────── Frontend (活跃路径) ────────────────┐     ┌────── Backend :9527 ──────┐
+│                                              │     │                            │
+│  ┌─ LiveDataSource (全局单例) ────────────┐ │     │  ┌─ WsAwareServer ───────┐ │
+│  │ ws://host:9527/ws/features             │─┼─WS──┼→│ MSG_PEEK 检测 Upgrade  │ │
+│  │ → subscribe:{feature} 订阅             │ │     │  │  ├─ WS → HandleUpgrade │ │
+│  │ ← 监控: 全量 JSON (1s 间隔)            │ │     │  │  └─ HTTP → httplib 处理│ │
+│  │ ← Profiling: notify 通知 → 触发 HTTP 拉│ │     │  └────────────────────────┘ │
+│  │                                        │ │     │                            │
+│  │ [降级] WS 断开时:                       │ │     │  ┌─ WebSocketManager ────┐ │
+│  │ → api.featureCollect(name) 1s 轮询     │ │     │  │ Bearer Auth 验证       │ │
+│  └────────────────────────────────────────┘ │     │  │ 广播线程 1s 间隔       │ │
+│                                              │     │  │ 监控→全量 / Profile→notify│
+│  ┌─ apiClient.ts ─────────────────────────┐ │     │  └────────────────────────┘ │
+│  │ featureStart/Stop/Reconfigure          │─┼─HTTP┼→ 31 个 REST 端点            │
+│  │ pipeline / healthz / budget            │ │     │  (Bearer Auth /api/* 路径)   │
+│  └────────────────────────────────────────┘ │     │                            │
+│                                              │     │                            │
+│  ┌─ ProfileSnapshot (混合模式) ───────────┐ │     │                            │
+│  │ WS notify 触发 → featureStream(cursor) │─┼─HTTP┼→ /features/{name}/stream   │
+│  │ WS 断开时 → 1.5s HTTP 轮询降级         │ │     │  (cursor-based 增量拉取)    │
+│  │ + AbortController + fetchInFlight 防重入│ │     │                            │
+│  └────────────────────────────────────────┘ │     │                            │
+│                                              │     │                            │
+│  ┌─ useProcessDetail (⚠ 直接轮询) ───────┐ │     │                            │
+│  │ api.featureCollect('cpu_processes')    │─┼─HTTP┼→ 绕过 LiveDataSource        │
+│  │ 独立 1s 轮询                            │ │     │  (详见 问题 5.11)           │
+│  └────────────────────────────────────────┘ │     │                            │
+└──────────────────────────────────────────────┘     └────────────────────────────┘
 ```
 
 ### 4.2 各数据 Hook 的通信方式
 
-| Hook | Feature 订阅 | 通道 | 降级方式 |
-|------|------|------|------|
-| `useCpuData` (utilization) | `cpu_utilization` | **WS**/HTTP | LiveDataSource 自动切换 |
-| `useCpuData` (processes) | `cpu_processes` | **WS**/HTTP | LiveDataSource 自动切换 |
-| `useMemoryData` | `memory_utilization` / `memory_processes` | **WS**/HTTP | LiveDataSource 自动切换 |
-| `useIoData` | `io_monitor` | **WS**/HTTP | LiveDataSource 自动切换 |
-| `useNetworkData` | `net_tracer` | **WS**/HTTP | LiveDataSource 自动切换 |
-| `useGpuData` | `gpu_monitor` | **WS**/HTTP | LiveDataSource 自动切换 |
-| `ProfileSnapshot` (on-CPU) | `cpu_profile` (stream API) | HTTP | cursor-based 增量 1.5s |
-| `ProfileSnapshot` (off-CPU) | `offcpu_profile` (stream API) | HTTP | cursor-based 增量 1.5s |
-| `usePipelinePolling` | — | HTTP | 独立 3s 轮询 |
-| `SystemPage` | — | HTTP | 独立 3s 轮询 |
+| Hook | Feature 订阅 | 通道 | 降级方式 | 备注 |
+|------|------|------|------|------|
+| `useCpuUtilization` | `cpu_utilization` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `useCpuProcesses` | `cpu_processes` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `useMemoryUtilization` | `memory_utilization` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `useMemoryProcesses` | `memory_processes` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `useIoMonitor` | `io_monitor` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `useNetworkMonitor` | `net_tracer` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `useGpuMonitor` | `gpu_monitor` | **WS**/HTTP | LiveDataSource 自动切换 | |
+| `ProfileSnapshot` (on-CPU) | `cpu_profile` | **WS notify + HTTP** | WS notify→featureStream；断开→1.5s 轮询 | 混合模式 |
+| `ProfileSnapshot` (off-CPU) | `offcpu_profile` | **WS notify + HTTP** | 同上 | 混合模式 |
+| `useProcessDetail` | `cpu_processes` | **纯 HTTP** | 独立 1s 轮询 | ⚠ 绕过 LiveDataSource |
+| `usePipelinePolling` | — | **纯 HTTP** | 独立 3s 轮询 | App 级别 |
+| `SystemPage` | — | **纯 HTTP** | 独立 3s 轮询 | 低频管理 |
+| `useResourceBudget` | — | **纯 HTTP** | 独立 5s 轮询 | 侧边栏 |
 
-**通信模型总结：**
-- **6 个监控 hooks** 通过 `LiveDataSource` 统一管理，WS 可用时实时推送（~1s），断开时自动降级为 HTTP 轮询
-- **火焰图** 使用独立的 cursor-based stream API（需要增量累积历史样本，不适合 latest-only 的 WS 推送）
-- **管理/系统类** 使用独立 HTTP 轮询（低频、非数据流场景）
+**通信模型总结（4 种模式）：**
+1. **WS 实时推送** — 7 个监控 hooks 通过 `LiveDataSource.subscribe()`，WS 可用时 ~1s 推送，断开时自动 HTTP 降级
+2. **WS notify + HTTP 拉取** — 火焰图 `ProfileSnapshot`，WS 仅通知有新数据，实际拉取走 cursor-based `featureStream` API
+3. **纯 HTTP 轮询** — `useProcessDetail` (⚠ 与 useCpuProcesses 重复)、管道/系统/预算等管理类
+4. **本地文件** — `ReplayEngine` 读取 `.ilr` 文件，不涉及网络
 
 ### 4.3 Stream API cursor 协议（实测修正）
 
@@ -556,6 +593,74 @@ Link: </api/v1/features/cpu_utilization/collect>; rel="successor-version"
 详见 [6.1 Bug #6](#61-本轮修复)。
 
 这是本轮发现的**最严重架构缺陷**。虽然 WS 握手/认证/编解码全部正确实现，但一个互斥锁使用错误导致整个实时推送功能静默失败。此类 bug 在测试中难以发现（只要不发 subscribe 消息就不会触发），但在生产环境中会被前端的 re-subscribe 逻辑必然触发。
+
+### 5.11 ✅ 已修复：后端双管道所有权问题（/pipelines API 信息不完整）
+
+**原问题：** `GET /api/v1/pipelines` 仅返回 `PipelineController` 的空闲管道模板，不包含 `FeatureManager` 管理的实际运行管道，导致用户误认为系统无活跃管道。
+
+**修复措施：**
+- `RegisterApiRoutes` 新增可选 `FeatureManager*` 参数
+- `/api/v1/pipelines` 响应中新增 `active_features` 数组字段，包含所有活跃/暂停状态的 Feature 管道信息
+- 每个管道条目新增 `"origin"` 字段（`"controller"` 或 `"feature_manager"`）区分来源
+- Controller 管道保留所有原有字段；Feature 管道显示 name、display_name、category、state、batches、records、errors、uptime_ms
+
+**响应格式：**
+```json
+{
+  "pipelines": [...],           // Controller 管道模板 (可能空闲)
+  "active_features": [...]      // FeatureManager 活跃管道 (真正在运行的)
+}
+```
+
+### 5.12 🟡 中：后端两份并行内存存储（StreamSinkStore vs WebSocketSinkStore）
+
+**问题：** 每个 Feature 的数据同时写入两份独立存储：
+- `StreamSinkStore`：供 HTTP `/collect` 和 `/stream` API（cursor-based，保留历史）
+- `WebSocketSinkStore`：供 WS 广播（latest-only，覆盖旧数据）
+
+**影响：** 内存开销翻倍（虽然 WS 存储只保留最新一批，开销有限），设计冗余。
+
+**建议：** 考虑让 WS 广播线程直接从 `StreamSinkStore` 读取最新批次，消除 `WebSocketSinkStore`。
+
+### 5.13 ✅ 已修复：useProcessDetail 绕过 LiveDataSource
+
+**原问题：** `useProcessDetail` 直接调用 `api.featureCollect('cpu_processes')` 进行独立 HTTP 轮询，与 `useCpuProcesses` 产生重复流量。
+
+**修复措施：** 重写 `useProcessDetail` 为通过 `getDataSource().subscribe('cpu_processes')` 订阅数据。现在与 `useCpuProcesses` 共享同一个 LiveDataSource 数据通道（WS 或 HTTP 降级），消除了重复网络请求。
+
+### 5.14 ✅ 已修复：WS 广播无去重
+
+**原问题：** WebSocket 广播线程每 1s 从 `WebSocketSinkStore` 读取并推送，即使数据未更新客户端也会收到重复 payload。
+
+**修复措施：** 在 `WebSocketManager` 中添加 `last_broadcast_` map，通过 `DataBatchPtr` 指针比较检测数据是否更新。如果 `Latest(key)` 返回的指针与上次广播相同（即无新 batch 被 push），跳过序列化和发送。这是 O(1) 的检测且完全准确（每次 `WebSocketSink::Write()` 都推入新的 shared_ptr）。
+
+### 5.15 ✅ 部分修复：前端第三批死代码清理
+
+**已清理（4 个符号）：**
+
+| 文件/符号 | 操作 |
+|-----------|------|
+| `useFeatureStream()` hook 函数体 (~130 行) | ✅ **已删除**（保留 `TimeSeriesBuffer` 和 `useFeatureList`）|
+| `api.pluginsList()` | ✅ **已删除** |
+| `api.featureRecordStatus()` | ✅ **已删除** |
+| `timeSeriesStore.gc()` | ✅ **已删除**（含无用的 `MAX_AGE_MS` 常量）|
+
+**保留未清理（影响小或有未来用途）：**
+
+| 文件/符号 | 理由 |
+|-----------|------|
+| `AnnotationOverlay` 组件 | 与 `AddAnnotationButton` 同文件，逻辑完整；未来可挂载到图表上 |
+| Worker `diff` / `search` | 预留能力，开销为 0（不会被打包除非显式 import）|
+| `usePageActivation().manualStart/Stop` | 接口一致性；未来 UI 可能消费 |
+| `useFeaturesByCategory()` 返回值浪费 | 调用本身触发 feature 启动逻辑，返回值浪费不影响正确性 |
+
+### 5.16 🟡 低：配置标志解析但未生效
+
+**问题：** YAML 配置中 `server.http_enabled` 和 `server.ws_enabled` 字段被解析和存储，但 `main.cc` 中 HTTP/WS 始终启动，这些标志不影响任何行为。
+
+### 5.17 🟡 低：`/stream` API 无活跃状态检查
+
+**问题：** `GET /features/:name/collect` 在 feature 非活跃时拒绝请求，但 `/features/:name/stream` 无条件读取 `StreamSinkStore`——feature stop 后仍可能返回旧数据（直到 buffer 被清理）。
 
 ---
 
@@ -712,28 +817,36 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 #### ★★☆ P2-1（中）：Replay 大文件流式解析
 
+**✅ 已实现（2026-06-16）**
+
 **问题：** `ReplayEngine.loadFile()` 使用 `file.text()` 一次性读全文件。>100MB `.ilr` 文件会阻塞 UI 数秒 + 占用大量内存。
 
-**方案：**
-```typescript
-const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader()
-let buffer = ''
-while (true) {
-  const { done, value } = await reader.read()
-  if (done) break
-  buffer += value
-  // 按 '\n' 分割处理每行 NDJSON
-}
-```
+**实现方案：**
+- `loadFile()` 检测 `file.stream()` 可用性：现代浏览器用流式，JSDOM 测试环境用 bulk fallback
+- `loadStreaming()`：`file.stream().getReader()` + `TextDecoder({ stream: true })` + 行缓冲
+- `loadBulk()`：保留原有 `file.text()` + `split('\n')` 逻辑作为兼容后备
+- `indexLine()` 提取为公共方法，两种加载方式共享
+- `onProgress` 回调提供 0~1 进度（基于 `bytesRead / file.size`）
+- 修复了 `!obj.ts` falsy 检查的 bug（`ts: 0` 时被错误跳过），改为 `obj.ts == null`
 
-**预估工作量：** 小（0.5 天）
+**测试覆盖（16 项全部通过）：**
+- 流式加载正确解析帧
+- 进度回调正确报告
+- 分块流正确处理边界
+- 单行文件兼容
+- 1000 帧大文件性能测试 (<500ms)
+- 原有 bulk 加载路径回归测试
 
 ---
 
-#### 其他待做项（低优先级）
+#### 其他待做项
 
 | 项 | 建议 | 优先级 | 状态 |
 |-----|------|--------|------|
+| **P2-C** | **`useProcessDetail` 改走 LiveDataSource**（消除与 `useCpuProcesses` 的重复流量） | **中** | ✅ 已完成 |
+| **P2-D** | **WS 广播去重**（DataBatchPtr 指针比较，未变化时跳过序列化和发送） | **中** | ✅ 已完成 |
+| **P2-E** | **统一 `/api/v1/pipelines` 报告**（新增 `active_features` 字段含 FeatureManager 管道） | **中** | ✅ 已完成 |
+| **P2-F** | **清理第三批前端死代码**（useFeatureStream hook、pluginsList、featureRecordStatus、gc） | **中** | ✅ 已完成 |
 | P2-2 | 多页面重复组件抽取 (SummaryCard, Sparkline, EmptyChart) | 低 | 待做 |
 | P2-4 | `mem_tracer.bpf.c` 集成为 `heap_profiler` Source 或移除 | 低 | 待做 |
 | ~~P2-5~~ | ~~`useCpuData` 等 hook 签名中 `intervalMs` 参数清理~~ | ~~低~~ | ✅ 已完成 |
@@ -744,6 +857,10 @@ while (true) {
 | P2-11 | Replay 补全 IO/Network/GPU 视图（当前为占位符 "coming soon"） | 低 | 待做 |
 | P2-12 | WASM 插件运行时：决定实现或移除 stub (`wasm_runtime.h`) | 低 | 待做 |
 | P2-13 | 2026-09-01 后移除遗留 Deprecated API 路由 | 低 | 定时 |
+| P2-14 | 修复 `server.http_enabled` / `server.ws_enabled` 配置标志不生效 | 低 | 待做 |
+| P2-15 | `/stream` API 添加 feature 活跃状态检查 | 低 | 待做 |
+| P2-16 | Replay 全面支持：IO/Network/GPU hooks 添加 `replaySource` 参数 | 低 | 待做 |
+| P2-17 | CPU 页面增加"停止 Profiling"按钮（当前只有启动，无对称停止 UX） | 低 | 待做 |
 
 ---
 
@@ -753,103 +870,122 @@ while (true) {
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 架构设计 | 9.5/10 | Pipeline v3 + FeatureManager 设计精良，对标 Vector/OTel Collector |
+| 架构设计 | 9/10 | Pipeline v3 + FeatureManager 设计精良；但存在双管道所有权过渡期混淆 |
 | 代码规范 | 8/10 | 现代 C++20，Status/StatusOr 统一，少量 header-only 巨文件 |
-| 错误处理 | 8/10 | StatusOr 模式一致，BPF 加载路径防御性编程好 |
-| 并发安全 | 8/10 | 原子操作 + LockFreeQueue + 独占线程设计，但 WS 曾存在死锁 (已修复) |
-| 内存管理 | 9/10 | Arena + InternString + SharedPtr，Prune 控制增长 |
+| 错误处理 | 7.5/10 | StatusOr 模式一致；但 FeatureManager 创建失败静默跳过 vs Controller 报错（不一致）|
+| 并发安全 | 8/10 | 原子操作 + LockFreeQueue + 独占线程设计；WS 死锁已修复 |
+| 内存管理 | 8.5/10 | Arena + InternString + SharedPtr + Prune；双存储 (Stream+WS) 轻微冗余 |
 | 安全性 | 8.5/10 | HTTP + WS 统一 Bearer Auth，SQL 注入防护，默认 127.0.0.1 |
-| API 设计 | 8.5/10 | Feature API 设计优秀，遗留路由已标注 Deprecation + Sunset |
-| **小计** | **8.6/10** | |
+| API 设计 | 8.5/10 | Feature API 设计优秀，遗留路由已标注 Deprecation；`/pipelines` 信息不完整 |
+| **小计** | **8.4/10** | |
 
 ### 8.2 前端 (React/TypeScript)
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 架构设计 | 9/10 | DataSource 单例 + Tier 分层 + WS/HTTP 降级 + Replay 统一 |
-| **架构实现** | **8.5/10** | 两批死代码均已清理（共 12 个文件/符号），火焰图 Worker 化，WS 双通道已集成 |
-| 代码规范 | 8.5/10 | TypeScript strict，无已知死代码 |
-| 状态管理 | 8/10 | Zustand 简洁，Store 粒度合理 |
-| 性能优化 | 8.5/10 | ECharts 懒加载 + 火焰图 Worker + WS 减少 HTTP 开销 + 页面可见性感知 |
-| **小计** | **8.5/10** | |
+| 架构设计 | 8.5/10 | DataSource 单例 + WS/HTTP 降级好；但 useProcessDetail 旁路 + Replay 支持不完整 |
+| **架构实现** | **8/10** | 两批已清理；仍存在第三批死代码 (5.15)；3 条独立数据路径略混乱 |
+| 代码规范 | 8/10 | TypeScript strict；部分死代码残留 + `useFeaturesByCategory` 调用浪费 |
+| 状态管理 | 8/10 | Zustand 简洁，Store 粒度合理；URL state 同步不完整 |
+| 性能优化 | 8.5/10 | ECharts 懒加载 + 火焰图 Worker + WS 减少 HTTP 开销 + 页面可见性感知 + Replay 流式 |
+| **小计** | **8.2/10** | |
 
 ### 8.3 前后端通信
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 协议设计 | 9/10 | WS snapshot 推送 + HTTP cursor 增量 + 自动降级，场景分工合理 |
-| **协议实现** | **9/10** | WS 死锁修复后验证 7 帧/6s 数据正常推送 + HTTP 透明降级 + 认证统一 |
-| API 设计 | 9/10 | Feature API 设计一流，遗留路由有 Deprecation 头引导迁移 |
-| **小计** | **9.0/10** | |
+| 协议设计 | 9/10 | WS 推送 + HTTP cursor 增量 + 自动降级 + notify 优化，场景分工合理 |
+| **协议实现** | **8.5/10** | 同端口方案优雅；WS 广播无去重；`useProcessDetail` 绕过 WS 产生重复流量 |
+| API 设计 | 8.5/10 | Feature API 设计一流；`/pipelines` 不包含活跃管道信息（混淆）|
+| **小计** | **8.7/10** | |
 
 ### 8.4 综合评分
 
 ```
-┌─────────────────────────────────────────────────┐
-│                                                 │
-│   后端   █████████████████░░░  8.6/10           │
-│   前端   █████████████████░░░  8.5/10           │
-│   通信   ██████████████████░░  8.9/10           │
-│                                                 │
-│   综合   █████████████████░░░  8.7/10           │
-│                                                 │
-│   ✅ 本轮修复:                                    │
-│   - WebSocket 死锁 (mu_ 重复加锁，Bug #6)       │
-│   - Hook 签名清理 (移除无用 intervalMs)           │
-│   - 第二批前端死代码清理 (5 个文件/符号)          │
-│   - 遗留 API 路由标注 Deprecation + Sunset       │
-│                                                 │
-│   ✅ 前序已完成的全部架构改进:                      │
-│   - 火焰图统一为 Worker + div (删除 2 个死实现)    │
-│   - ProfileSnapshot 改用 apiClient + AbortController │
-│   - 删除 7 个死代码文件 (~38KB)                   │
-│   - 移除 d3-flame-graph/d3-selection 依赖        │
-│   - WS 端口 Bearer Auth 认证 (与 HTTP 一致)      │
-│   - 5 个数据 hooks 集成 LiveDataSource (WS+降级)  │
-│   - 页面可见性感知 (隐藏时停止轮询/推送)           │
-│   - DataSource 单例替代 Provider (更轻量)         │
-│                                                 │
-│   ★★★ 高优先级 (已完成):                          │
-│   P2-A: ✅ WS 同端口方案 (消除双端口部署复杂性)   │
-│   P2-B: ✅ 前端组件测试 + E2E (Playwright)       │
-│                                                 │
-│   ★★☆ 中优先级:                                  │
-│   P2-6: ✅ 火焰图接入 LiveDataSource (已实现)     │
-│   P2-1: Replay 流式解析 (ReadableStream)         │
-│                                                 │
-│   ★☆☆ 低优先级:                                  │
-│   P2-4/9/10/11/12: 各类代码清理和功能补全        │
-│   P2-13: 2026-09-01 后移除 Deprecated 路由       │
-│                                                 │
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│   后端   ████████████████░░░░  8.4/10                    │
+│   前端   ████████████████░░░░  8.2/10                    │
+│   通信   █████████████████░░░  8.7/10                    │
+│                                                          │
+│   综合   ████████████████░░░░  8.4/10                    │
+│                                                          │
+│   ✅ 全部已完成的修复/改进:                                │
+│   - WebSocket 死锁 (mu_ 重复加锁，Bug #6)                │
+│   - Hook 签名清理 (移除无用 intervalMs)                    │
+│   - 两批前端死代码清理 (共 12 个文件/符号)                 │
+│   - 遗留 API 路由标注 Deprecation + Sunset                │
+│   - 火焰图统一为 Worker + div (删除 2 个死实现)            │
+│   - ProfileSnapshot 改用 apiClient + AbortController      │
+│   - 移除 d3-flame-graph/d3-selection 依赖                 │
+│   - WS + HTTP 合并到同端口 :9527 (WsAwareServer)          │
+│   - 7 个数据 hooks 集成 LiveDataSource (WS+降级)          │
+│   - 页面可见性感知 (隐藏时停止轮询/推送)                    │
+│   - DataSource 单例替代 Provider (更轻量)                  │
+│   - 火焰图 WS notify + HTTP 拉取混合模式                   │
+│   - Replay 流式解析 (ReadableStream + 进度回调)            │
+│   - 前端组件测试 + E2E (Playwright)                        │
+│                                                          │
+│   ★★★ 高优先级 (全部已完成):                               │
+│   P2-A: ✅ WS 同端口方案                                  │
+│   P2-B: ✅ 前端组件测试 + E2E                             │
+│                                                          │
+│   ★★☆ 中优先级 (全部已完成):                               │
+│   P2-1: ✅ Replay 流式解析                                │
+│   P2-6: ✅ 火焰图接入 LiveDataSource                      │
+│                                                          │
+│   ★★☆ 中优先级 (全部已完成):                               │
+│   P2-C: ✅ useProcessDetail 改走 LiveDataSource            │
+│   P2-D: ✅ WS 广播去重 (DataBatchPtr 指针比较)             │
+│   P2-E: ✅ /pipelines API 报告活跃管道                     │
+│   P2-F: ✅ 第三批前端死代码清理                            │
+│                                                          │
+│   ★☆☆ 低优先级 (待做):                                    │
+│   P2-2/4/9~17: 各类清理、功能补全、配置修复                │
+│                                                          │
+│   ⚠ 剩余架构问题 (低优先级):                               │
+│   - 双内存存储冗余 (StreamSinkStore + WebSocketSinkStore)  │
+│   - 配置标志 http/ws_enabled 不生效                        │
+│   - /stream API 无活跃状态检查                             │
+│                                                          │
+│   ✅ 本轮已修复的问题:                                      │
+│   - useProcessDetail 绕过 WS → 改走 LiveDataSource        │
+│   - /pipelines 不报告活跃管道 → 新增 active_features 字段  │
+│   - WS 重复推送相同数据 → DataBatchPtr 指针去重            │
+│   - 第三批死代码 (4 个符号) → 已清理                       │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 九、总结
 
-Illuminator 是一个**设计精良的全栈观测性平台**，经过多轮清理后架构健康度显著提升。
+Illuminator 是一个**设计精良的全栈观测性平台**，经过多轮清理后架构健康度显著提升，但仍存在一些结构性问题需要关注。
 
-**后端（8.6/10）：** Pipeline v3 事件驱动架构、FeatureManager 生命周期管理、7 个 eBPF 探针全部工作正常（on-CPU 100% 符号解析、off-CPU 正确追踪阻塞时长、PID 隔离完整）。安全性完善——HTTP 和 WS 端口统一 Bearer Auth 保护。遗留路由已添加标准 Deprecation 头引导迁移。
+**后端（8.4/10）：** Pipeline v3 事件驱动架构设计精良，对标 Vector/OTel Collector。FeatureManager 提供了优雅的 on-demand 生命周期管理。7 个 eBPF 探针全部正常工作。安全性完善——HTTP 和 WS 已统一到单端口 :9527 且 Bearer Auth 保护。
 
-扣分项：
-- WebSocket 实现曾存在致命死锁（`std::mutex` 非递归重入），虽已修复但暴露了并发代码审查流程薄弱
+主要问题：
+- **双管道所有权过渡期**：`PipelineController` 持有空闲管道模板，`FeatureManager` 创建活跃管道，`/pipelines` API 只报告前者（信息不完整）
+- **双内存存储冗余**：`StreamSinkStore` + `WebSocketSinkStore` 对同一数据维护两份副本
+- 遗留代码：`Listen()`/`AcceptLoop()` 不再使用但未删除；配置标志不生效；错误处理不一致
 
-**前端（8.5/10）：** 经过两轮全面架构清理后，已消除了"设计与实现脱节"问题：
-- `LiveDataSource` 全局单例已集成到所有监控 hooks，WS 实时推送为主通道
-- 火焰图统一为单一实现（Web Worker 异步计算 + div 渲染）
-- 两批死代码清理（共 12 个文件/符号），3 个无用 npm 依赖已移除
-- Replay 模式通过 hook 参数支持，无需 Provider 嵌套
+**前端（8.2/10）：** 经过两轮清理后核心架构明显改善。`LiveDataSource` 全局单例 + WS/HTTP 自动降级模式设计良好。火焰图已统一为 Worker 异步计算。Replay 引擎支持流式解析大文件。
 
-扣分项：
-- per-feature 录制后端已支持但前端 UI 缺失
-- Replay IO/Network/GPU 视图仍为占位符
+主要问题：
+- **3 条独立数据路径**：7 个监控 hooks 走 WS、火焰图走 notify+HTTP、`useProcessDetail` 走独立 HTTP 轮询（最后一条造成重复流量）
+- **Replay 支持不完整**：仅 CPU hooks 接受 `replaySource` 参数；IO/Network/GPU 为占位符
+- **第三批死代码**：8 个未使用的符号/方法待清理（`useFeatureStream` hook、`AnnotationOverlay` 等）
+- **无 profiling 停止 UX**：只有启动按钮，无对称的停止操作
 
-**前后端通信（8.9/10）：** 设计精良且**已通过运行时验证**：
-- WS snapshot 推送模式适用于实时监控（仅需最新值）
-- HTTP cursor-based stream 适用于火焰图（需累积历史样本）
-- WS 断开时自动透明降级为 HTTP 轮询，无数据丢失
-- 页面可见性感知、指数退避重连、feature 粒度订阅等细节到位
-- **实测验证：** WS 死锁修复后，Python 客户端成功在 6 秒内接收 7 帧完整 JSON 数据
+**前后端通信（8.7/10）：** 同端口方案 (WsAwareServer) 实现优雅。通信模式分层合理：
+- 监控类：WS 全量推送（~1s）+ HTTP 降级
+- Profiling：WS 轻量 notify + HTTP cursor-based 拉取（设计合理——累积历史需求）
+- 管理类：纯 HTTP 按需/低频轮询
 
-**当前架构健康度（综合 8.7/10）：** 核心设计意图与运行时行为完全对齐。遗留 API 路由已通过标准 HTTP Deprecation 机制引导迁移。剩余改进均为中低优先级优化项（Replay 补全、组件测试、per-feature 录制 UI）。
+**当前架构健康度（综合 8.4/10）：** 核心数据通路已验证正确。高优先级改进已全部完成（同端口 WS、组件测试、Replay 流式、火焰图 WS 通知）。**下一步重点**应放在：
+1. 消除 `useProcessDetail` 的重复流量（P2-C）
+2. 清理后端双管道所有权混淆（P2-E）
+3. 清理第三批前端死代码（P2-F）
+
+这些是目前影响架构可理解性和维护性的主要障碍。

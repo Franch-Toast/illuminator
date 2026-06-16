@@ -32,37 +32,26 @@ export class ReplayEngine implements DataSource {
   private latestByFeature = new Map<string, DataBatch>()
   private stateListeners = new Set<(s: PlaybackState) => void>()
 
-  async loadFile(file: File): Promise<ReplayMeta> {
+  async loadFile(file: File, onProgress?: (pct: number) => void): Promise<ReplayMeta> {
     this.state = 'loading'
     this.notifyState()
 
-    const text = await file.text()
-    this.lines = text.split('\n').filter(l => l.trim())
-
+    this.lines = []
     this.frames = []
     let startTs = Infinity, endTs = 0
     const features = new Set<string>()
 
-    for (let i = 0; i < this.lines.length; i++) {
-      try {
-        const obj = JSON.parse(this.lines[i])
-        if (obj.type === 'header') {
-          if (obj.features) obj.features.forEach((f: string) => features.add(f))
-          continue
-        }
-        if (!obj.ts || !obj.feature) continue
-
-        features.add(obj.feature)
-        if (obj.ts < startTs) startTs = obj.ts
-        if (obj.ts > endTs) endTs = obj.ts
-
-        this.frames.push({
-          timestamp: obj.ts,
-          feature: obj.feature,
-          offset: i,
-          length: 1,
-        })
-      } catch { continue }
+    // Use streaming when available (modern browsers), fallback for test env
+    if (typeof file.stream === 'function') {
+      await this.loadStreaming(file, features, onProgress,
+        (s, e) => { startTs = s; endTs = e },
+        () => [startTs, endTs])
+      ;[startTs, endTs] = [
+        this.frames.length > 0 ? Math.min(...this.frames.map(f => f.timestamp)) : 0,
+        this.frames.length > 0 ? Math.max(...this.frames.map(f => f.timestamp)) : 0,
+      ]
+    } else {
+      await this.loadBulk(file, features, (s, e) => { startTs = s; endTs = e })
     }
 
     this.frames.sort((a, b) => a.timestamp - b.timestamp)
@@ -70,7 +59,7 @@ export class ReplayEngine implements DataSource {
     this.meta = {
       version: 1,
       features: Array.from(features),
-      startTs,
+      startTs: startTs === Infinity ? 0 : startTs,
       endTs,
       frameCount: this.frames.length,
       fileSizeBytes: file.size,
@@ -78,10 +67,101 @@ export class ReplayEngine implements DataSource {
 
     this.state = 'ready'
     this.currentIndex = 0
-    this.currentSimTime = startTs
+    this.currentSimTime = this.meta.startTs
     this.notifyState()
+    onProgress?.(1)
 
     return this.meta
+  }
+
+  private async loadStreaming(
+    file: File,
+    features: Set<string>,
+    onProgress: ((pct: number) => void) | undefined,
+    updateRange: (s: number, e: number) => void,
+    _getRange: () => [number, number]
+  ) {
+    const totalBytes = file.size
+    let bytesRead = 0
+    let buffer = ''
+    let startTs = Infinity, endTs = 0
+
+    const reader = file.stream().getReader()
+    const decoder = new TextDecoder()
+
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      bytesRead += value.byteLength
+      buffer += decoder.decode(value, { stream: true })
+
+      let nlIdx: number
+      while ((nlIdx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nlIdx).trim()
+        buffer = buffer.slice(nlIdx + 1)
+        if (!line) continue
+        this.indexLine(line, features, startTs, endTs, (s, e) => { startTs = s; endTs = e })
+      }
+
+      if (totalBytes > 0) {
+        onProgress?.(Math.min(bytesRead / totalBytes, 0.99))
+      }
+    }
+
+    const remaining = (buffer + decoder.decode()).trim()
+    if (remaining) {
+      this.indexLine(remaining, features, startTs, endTs, (s, e) => { startTs = s; endTs = e })
+    }
+    updateRange(startTs, endTs)
+  }
+
+  private async loadBulk(
+    file: File,
+    features: Set<string>,
+    updateRange: (s: number, e: number) => void
+  ) {
+    const text = await file.text()
+    let startTs = Infinity, endTs = 0
+    const rawLines = text.split('\n')
+    for (const raw of rawLines) {
+      const line = raw.trim()
+      if (!line) continue
+      this.indexLine(line, features, startTs, endTs, (s, e) => { startTs = s; endTs = e })
+    }
+    updateRange(startTs, endTs)
+  }
+
+  private indexLine(
+    line: string,
+    features: Set<string>,
+    startTs: number,
+    endTs: number,
+    updateRange: (s: number, e: number) => void
+  ) {
+    const lineIdx = this.lines.length
+    this.lines.push(line)
+
+    try {
+      const obj = JSON.parse(line)
+      if (obj.type === 'header') {
+        if (obj.features) obj.features.forEach((f: string) => features.add(f))
+        return
+      }
+      if (obj.ts == null || !obj.feature) return
+
+      features.add(obj.feature)
+      if (obj.ts < startTs) startTs = obj.ts
+      if (obj.ts > endTs) endTs = obj.ts
+      updateRange(startTs, endTs)
+
+      this.frames.push({
+        timestamp: obj.ts,
+        feature: obj.feature,
+        offset: lineIdx,
+        length: 1,
+      })
+    } catch { /* skip malformed lines */ }
   }
 
   play() {

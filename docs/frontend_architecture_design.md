@@ -895,17 +895,19 @@ BridgeDescriptorToRegistry → 注册到 PluginRegistry
 
 ## 十六、DataSource 统一与 Replay 集成
 
-### 16.1 DataSource Context
+### 16.1 DataSource 全局单例（实际实现）
 
-`DataSourceContext` 提供当前活跃的数据源（Live 或 Replay），所有数据 hooks 可以通过可选参数接收 DataSource：
+> **注意**: 原设计中的 `DataSourceContext` / `DataSourceProvider` 已废弃删除。
+> 实际采用的是 `getDataSource()` 全局单例模式，无 Provider 嵌套开销。
 
 ```
-┌─ DataSourceProvider ────────────────────────────────────────────┐
+┌─ getDataSource() → LiveDataSource 单例 ────────────────────────┐
 │                                                                  │
-│  mode: 'live' | 'replay'                                        │
-│  source: LiveDataSource | ReplayEngine                           │
+│  WS 主通道: ws://host:9527/ws/features                          │
+│  HTTP 降级: api.featureCollect(feature) 1s 轮询                  │
+│  WS 连接/断开时自动切换                                           │
 │                                                                  │
-│  switchToLive() / switchToReplay(engine)                         │
+│  Replay: 各 hook 通过可选 replaySource?: DataSource 参数覆盖     │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```

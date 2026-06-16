@@ -1,5 +1,7 @@
 # Illuminator 架构审计 v4
 
+> ⚠️ **本文档已过时**。最新审计请参见 [`code_review_report.md`](./code_review_report.md)（第五版，2026-06-16）。
+>
 > **审计日期**: 2026-06-10  
 > **代码基线**: `infra_optimize` 分支  
 > **覆盖范围**: 后端 C++20 + 前端 React/TS + CI/CD + Dockerfile + 插件体系

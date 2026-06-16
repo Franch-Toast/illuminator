@@ -111,7 +111,7 @@ curl http://localhost:9527/api/v1/features/cpu_utilization/collect | python3 -m 
 | `http://localhost:9527` | 后端直接访问（静态文件 + API） |
 | `http://localhost:9527/healthz` | 健康检查（无认证） |
 | `http://localhost:9527/metrics` | Prometheus 指标（无认证） |
-| `ws://localhost:9528/ws/features` | WebSocket 实时推送端点 |
+| `ws://localhost:9527/ws/features` | WebSocket 实时推送端点（与 HTTP 同端口） |
 
 ---
 
@@ -358,7 +358,7 @@ LiveDataSource (全局单例)
 
 ### 5.5 WebSocket 认证
 
-后端 WS 端口 (默认 9528) 在 Upgrade 握手阶段验证 token：
+后端 WS（与 HTTP 共享端口 9527，通过 `WsAwareServer` 的 `MSG_PEEK` 检测 Upgrade）在握手阶段验证 token：
 - `Authorization: Bearer <token>` 请求头
 - `?token=<token>` URL 查询参数（浏览器 WS API 备选）
 - 配置中 `server.auth_token` 为空时跳过验证（开发模式）
@@ -706,9 +706,12 @@ server:
 
 | 项 | 说明 |
 |-----|------|
-| Replay 流式解析 | `ReadableStream` 替代 `file.text()` 支持大文件回放 |
-| 前端组件测试 | React Testing Library 补充组件渲染测试 |
-| E2E 测试 | Playwright 端到端浏览器测试 |
+| ~~Replay 流式解析~~ | ✅ 已完成：`ReadableStream` + 进度回调 + bulk fallback |
+| ~~前端组件测试~~ | ✅ 已完成：Vitest + Testing Library，74 项测试 |
+| ~~E2E 测试~~ | ✅ 已完成：Playwright 配置 + smoke.spec.ts |
+| ~~WS 同端口~~ | ✅ 已完成：`WsAwareServer` 子类实现 HTTP+WS 共享 9527 |
+| ~~WS 广播去重~~ | ✅ 已完成：DataBatchPtr 指针比较 |
+| ~~/pipelines API~~ | ✅ 已完成：新增 `active_features` 字段 |
 | mem_tracer 集成 | 将 `mem_tracer.bpf.c` 集成为 `heap_profiler` Source |
 | Hook 签名清理 | 移除 hooks 中无实际作用的 `intervalMs` 参数 |
 
@@ -771,7 +774,7 @@ server:
 │  ProfileSnapshot → Worker → FlameGraph div rendering    │
 │  ECharts 6 (tree-shaken) for time-series charts         │
 └──────────────────────────┬──────────────────────────────┘
-                           │ REST :9527 / WS :9528
+                           │ REST + WS :9527 (同端口)
 ┌──────────────────────────▼──────────────────────────────┐
 │                     CLI (main.cc)                        │
 │  daemon | collect | top | version | plugins | storage   │

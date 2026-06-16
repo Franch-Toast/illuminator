@@ -318,7 +318,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
 
     illuminator::HttpServer http_server;
     illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
-    illuminator::RegisterApiRoutes(http_server.server(), controller);
+    illuminator::RegisterApiRoutes(http_server.server(), controller, &feature_manager);
     illuminator::RegisterFeatureRoutes(http_server.server(), feature_manager);
 
     // Same-port WebSocket: upgrade handler intercepts WS requests on HTTP port
