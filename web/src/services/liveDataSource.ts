@@ -104,8 +104,10 @@ export class LiveDataSource implements DataSource {
 
   private getWsUrl(): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host
-    return `${protocol}//${host}/ws/features`
+    const hostname = window.location.hostname
+    const httpPort = parseInt(window.location.port || (protocol === 'wss:' ? '443' : '80'), 10)
+    const wsPort = httpPort + 1
+    return `${protocol}//${hostname}:${wsPort}/ws/features`
   }
 
   private connectWs() {

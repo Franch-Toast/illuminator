@@ -633,20 +633,122 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 已删除 7 个文件 (~38KB)：wsManager.ts、DataSourceContext.tsx、FlameGraph.tsx (×2)、useFlameGraph.ts、ExportMenu.tsx、FeaturePanel.tsx
 
-### 7.3 🟢 P2 — 剩余改进建议
+### 7.3 待做优化项（按优先级排序）
+
+#### ★★★ P2-A（高）：WebSocket 同端口方案
+
+**问题：** WS 和 HTTP 分别在 9527/9528 双端口架构，在以下场景中产生部署复杂性：
+- 反向代理（nginx/envoy）需配置两个 upstream
+- 容器网络需暴露两个端口
+- 防火墙/安全组需开放额外端口
+- 浏览器安全策略可能限制跨端口 WebSocket（测试中已遇到）
+
+**方案：** 将 WebSocket 升级处理集成到 httplib 的 HTTP server 中：
+```
+当前：  HTTP(:9527) + 独立 WS(:9528, 原始 BSD socket)
+目标：  HTTP+WS(:9527, httplib 统一处理)
+```
+
+**实现路径：**
+1. httplib 已支持 WebSocket（检查版本是否支持或升级）
+2. 在 `RegisterApiRoutes` 中注册 `/ws/features` 为 WebSocket 升级端点
+3. 将 `WebSocketManager` 从独立 socket 改为使用 httplib 提供的 fd
+4. 或保留当前 `WebSocketManager`，但让 httplib 在收到 `/ws/` 路径时代理到 WS manager
+5. 移除 `getWsUrl()` 中的 `port + 1` 计算，改为 `window.location.host`
+
+**前端变更：**
+```typescript
+// 修改后（同端口）:
+private getWsUrl(): string {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${protocol}//${window.location.host}/ws/features`
+}
+```
+
+**预估工作量：** 中等（1-2 天）  
+**风险：** 需确认 httplib 版本的 WS 支持质量；如不支持可考虑替换为 uWebSockets 或 Boost.Beast
+
+---
+
+#### ★★★ P2-B（高）：前端组件测试 + E2E
+
+**问题：** 当前仅有 hooks/services 层的 Vitest 单元测试，缺少：
+- 组件渲染测试（CpuPage、ProfileSnapshot 等是否正确渲染）
+- 端到端测试（用户交互流程是否完整可用）
+- WS 连接/降级行为的集成测试
+
+**建议测试策略：**
+
+| 层级 | 工具 | 覆盖范围 |
+|------|------|----------|
+| 组件渲染 | Vitest + React Testing Library | CpuPage, ProfileSnapshot, ProcessTable, ConnectionIndicator |
+| 集成测试 | Vitest + MSW (Mock WS/HTTP) | LiveDataSource 双通道切换、subscribe 行为、降级逻辑 |
+| E2E | Playwright | daemon 启动 → 浏览器打开 → 数据流 → 火焰图 → 录制 → 回放 |
+
+**优先覆盖的组件：**
+1. `ProfileSnapshot` — 最复杂的组件（Worker + 异步渲染 + 多数据源）
+2. `CpuPage` — 核心使用场景
+3. `LiveDataSource` — WS/HTTP 切换逻辑的集成测试
+4. `ReplayEngine` — 文件加载 + 播放 + 时间控制
+
+**预估工作量：** 中等（2-3 天，分阶段进行）
+
+---
+
+#### ★★☆ P2-6（中）：火焰图接入 LiveDataSource
+
+**问题：** `ProfileSnapshot` 使用独立的 HTTP stream 轮询（`api.featureStream()`），不走 WS 通道。WS 正常时仍产生大量 HTTP 请求。
+
+**当前 WS 推送模式限制：** WS 仅推送最新快照（`Latest(key)`），火焰图需要累积所有历史样本。
+
+**方案选项：**
+
+| 方案 | 描述 | 复杂度 |
+|------|------|--------|
+| A. 扩展 WS 增量模式 | WS 帧携带 `cursor` + 增量 batches | 大 |
+| B. WS 通知 + HTTP 拉取 | WS 推送"有新数据"通知 → 前端 HTTP 拉取 | 中 |
+| C. WS 推送完整 batch | 每次 flush 推送完整 batch（可能较大） | 小 |
+
+**推荐方案 B：** 最小改动，WS 推送轻量通知帧 `{"type":"notify","feature":"cpu_profile","cursor":123}`，前端收到后仅在有新数据时调用 `featureStream(cursor)`，避免无效轮询。
+
+**预估工作量：** 大（方案 A）/ 中（方案 B）
+
+---
+
+#### ★★☆ P2-1（中）：Replay 大文件流式解析
+
+**问题：** `ReplayEngine.loadFile()` 使用 `file.text()` 一次性读全文件。>100MB `.ilr` 文件会阻塞 UI 数秒 + 占用大量内存。
+
+**方案：**
+```typescript
+const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader()
+let buffer = ''
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  buffer += value
+  // 按 '\n' 分割处理每行 NDJSON
+}
+```
+
+**预估工作量：** 小（0.5 天）
+
+---
+
+#### 其他待做项（低优先级）
 
 | 项 | 建议 | 优先级 | 状态 |
 |-----|------|--------|------|
-| P2-1 | Replay 大文件流式解析 (`ReadableStream` 替代全量 `file.text()`) | 中 | 待做 |
 | P2-2 | 多页面重复组件抽取 (SummaryCard, Sparkline, EmptyChart) | 低 | 待做 |
-| P2-3 | 前端测试：组件渲染测试 + E2E (Playwright) | 中 | 待做 |
 | P2-4 | `mem_tracer.bpf.c` 集成为 `heap_profiler` Source 或移除 | 低 | 待做 |
 | ~~P2-5~~ | ~~`useCpuData` 等 hook 签名中 `intervalMs` 参数清理~~ | ~~低~~ | ✅ 已完成 |
-| P2-6 | ProfileSnapshot 火焰图考虑接入 LiveDataSource (需扩展 cursor 支持) | 中 | 待做 |
 | ~~P2-7~~ | ~~清理第二批前端死代码~~ | ~~低~~ | ✅ 已完成 |
 | ~~P2-8~~ | ~~遗留 API 路由添加 Deprecation 头~~ | ~~中~~ | ✅ 已完成 |
 | P2-9 | `useFeatureStream.ts` 职责分离：`TimeSeriesBuffer` 提取为独立工具文件 | 低 | 待做 |
 | P2-10 | 前端 per-feature recording UI 集成（后端已支持，前端仅侧边栏全局录制） | 低 | 待做 |
+| P2-11 | Replay 补全 IO/Network/GPU 视图（当前为占位符 "coming soon"） | 低 | 待做 |
+| P2-12 | WASM 插件运行时：决定实现或移除 stub (`wasm_runtime.h`) | 低 | 待做 |
+| P2-13 | 2026-09-01 后移除遗留 Deprecated API 路由 | 低 | 定时 |
 
 ---
 
@@ -712,15 +814,17 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 │   - 页面可见性感知 (隐藏时停止轮询/推送)           │
 │   - DataSource 单例替代 Provider (更轻量)         │
 │                                                 │
-│   ⚠ 中优先级待做:                                │
-│   P2-3: 前端组件测试 + E2E                       │
-│   P2-6: 火焰图接入 LiveDataSource               │
+│   ★★★ 高优先级:                                  │
+│   P2-A: WS 同端口方案 (消除双端口部署复杂性)      │
+│   P2-B: 前端组件测试 + E2E (Playwright)          │
 │                                                 │
-│   🟢 低优先级待做:                                │
-│   P2-1: Replay 大文件流式解析                     │
-│   P2-4: mem_tracer.bpf.c 集成或移除              │
-│   P2-9: TimeSeriesBuffer 独立为工具文件           │
-│   P2-10: Per-feature 录制 UI 集成                │
+│   ★★☆ 中优先级:                                  │
+│   P2-6: 火焰图接入 LiveDataSource (WS 通知)      │
+│   P2-1: Replay 流式解析 (ReadableStream)         │
+│                                                 │
+│   ★☆☆ 低优先级:                                  │
+│   P2-4/9/10/11/12: 各类代码清理和功能补全        │
+│   P2-13: 2026-09-01 后移除 Deprecated 路由       │
 │                                                 │
 └─────────────────────────────────────────────────┘
 ```
