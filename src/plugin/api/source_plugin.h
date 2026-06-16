@@ -55,15 +55,15 @@ public:
     // active=false 表示反压解除，Source 可恢复正常速率。
     virtual void OnBackpressure(bool /*active*/) {}
 
-    // Plugin-specific query API — eliminates need for dynamic_cast in HTTP handlers.
-    // Subclasses override to expose custom data endpoints (e.g. history, events).
+    // 插件专属查询 API — 消除 HTTP 处理器中对 dynamic_cast 的依赖。
+    // 子类通过重写暴露自定义数据端点（如历史数据、事件列表）。
     virtual StatusOr<std::string> QueryExtra(
         const std::string& /*query*/, const QueryParams& /*params*/) {
         return Status::Error(StatusCode::kUnimplemented, "no extra queries");
     }
 
-    // Runtime reconfiguration of filter parameters (e.g. target_pids) without
-    // restarting the pipeline. Used when user switches target process in the UI.
+    // 运行时不重启流水线即可动态修改过滤参数（如 target_pids）。
+    // 当用户在 UI 中切换目标进程时调用。
     virtual Status Reconfigure(const ConfigValue& /*params*/) {
         return Status::Error(StatusCode::kUnimplemented, "reconfigure not supported");
     }

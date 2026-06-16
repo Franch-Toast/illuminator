@@ -43,15 +43,16 @@
 │  ┌────────────────────────────────────┐                                  │
 │  │     TimerWheel  (1 thread)         │  ← 全局统一调度器                 │
 │  │                                    │     只决定"何时触发什么"           │
-│  │     内部: priority_queue<Event>    │     不执行任何实际工作             │
-│  │     唤醒: condition_variable       │                                  │
+│  │     内部: timerfd + epoll + eventfd│     不执行任何实际工作             │
+│  │     存储: priority_queue<TimerEntry>│                                 │
 │  │                                    │                                  │
 │  │     注册的事件:                     │                                  │
 │  │     ├─ CollectEvent(pipe_A, @1s)   │─── 到时 → 提交 Collect 到 Pool   │
 │  │     ├─ CollectEvent(pipe_B, @2s)   │─── 到时 → 提交 Collect 到 Pool   │
 │  │     ├─ FlushEvent(pipe_A, @3s)     │─── 到时 → 注入 Sentinel 到 Ch    │
 │  │     ├─ FlushEvent(pipe_C, @5s)     │─── 到时 → 注入 Sentinel 到 Ch    │
-│  │     └─ MetricsSync(@10s)           │─── 到时 → 提交 Sync 到 Pool      │
+│  │     ├─ MetricsSync(@10s)           │─── 到时 → 提交 Sync 到 Pool      │
+│  │     └─ PruneStorage(@60s)          │─── 到时 → 提交 Prune 到 SinkPool │
 │  └────────────────────────────────────┘                                  │
 │                     │                                                    │
 │            ┌────────┴─────────┐                                          │
@@ -61,22 +62,24 @@
 │  │ CollectPool       │  │ Per Pipeline (× N):                         │  │
 │  │ (M threads, 共享)  │  │                                            │  │
 │  │                   │  │  ┌────────────────────────────────────────┐ │  │
-│  │ 执行:              │  │  │ AsyncChannel<ChannelItem, 4096>       │ │  │
+│  │ 执行:              │  │  │ AsyncChannel(ChannelItem, capacity)   │ │  │
 │  │ src.Collect()     │──┼─→│ item = variant<DataBatchPtr, Sentinel> │ │  │
-│  │                   │  │  └──────────────────┬─────────────────────┘ │  │
-│  │ 结果入队到各管道   │  │                     │                       │  │
-│  │ 的 AsyncChannel   │  │                     ▼                       │  │
-│  │                   │  │  ┌────────────────────────────────────────┐ │  │
-│  └──────────────────┘  │  │ ProcessThread (1 per pipeline)         │ │  │
-│                         │  │                                        │ │  │
-│  Push Sources:          │  │ 纯事件处理器 (Event Handler):           │ │  │
-│  eBPF callback ─────────┼─→│  match item:                          │ │  │
-│  → channel.Enqueue()    │  │    DataBatch  → RunProcessors()       │ │  │
+│  │                   │  │  │ 三级自适应退避出队: spin→yield→sleep   │ │  │
+│  │ 结果入队到各管道   │  │  └──────────────────┬─────────────────────┘ │  │
+│  │ 的 AsyncChannel   │  │                     │                       │  │
+│  │                   │  │                     ▼                       │  │
+│  └──────────────────┘  │  ┌────────────────────────────────────────┐ │  │
+│                         │  │ ProcessThread (1 per pipeline)         │ │  │
+│  Push Sources:          │  │                                        │ │  │
+│  eBPF callback ─────────┼─→│ 纯事件处理器 (Event Handler):           │ │  │
+│  → channel.Enqueue()    │  │  match item:                          │ │  │
+│                         │  │    DataBatch  → RunProcessors()       │ │  │
 │                         │  │               → Aggregator.Add()      │ │  │
 │                         │  │               → SubmitToSinks()       │ │  │
 │                         │  │    Sentinel   → Aggregator.Flush()    │ │  │
 │                         │  │               → SubmitToSinks()       │ │  │
 │                         │  │                                        │ │  │
+│                         │  │ 每100次循环: 同步指标 + 检查资源限制     │ │  │
 │                         │  │ 保证: 纯 CPU-bound, 不做任何 I/O       │ │  │
 │                         │  └────────────────────────┬───────────────┘ │  │
 │                         │                           │                  │  │
@@ -86,7 +89,18 @@
 │  │ SinkPool (K threads, 共享)                                          │  │
 │  │ 执行: sink.Write()                                                   │  │
 │  │ 职责: 所有 I/O-bound 写入操作                                         │  │
+│  │ 过载保护: 待处理任务 > 256 → 丢弃数据                                 │  │
 │  └─────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────────┐ │
+│  │ FeatureManager — 面向用户的功能级生命周期管理（1 Feature = 1 Pipeline）│ │
+│  │                                                                      │ │
+│  │ 状态机: Inactive → Starting → Active ⇄ Paused → Stopping [→ Inactive]│ │
+│  │ 分级:    Tier1(监控) 自动启动 | Tier2(追踪) 自动启动 | Tier3(剖析) 手动│ │
+│  │ 自动注入: StreamSink(数据拉取) + WebSocketSink(实时推送) + RecordingSink│ │
+│  │ 运行时重配置: 切换 target_pids 无需重启 Pipeline                        │ │
+│  │ Supported: 按需启停 / 暂停恢复 / 录制 / 重配过滤 / 状态回调 / 安全校验   │ │
+│  └──────────────────────────────────────────────────────────────────────┘ │
 │                                                                          │
 │  线程总计: 1 (TimerWheel) + M (CollectPool) + N (ProcessThread) + K (Sink)│
 │  典型 10 管道: 1 + 2 + 10 + 4 = 17 线程                                  │
@@ -101,87 +115,42 @@
 
 **设计参考**: Fluent Bit 的 `mk_event_loop` + Kafka 的 `TimingWheel`
 
-```cpp
-// src/core/engine/timer_wheel.h
+**实际实现**: 使用 `timerfd` + `epoll` + `eventfd`（Linux 原生机制），非 `condition_variable` 方案。
 
-namespace illuminator {
+```
+TimerWheel 内部三大组件：
 
-class TimerWheel {
-public:
-    using Callback = std::function<void()>;
-    
-    struct TimerEntry {
-        uint32_t id;
-        std::chrono::steady_clock::time_point next_fire;
-        std::chrono::milliseconds interval;
-        Callback callback;
-        bool repeating;
-        
-        bool operator>(const TimerEntry& o) const { return next_fire > o.next_fire; }
-    };
-
-    // 注册周期性定时器，返回 timer_id
-    uint32_t AddRepeating(std::chrono::milliseconds interval, Callback cb);
-    
-    // 注册一次性定时器
-    uint32_t AddOnce(std::chrono::milliseconds delay, Callback cb);
-    
-    // 取消定时器
-    void Cancel(uint32_t timer_id);
-    
-    void Start();  // 启动调度线程
-    void Stop();   // 停止并等待退出
-
-private:
-    void Run();    // 调度循环
-    
-    std::priority_queue<TimerEntry, std::vector<TimerEntry>, 
-                        std::greater<TimerEntry>> heap_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::atomic<bool> running_{false};
-    std::thread thread_;
-    uint32_t next_id_{0};
-};
-
-}  // namespace illuminator
+┌──────────────────────────────────────────────────┐
+│              TimerWheel 线程 (timer-wheel)         │
+│                                                  │
+│  ┌──────────┐   ┌──────────┐   ┌──────────────┐ │
+│  │ timerfd  │   │ eventfd  │   │ priority_queue│ │
+│  │(内核定时器)│   │(唤醒信号) │   │   (最小堆)    │ │
+│  └────┬─────┘   └────┬─────┘   └──────┬───────┘ │
+│       │              │                │          │
+│       └──────┬───────┘                │          │
+│              │                        │          │
+│        ┌─────▼─────┐                  │          │
+│        │   epoll   │◄─────────────────┘          │
+│        │ (多路复用) │  堆顶的到期时间 arm timerfd   │
+│        └─────┬─────┘                             │
+│              │                                   │
+│        epoll_wait 阻塞等待 + 1s 超时              │
+│              │                                   │
+│   timerfd到期 / eventfd被写 / 超时                │
+│              │                                   │
+│        ProcessFired() → 弹出到期条目 → 执行回调    │
+│              │                                   │
+│        RearmTimerfdLocked() → 重新 arm timerfd    │
+└──────────────────────────────────────────────────┘
 ```
 
-**调度循环核心逻辑**:
+**运行流程**:
 
-```cpp
-void TimerWheel::Run() {
-    SetThreadName("il-timer");
-    std::unique_lock<std::mutex> lock(mutex_);
-    
-    while (running_.load(std::memory_order_acquire)) {
-        if (heap_.empty()) {
-            cv_.wait(lock, [this] { return !running_ || !heap_.empty(); });
-            continue;
-        }
-        
-        auto& top = heap_.top();
-        if (top.next_fire <= std::chrono::steady_clock::now()) {
-            // 到时！取出并执行回调
-            auto entry = heap_.top();
-            heap_.pop();
-            
-            lock.unlock();
-            entry.callback();   // 回调执行不持锁
-            lock.lock();
-            
-            // 周期性定时器重新入堆
-            if (entry.repeating && running_) {
-                entry.next_fire += entry.interval;
-                heap_.push(std::move(entry));
-            }
-        } else {
-            // 等待到最近的触发时间
-            cv_.wait_until(lock, top.next_fire);
-        }
-    }
-}
-```
+1. **注册定时器**（`AddRepeating`/`AddOnce`）：创建 `TimerEntry` 推入最小堆 → 重新 arm timerfd 到堆顶时间 → 写 eventfd 唤醒 epoll 循环
+2. **主循环**（`Run`）：`epoll_wait` 阻塞等待 timerfd 到期或 eventfd 唤醒 → 收到事件后调用 `ProcessFired()`
+3. **触发回调**（`ProcessFired`）：加锁弹出所有到期条目 → **释放锁** → 逐个执行回调（锁外执行，防止死锁）→ 重复定时器 `next_fire += interval` 后重新入堆 → 重新 arm timerfd
+4. **取消定时器**（`Cancel`）：只记录 ID 到 `cancelled_` 列表（O(1)），下次 `ProcessFired` 时通过 `PurgeCancelledLocked` 重建堆统一清理（懒惰删除）
 
 **关键设计决策**:
 
@@ -190,10 +159,13 @@ void TimerWheel::Run() {
 | 实现方式 | `timerfd` + `epoll` + `eventfd` | Linux 内核精度高、无忙等待、支持外部唤醒 |
 | 回调执行 | 释放锁后执行回调 | 防止回调中注册新定时器导致死锁 |
 | 线程数 | 固定 1 线程 | 回调只做 `Submit/Enqueue`，纳秒级完成 |
+| 取消策略 | 懒惰删除（Lazy Deletion） | O(1) 取消，下次触发时统一清理 |
+| 重复定时器 drift | `next_fire += interval` | 避免回调执行时间累积导致的漂移 |
+| epoll 超时 | 1 秒超时 | 兜底检查，防止边界情况下的死等 |
 
 > **注**: 原设计评审考虑了 `priority_queue + cv::wait_until` 方案（跨平台），
 > 最终实现选择了 `timerfd + epoll`（更高精度、支持 `eventfd` 唤醒注册新定时器）。
-> 见 `src/core/engine/timer_wheel.h`。
+> 详见 `src/core/engine/timer_wheel.h`。
 
 ### 4.2 AsyncChannel — 支持 variant 的管道通道
 
@@ -293,14 +265,21 @@ bool AsyncChannel::InjectFlush() {
 
 **核心约束**: **不做任何 I/O，不持有任何定时器，不做任何调度决策。**
 
-```cpp
-// Pipeline::ProcessLoop (in pipeline_controller.h)
+**实际实现**（`pipeline_controller.h` 中的 `Pipeline::ProcessLoop`）:
 
+```cpp
 void ProcessLoop() {
+    uint32_t loop_count = 0;
+
     while (running_.load(std::memory_order_acquire)) {
+        // 三级自适应退避出队：spin → yield → sleep(1ms)
         auto item = ingest_channel_.Dequeue(std::chrono::milliseconds(100));
-        if (!item) continue;
-        
+        if (!item) {
+            if (++loop_count % 100 == 0) SyncChannelMetrics();
+            continue;
+        }
+
+        // variant 分发：DataBatch 或 FlushSentinel
         std::visit(Overloaded{
             [this](DataBatchPtr& batch) {
                 HandleData(std::move(batch));
@@ -309,14 +288,24 @@ void ProcessLoop() {
                 HandleFlush();
             },
         }, *item);
+
+        // 每 100 次循环同步一次指标 + 检查资源限制
+        if (++loop_count % 100 == 0) {
+            SyncChannelMetrics();
+            auto usage = ResourceLimiter::Instance().Check();
+            if (usage.memory_exceeded) {
+                IL_WARN("Pipeline '{}': memory limit exceeded (RSS={} bytes)",
+                        name_, usage.rss_bytes);
+            }
+        }
     }
-    
-    Drain();
+
+    Drain();  // 退出前排空 channel 中剩余数据
 }
 
 void HandleData(DataBatchPtr batch) {
     records_processed_.fetch_add(batch->Size(), std::memory_order_relaxed);
-    
+
     // Processor 链：同步串行，微秒级
     for (auto& proc : processors_) {
         auto result = proc->Process(std::move(batch));
@@ -327,20 +316,20 @@ void HandleData(DataBatchPtr batch) {
         batch = std::move(result.value());
         if (!batch || batch->Empty()) return;
     }
-    
+
     // 分发：有 Aggregator 则累积，否则直接到 Sink
     if (aggregator_) {
         aggregator_->Add(std::move(batch));
     } else {
         SubmitToSinks(std::move(batch));
     }
-    
+
     batches_processed_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void HandleFlush() {
     if (!aggregator_) return;
-    
+
     auto result = aggregator_->Flush();
     if (result.ok()) {
         for (auto& batch : result.value()) {
@@ -349,29 +338,48 @@ void HandleFlush() {
     }
 }
 
-// Sink 提交：永远非阻塞
+// 优雅停机：排空 channel 中所有剩余数据 + 最后一次 flush
+void Drain() {
+    while (auto item = ingest_channel_.TryDequeue()) {
+        std::visit(Overloaded{
+            [this](DataBatchPtr& batch) { HandleData(std::move(batch)); },
+            [this](FlushSentinel&) { HandleFlush(); },
+        }, *item);
+    }
+    if (aggregator_) HandleFlush();  // 最后 flush 一次聚合器中的残留数据
+}
+```
+
+**Sink 提交（带背压保护）**:
+
+```cpp
 void SubmitToSinks(DataBatchPtr batch) {
     if (!sink_pool_) {
         // 无池回退：直接写（仅单 Sink 场景可接受）
         for (auto& sink : sinks_) sink->Write(batch);
         return;
     }
+
+    // SinkPool 过载保护：待处理任务超过 256 时丢弃数据
+    static constexpr size_t kMaxPendingTasks = 256;
+    if (sink_pool_->PendingTasks() > kMaxPendingTasks) {
+        IL_WARN("Pipeline '{}': SinkPool overloaded ({} pending), dropping batch",
+                name_, sink_pool_->PendingTasks());
+        error_count_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
     for (auto& sink : sinks_) {
-        sink_pool_->Submit([sink = sink.get(), batch] {
-            auto status = sink->Write(batch);
+        sink_pool_->Submit([sink_ptr = sink.get(), batch, this]() -> void {
+            auto status = sink_ptr->Write(batch);
             if (!status.ok()) {
-                IL_WARN("Sink write error: {}", status.message());
+                IL_WARN("Sink write error in pipeline '{}': {}",
+                        name_, status.message());
+                error_count_.fetch_add(1, std::memory_order_relaxed);
             }
         });
     }
 }
-```
-
-**Overloaded 辅助**（C++17 标准技巧）:
-
-```cpp
-template <class... Ts> struct Overloaded : Ts... { using Ts::operator()...; };
-template <class... Ts> Overloaded(Ts...) -> Overloaded<Ts...>;
 ```
 
 ### 4.4 CollectPool — 共享 I/O 工作池
@@ -428,30 +436,37 @@ struct EngineConfig {
 ```
 TimerWheel        CollectPool       AsyncChannel      ProcessThread       SinkPool
     │                  │                  │                  │                │
-    │──── timer fires ─┐                 │                  │                │
-    │                  │                 │                  │                │
-    │  Submit(Collect) │                 │                  │                │
-    │─────────────────→│                 │                  │                │
-    │                  │                 │                  │                │
-    │                  │ src.Collect()   │                  │                │
-    │                  │───────┐         │                  │                │
-    │                  │       │ /proc   │                  │                │
-    │                  │←──────┘         │                  │                │
-    │                  │                 │                  │                │
-    │                  │ TryEnqueue(Data)│                  │                │
+    │── timer fires ──┐                  │                  │                │
+    │                  │                  │                  │                │
+    │  回调: Submit(Collect)              │                  │                │
+    │─────────────────→│                  │                  │                │
+    │                  │                  │                  │                │
+    │                  │ src.Collect()    │                  │                │
+    │                  │───────┐          │                  │                │
+    │                  │       │ 读 /proc │                  │                │
+    │                  │←──────┘          │                  │                │
+    │                  │                  │                  │                │
+    │                  │ TryEnqueue(Data) │                  │                │
     │                  │────────────────→│                  │                │
-    │                  │                 │                  │                │
-    │                  │                 │  Dequeue(Data)   │                │
-    │                  │                 │─────────────────→│                │
-    │                  │                 │                  │                │
-    │                  │                 │                  │ RunProcessors()│
-    │                  │                 │                  │───────┐        │
-    │                  │                 │                  │←──────┘        │
-    │                  │                 │                  │                │
-    │                  │                 │                  │ agg.Add()      │
-    │                  │                 │                  │───────┐        │
-    │                  │                 │                  │←──────┘        │
-    │                  │                 │                  │                │
+    │                  │                  │                  │                │
+    │                  │                  │ Dequeue(Data)    │                │
+    │                  │                  │ (spin→yield→sleep)│               │
+    │                  │                  │─────────────────→│                │
+    │                  │                  │                  │                │
+    │                  │                  │                  │ variant match  │
+    │                  │                  │                  │ → HandleData() │
+    │                  │                  │                  │───────┐        │
+    │                  │                  │                  │ RunProcessors()│
+    │                  │                  │                  │ agg.Add()      │
+    │                  │                  │                  │←──────┘        │
+    │                  │                  │                  │                │
+    │                  │                  │                  │ SubmitToSinks()│
+    │                  │                  │                  │───────────────→│
+    │                  │                  │                  │                │
+    │                  │                  │                  │                │ sink.Write()
+    │                  │                  │                  │                │───────┐
+    │                  │                  │                  │                │       │ I/O
+    │                  │                  │                  │                │←──────┘
 ```
 
 ### 5.2 FlushSentinel 触发 Aggregator 输出
@@ -546,85 +561,152 @@ struct EngineConfig {
 ## 八、优雅停机序列
 
 ```
-1. PipelineController::StopAll()
+PipelineController::StopAll()
    │
-   ├─ 2. TimerWheel::Stop()
+   ├─ 1. TimerWheel::Stop()
+   │     running_ = false → Wakeup(eventfd) → thread_.join()
    │     停止所有定时器，不再触发新的 Collect/Flush 事件
    │
-   ├─ 3. CollectPool::~ThreadPool()
+   ├─ 2. CollectPool 销毁 (collect_pool_.reset())
    │     等待正在执行的 Collect() 完成，排空任务队列
    │
-   ├─ 4. For each Pipeline: Pipeline::Stop()
+   ├─ 3. For each Pipeline: Pipeline::Stop()
    │     │
-   │     ├─ 4a. Source::Stop()
+   │     ├─ 3a. Source::Stop()
    │     │      Push Source 停止回调
    │     │
-   │     ├─ 4b. running_ = false
+   │     ├─ 3b. running_ = false
    │     │
-   │     ├─ 4c. ProcessThread join
-   │     │      ProcessThread 退出前: 
-   │     │      - Drain channel 中剩余数据
-   │     │      - 执行最后一次 Aggregator::Flush()
+   │     ├─ 3c. process_thread_.join()
+   │     │      ProcessThread 退出前:
+   │     │      - 退出主循环的 while(running_)
+   │     │      - 调用 Drain() 排空 channel 中剩余数据
+   │     │      - Drain 中执行最后一次 Aggregator::Flush()
    │     │      - SubmitToSinks(最后一批数据)
    │     │
-   │     ├─ 4d. Processor/Aggregator/Sink Stop()
+   │     ├─ 3d. Processor/Aggregator/Sink Stop()
    │     │      Sink::Flush() 刷出缓冲
    │     │
-   │     └─ 4e. 日志: 打印 channel 统计 (enqueued/dequeued/dropped)
+   │     └─ 3e. 日志: 打印 channel 统计 (enqueued/dequeued/dropped/flush_injected)
    │
-   └─ 5. SinkPool::~ThreadPool()
+   └─ 4. SinkPool 销毁 (析构函数中)
          等待所有 Write() 完成，确保数据不丢失
 ```
 
-**关键**: SinkPool 最后销毁，确保 ProcessThread drain 阶段提交的最后一批数据能被写入。
+**关键**: SinkPool 最后销毁（作为 PipelineController 的成员，在 pipelines_ 之后析构），确保 ProcessThread drain 阶段提交的最后一批数据能被写入。
 
 ## 九、类图与文件组织
 
-### 9.1 新增/修改的文件
+### 9.1 实际文件结构
 
 ```
-src/core/engine/
-├── timer_wheel.h           [新增] TimerWheel 定义与实现
-├── async_channel.h         [修改] 支持 variant<DataBatchPtr, FlushSentinel>
-├── pipeline_controller.h   [修改] Pipeline + PipelineController 重构
-└── pipeline_controller.cc  [修改] BuildFromConfig, StartAll, StopAll
-
-src/core/common/
-└── config.h                [修改] EngineConfig 新增 collect_pool_threads
-
-src/core/config/
-└── yaml_config_loader.h    [修改] 解析 collect_pool_threads
-
-src/core/BUILD              [修改] 新增 timer_wheel.h
+src/
+├── cli/
+│   └── main.cc                    # 命令行入口（daemon/collect/top/version/plugins/storage）
+├── core/
+│   ├── common/
+│   │   ├── config.h               # 配置结构体（GlobalConfig, PipelineConfig, EngineConfig）
+│   │   ├── logging.h              # 日志工具
+│   │   ├── status.h               # Status/StatusOr 错误处理
+│   │   └── self_observability.h   # 内部指标（InternalMetrics, ResourceLimiter）
+│   ├── config/
+│   │   └── yaml_config_loader.h   # YAML 配置解析
+│   ├── engine/
+│   │   ├── data_batch.h           # 数据模型（Record, StackSample, DataBatch, Arena）
+│   │   ├── async_channel.h        # 异步通道（variant<DataBatchPtr, FlushSentinel>, 三级退避）
+│   │   ├── timer_wheel.h          # 全局定时调度器（timerfd+epoll+eventfd+最小堆）
+│   │   ├── feature_manager.h      # 功能级生命周期管理（按需启停+录制+重配）
+│   │   ├── pipeline_controller.h  # Pipeline + PipelineController 定义
+│   │   └── pipeline_controller.cc # PipelineController 实现（BuildFromConfig, StartAll, StopAll）
+│   ├── memory/
+│   │   ├── arena.h                # Arena 内存分配器（碰撞指针）
+│   │   └── lock_free_queue.h      # 无锁队列
+│   └── threading/
+│       ├── thread_pool.h          # 通用线程池
+│       └── thread_util.h          # 线程工具（SetThreadName）
+├── plugin/
+│   ├── api/
+│   │   ├── plugin_api.h           # Plugin 基类 + C ABI 接口
+│   │   ├── source_plugin.h        # Source 插件抽象（Pull/Push 模式）
+│   │   ├── processor_plugin.h     # Processor 插件抽象
+│   │   ├── aggregator_plugin.h    # Aggregator 插件抽象
+│   │   └── sink_plugin.h          # Sink 插件抽象
+│   ├── builtin/                   # 内置插件注册
+│   └── manager/                   # 插件管理器（注册表、so_loader、wasm_runtime）
+├── sources/                       # 数据源插件实现（CPU/内存/IO/网络/调度）
+├── processors/                    # 处理器插件实现（过滤/透传/符号化/栈合并）
+├── aggregators/                   # 聚合器插件实现（CPU 统计聚合）
+├── sinks/                         # 数据出口插件实现（10+ 种）
+│   ├── recording_sink/            # 录制 Sink（供 API 录制回放）
+│   ├── stream_sink/               # 流式 Sink（供 /collect API 拉取）
+│   └── websocket_sink/            # WebSocket Sink（实时推送前端）
+├── ebpf/                          # eBPF 探针程序（C 源码）+ 加载器
+├── server/                        # HTTP 服务器 + API 路由 + WebSocket 管理
+├── storage/                       # 存储后端抽象 + SQLite 实现
+└── serialization/                 # JSON 序列化
 ```
 
-### 9.2 删除的组件
-
-| 组件 | 原位置 | 替代方案 |
-|------|--------|---------|
-| `PullScheduler` | pipeline_controller.h | `TimerWheel` + `CollectPool` |
-| ProcessLoop 内 flush if-check | pipeline_controller.h | `FlushSentinel` 事件驱动 |
-| 单 Sink 快路径 | Pipeline::DeliverToSinks | 统一走 SinkPool |
-
-### 9.3 组件依赖图
+### 9.2 组件依赖图
 
 ```
                      GlobalConfig
                           │
                  PipelineController
-                    │           │
-              TimerWheel     Pipelines[]
-                    │           │
-             ┌──────┤      Pipeline
-             │      │        │    │
-      CollectPool   │   ProcessThread
-             │      │        │    │
-             │      │  AsyncChannel<ChannelItem>
-             │      │        │
-             │      └── SinkPool
-             │              │
-         Source::Collect   Sink::Write
+               ┌────────┼──────────┐
+          TimerWheel  Pipelines[]  ThreadPools
+               │          │        (CollectPool, SinkPool)
+               │     Pipeline
+               │      │    │
+         CollectPool  │  ProcessThread
+               │      │    │
+               │  AsyncChannel<ChannelItem>
+               │      │
+               └── SinkPool
+                      │
+                 Source::Collect   Sink::Write
+                 
+                 
+              FeatureManager（用户层）
+               │
+               └── PipelineController（引擎层）
+                    │
+                    └── Pipeline（单管道）
+                         ├── SourcePlugin
+                         ├── ProcessorPlugin[]
+                         ├── AggregatorPlugin
+                         └── SinkPlugin[]
+                              ├── StreamSink（自动注入，数据拉取）
+                              ├── WebSocketSink（自动注入，实时推送）
+                              └── RecordingSink（自动注入，录制回放）
 ```
+
+### 9.3 FeatureManager 状态机
+
+```
+  Inactive ──→ Starting ──→ Active ⇄ Paused
+     ↑            │            │        │
+     │            │            │        │
+     └── Stopping ←────────────┴────────┘
+
+  FeatureTier 分级:
+  - Tier1 (kMonitoring): procfs 读取，<0.5% CPU，进入 Tab 页自动启动
+  - Tier2 (kTracing):    轻量 eBPF + procfs，1-3% CPU，自动启动
+  - Tier3 (kProfiling):  高频采样，3-10% CPU，必须手动触发 + 指定 target_pids
+```
+
+### 9.4 与设计文档的差异总结
+
+| 维度 | 原设计文档 | 实际实现 |
+|------|-----------|---------|
+| TimerWheel 实现 | priority_queue + cv::wait_until | timerfd + epoll + eventfd + 最小堆 |
+| 取消策略 | 未提及 | 懒惰删除（Lazy Deletion） |
+| ProcessThread 出队 | 简单 Dequeue | 三级自适应退避（spin→yield→sleep） |
+| Sink 提交 | 永远非阻塞 | 带过载保护（>256 pending 丢弃） |
+| 优雅停机 | 基本描述 | 完整 Drain 流程（排空 channel + 最后 flush） |
+| 资源检查 | 未提及 | 每 100 次循环检查内存限制 |
+| 用户层 | 无 | FeatureManager（按需启停/暂停/录制/重配） |
+| 自动注入 | 无 | StreamSink + WebSocketSink + RecordingSink |
+| BPF 启动 | 无 | 100ms 延迟避免内核过载 |
 
 ## 十、Metrics 自观测
 
@@ -651,18 +733,22 @@ timer_.AddRepeating(std::chrono::seconds(10), [this] {
 });
 ```
 
-## 十一、与当前实现 (v2) 的对比
+## 十一、与 v2 的对比（实际实现 vs 设计目标）
 
-| 维度 | v2 (当前) | v3 (本设计) | 改进 |
-|------|----------|------------|------|
+| 维度 | v2 | v3（实际实现） | 改进 |
+|------|-----|--------------|------|
 | Pull 采集 | PullScheduler 单线程串行 | CollectPool 并行 | 消除阻塞 |
 | flush 触发 | ProcessLoop 内 if-check | TimerWheel → FlushSentinel | 事件驱动 |
 | ProcessThread 职责 | 消费+处理+flush检查+metrics | 纯事件处理器 (2 种 event) | 单一职责 |
-| Sink 写入 | 单 Sink 同步快路径 | 全部走 SinkPool | 消除 I/O 阻塞 |
+| Sink 写入 | 单 Sink 同步快路径 | 全部走 SinkPool + 过载保护 | 消除 I/O 阻塞 |
 | 定时器管理 | PullScheduler + ProcessLoop 各管各的 | TimerWheel 统一管理 | 架构清晰 |
 | channel 类型 | `DataBatchPtr` only | `variant<Data, Sentinel>` | 支持事件多态 |
-| 线程数 (10管道) | 15 | 17 | +2 (CollectPool) |
+| 出队策略 | 简单阻塞 | 三级自适应退避（spin→yield→sleep） | 低延迟 + 低 CPU |
+| 线程数 (10管道) | ~15 | 1 + 2 + 10 + 4 = 17 | +2 (CollectPool) |
 | 最大 I/O 阻塞线程 | ProcessThread (单Sink快路径) | 无 (全部池化) | 完全隔离 |
+| 用户层 | 无 | FeatureManager (按需启停/暂停/录制/重配) | 新增 |
+| 资源检查 | 无 | 每 100 次循环检查内存限制 | 新增 |
+| 优雅停机 | 基本 | 完整 Drain 流程 | 更可靠 |
 
 ## 十二、风险与缓解
 
@@ -673,16 +759,23 @@ timer_.AddRepeating(std::chrono::seconds(10), [this] {
 | SinkPool 写入超时 | 中 | Sink 插件内实现超时+重试 |
 | FlushSentinel 被 drop | 极低 | InjectFlush 优先级保证（可腾出空间） |
 | TimerWheel 回调耗时 | 极低 | 回调只做 Submit/Enqueue，微秒级 |
+| SinkPool 过载导致数据丢失 | 低 | 过载保护（>256 pending 丢弃），InternalMetrics 可观测 |
+| 内存超限 | 中 | ResourceLimiter 每 100 次循环检查，超标时 warn |
+| BPF 探针同时挂载导致内核过载 | 低 | 含 BPF 探针的管道启动间 100ms 延迟 |
+| 时钟跳变 | 极低 | timerfd 使用 CLOCK_MONOTONIC，不受系统时间调整影响 |
 
-## 十三、实施计划
+## 十三、实施状态
 
-| 阶段 | 任务 | 预计改动 |
-|------|------|---------|
-| **Phase 1** | 新增 TimerWheel | +1 新文件 |
-| **Phase 2** | AsyncChannel 改为 variant | 修改 1 文件 |
-| **Phase 3** | Pipeline 重构 ProcessLoop | 修改 1 文件 |
-| **Phase 4** | PipelineController 集成 | 修改 2 文件 |
-| **Phase 5** | 配置 + 构建 | 修改 3 文件 |
-| **Phase 6** | 编译验证 + 运行测试 | — |
+| 阶段 | 任务 | 状态 |
+|------|------|------|
+| Phase 1 | 新增 TimerWheel（timerfd+epoll+eventfd） | ✅ 已完成 |
+| Phase 2 | AsyncChannel 改为 variant | ✅ 已完成 |
+| Phase 3 | Pipeline 重构 ProcessLoop（三级退避出队） | ✅ 已完成 |
+| Phase 4 | PipelineController 集成（CollectPool + SinkPool） | ✅ 已完成 |
+| Phase 5 | 配置 + 构建 | ✅ 已完成 |
+| Phase 6 | FeatureManager 按需启停管理 | ✅ 已完成 |
+| Phase 7 | 自动注入 StreamSink + WebSocketSink + RecordingSink | ✅ 已完成 |
+| Phase 8 | 优雅停机 Drain 流程 | ✅ 已完成 |
+| Phase 9 | 过载保护 + 资源限制检查 | ✅ 已完成 |
 
-总改动量: ~300 行新增, ~200 行删除, ~100 行修改
+**全部实施完成**（2026-05）
