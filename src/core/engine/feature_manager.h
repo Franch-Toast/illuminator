@@ -36,14 +36,17 @@
 
 namespace illuminator {
 
-class WebSocketManager;
-
+// FeatureState — Feature 生命周期状态机
+// 状态转换路径：
+//   Inactive → Starting → Active ⇄ Paused
+//                ↓            ↓         ↓
+//                └────────────┴─→ Stopping → Inactive
 enum class FeatureState {
-    kInactive,
-    kStarting,
-    kActive,
-    kPaused,
-    kStopping,
+    kInactive,   // 未激活（初始状态，或停止后恢复到此状态）
+    kStarting,   // 启动中（Pipeline 正在创建，避免重复启动）
+    kActive,     // 运行中（Pipeline 正常采集并处理数据）
+    kPaused,     // 暂停（Pipeline 线程仍在运行，但定时器已取消，不采集数据）
+    kStopping,   // 停止中（Pipeline 正在销毁，定时器已取消）
 };
 
 inline const char* FeatureStateToString(FeatureState s) {
@@ -57,43 +60,54 @@ inline const char* FeatureStateToString(FeatureState s) {
     return "unknown";
 }
 
+// FeatureTier — Feature 资源消耗等级
+// 用于前端自动启动策略和资源预算管理：
+//   Tier 1 (Monitoring): 纯 procfs 读取，CPU < 0.5%，切换标签页时自动启动
+//   Tier 2 (Tracing):    轻量 eBPF + procfs，CPU 1-3%，自动启动
+//   Tier 3 (Profiling):  高频采样，CPU 3-10%，需手动触发（必须指定 target_pids）
 enum class FeatureTier {
-    kMonitoring = 1,  // Tier 1: procfs reading, < 0.5% CPU, auto-start on tab enter
-    kTracing = 2,     // Tier 2: lightweight eBPF + procfs, 1-3% CPU, auto-start
-    kProfiling = 3,   // Tier 3: high-frequency sampling, 3-10% CPU, manual trigger
+    kMonitoring = 1,  // Tier 1: 纯 procfs 读取，极低开销
+    kTracing = 2,     // Tier 2: 轻量 eBPF + procfs，中等开销
+    kProfiling = 3,   // Tier 3: 高频采样，高开销，需手动触发
 };
 
+// FeatureConfig — 静态配置（注册时设定，不会运行时改变）
 struct FeatureConfig {
-    std::string name;
-    std::string display_name;
-    std::string category;
-    FeatureTier tier = FeatureTier::kMonitoring;
-    PipelineConfig pipeline;
-    uint32_t window_sec = 60;
+    std::string name;             // 内部标识名（如 "cpu_utilization"）
+    std::string display_name;     // 前端显示名
+    std::string category;         // 分类（如 "cpu", "memory", "io"）
+    FeatureTier tier = FeatureTier::kMonitoring;  // 资源消耗等级
+    PipelineConfig pipeline;      // 对应的 Pipeline 配置
 };
 
+// FeatureInfo — 运行时状态快照（ListFeatures 返回）
 struct FeatureInfo {
     std::string name;
     std::string display_name;
     std::string category;
     FeatureTier tier = FeatureTier::kMonitoring;
-    FeatureState state;
-    bool is_recording = false;
-    uint64_t batches_processed = 0;
-    uint64_t records_processed = 0;
-    uint64_t errors = 0;
-    uint64_t uptime_ms = 0;
+    FeatureState state;           // 当前生命周期状态
+    bool is_recording = false;    // 是否正在录制
+    uint64_t batches_processed = 0;  // 已处理批次数
+    uint64_t records_processed = 0;  // 已处理记录数
+    uint64_t errors = 0;             // 错误计数
+    uint64_t uptime_ms = 0;          // 运行时长（毫秒）
 };
 
 class FeatureManager {
 public:
+    // 状态变更回调类型：当 Feature 状态变化时通知外部（如 WebSocket 推送）
     using StateChangeCallback = std::function<void(const std::string& feature,
                                                     FeatureState from,
                                                     FeatureState to)>;
 
+    // 构造：传入 PipelineController 引用，共享基础设施（TimerWheel、CollectPool、SinkPool）
     explicit FeatureManager(PipelineController& controller)
         : controller_(controller) {}
 
+    // ---- RegisterFeature — 注册 Feature 配置（启动前调用） ----
+    // 将 Feature 的静态配置注册到内部 map，初始状态为 kInactive。
+    // 此方法只注册，不启动 Pipeline。
     void RegisterFeature(FeatureConfig config) {
         std::unique_lock lock(mutex_);
         auto& entry = features_[config.name];
@@ -102,11 +116,16 @@ public:
         IL_INFO("Feature registered: {}", entry.config.name);
     }
 
+    // StartParams — 启动参数（运行时传入，可覆盖配置中的 target_pids）
     struct StartParams {
-        std::vector<uint32_t> target_pids;
-        std::vector<std::string> target_comms;
+        std::vector<uint32_t> target_pids;      // 目标进程 PID 列表
+        std::vector<std::string> target_comms;  // 目标进程名列表
     };
 
+    // ---- Start — 启动 Feature ----
+    // 状态转换：Inactive/Paused → Starting → Active
+    // 如果已 Active 且传入了新的 target_pids，则在线重配置过滤器（不重启）
+    // 安全保护：Tier 3 (Profiling) 必须指定 target_pids，防止系统级采样导致死机
     Status Start(const std::string& name, const StartParams& params = {}) {
         std::unique_lock lock(mutex_);
         auto it = features_.find(name);
@@ -134,6 +153,7 @@ public:
         }
 
         // Safety: Tier 3 profiling features MUST have target_pids
+        // 安全检查：Tier 3 (Profiling) 必须指定 target_pids，防止系统级采样
         if (entry.config.tier == FeatureTier::kProfiling &&
             params.target_pids.empty() &&
             entry.config.pipeline.source.config["target_pids"].AsString("").empty()) {
@@ -165,6 +185,9 @@ public:
         return Status::Ok();
     }
 
+    // ---- ReconfigureFilter — 在线更新过滤器（不重启 Pipeline） ----
+    // 更新 Source 的 target_pids / target_comms，并清除 StreamSinkStore 旧数据。
+    // 使用 shared_lock 读锁，允许并发查询但不允许并发修改。
     Status ReconfigureFilter(const std::string& name, const StartParams& params) {
         std::shared_lock lock(mutex_);
         auto it = features_.find(name);
@@ -198,6 +221,9 @@ public:
         return st;
     }
 
+    // ---- Stop — 停止 Feature ----
+    // 状态转换：Active/Paused → Stopping → Inactive
+    // 步骤：取消 TimerWheel 定时器 → Pipeline::Stop() → 清理 RecordingSink → 清理 StreamSink
     Status Stop(const std::string& name) {
         std::unique_lock lock(mutex_);
         auto it = features_.find(name);
@@ -232,6 +258,10 @@ public:
         return Status::Ok();
     }
 
+    // ---- Pause — 暂停 Feature（Pipeline 线程仍在运行，但取消定时器） ----
+    // 状态转换：Active → Paused
+    // 取消所有 TimerWheel 定时器（Collect 和 Flush），但 Pipeline 线程保持运行。
+    // 这允许快速恢复（Resume 只需重新注册定时器，无需重建 Pipeline）。
     Status Pause(const std::string& name) {
         std::unique_lock lock(mutex_);
         auto it = features_.find(name);
@@ -251,6 +281,8 @@ public:
         return Status::Ok();
     }
 
+    // ---- Resume — 恢复 Feature（重新注册定时器） ----
+    // 状态转换：Paused → Active
     Status Resume(const std::string& name) {
         std::unique_lock lock(mutex_);
         auto it = features_.find(name);
@@ -265,6 +297,8 @@ public:
         return ResumeInternal(entry);
     }
 
+    // ---- ListFeatures — 列出所有 Feature 运行时快照 ----
+    // 使用 shared_lock 读锁，允许并发读取。
     std::vector<FeatureInfo> ListFeatures() const {
         std::shared_lock lock(mutex_);
         std::vector<FeatureInfo> result;
@@ -280,6 +314,9 @@ public:
                 info.batches_processed = entry.pipeline->BatchesProcessed();
                 info.records_processed = entry.pipeline->RecordsProcessed();
                 info.errors = entry.pipeline->ErrorCount();
+                // 通过 RecordingSinkRegistry 查询录制状态
+                auto rec_sink = RecordingSinkRegistry::Instance().Get(name);
+                info.is_recording = rec_sink && rec_sink->IsRecording();
                 if (entry.state == FeatureState::kActive ||
                     entry.state == FeatureState::kPaused) {
                     auto elapsed = std::chrono::steady_clock::now() - entry.started_at;
@@ -306,10 +343,14 @@ public:
         return it->second.pipeline.get();
     }
 
+    // ---- SetStateChangeCallback — 设置状态变更回调（供 WebSocketManager 使用） ----
+    // 当 Feature 状态变化时，通过此回调推送到 WebSocket 客户端。
     void SetStateChangeCallback(StateChangeCallback cb) {
         state_callback_ = std::move(cb);
     }
 
+    // ---- StopAll — 停止所有活跃 Feature ----
+    // 先收集所有活跃 Feature 名（读锁），再逐个 Stop（写锁）。
     void StopAll() {
         std::vector<std::string> active_features;
         {
@@ -327,15 +368,24 @@ public:
     }
 
 private:
+    // FeatureEntry — 内部存储结构
+    // 每个注册的 Feature 对应一个 entry，包含配置、运行时状态和 Pipeline 实例。
     struct FeatureEntry {
         FeatureConfig config;
         FeatureState state = FeatureState::kInactive;
-        std::unique_ptr<Pipeline> pipeline;
-        std::chrono::steady_clock::time_point started_at;
-        std::vector<uint32_t> timer_ids;
-        bool paused = false;
+        std::unique_ptr<Pipeline> pipeline;          // Pipeline 实例（拥有所有权）
+        std::chrono::steady_clock::time_point started_at;  // 启动时间戳
+        std::vector<uint32_t> timer_ids;             // 已注册的 TimerWheel 定时器 ID 列表
     };
 
+    // ---- CreateAndStartPipeline — 创建并启动 Pipeline 实例 ----
+    // 从 FeatureConfig 创建完整的 Pipeline，包括：
+    //   1. 通过 PluginRegistry 创建 Source/Processor/Sink 插件
+    //   2. 自动注入 StreamSink（/collect API 拉取）和 WebSocketSink（实时推送）
+    //   3. 自动注入 RecordingSink（录制）并注册到全局 Registry
+    //   4. 注册 Pull Source 采集定时器到 TimerWheel（Push Source 不需要）
+    //   5. 注册 Aggregator 刷盘定时器到 TimerWheel
+    //   6. 启动 Pipeline
     Status CreateAndStartPipeline(const std::string& name,
                                    const StartParams& params = {}) {
         std::shared_lock lock(mutex_);
@@ -358,6 +408,7 @@ private:
         }
 
         // Merge runtime params into source config (target_pids override)
+        // 运行时参数合并到 Source 配置中（target_pids 覆盖配置中的默认值）
         ConfigValue source_cfg = cfg.source.config;
         if (!params.target_pids.empty()) {
             std::string pid_str;
@@ -397,7 +448,7 @@ private:
             }
         }
 
-        // 自动注入 StreamSink 用于 /collect API 数据拉取
+        // 自动注入 StreamSink（/collect API 拉取）和 WebSocketSink（实时推送）和 RecordingSink（录制）
         auto stream_sink = std::make_unique<StreamSink>();
         stream_sink->SetFeatureName(name);
         pipeline->AddSink(std::move(stream_sink));
@@ -497,7 +548,6 @@ private:
             timer.Cancel(tid);
         }
         entry.timer_ids.clear();
-        entry.paused = true;
     }
 
     Status ResumeInternal(FeatureEntry& entry) {
@@ -531,7 +581,6 @@ private:
         }
 
         entry.state = FeatureState::kActive;
-        entry.paused = false;
         NotifyStateChange(name, FeatureState::kPaused, FeatureState::kActive);
         return Status::Ok();
     }

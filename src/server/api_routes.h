@@ -25,12 +25,16 @@ namespace illuminator {
 
 static constexpr const char* kIlluminatorVersion = kBuildVersion;
 
+// JsonError — 统一 JSON 错误响应
 inline void JsonError(httplib::Response& res, const std::string& msg,
                       int status = 500) {
     res.status = status;
     res.set_content(json{{"error", msg}}.dump() + "\n", "application/json");
 }
 
+// SetupAuthMiddleware — 设置认证中间件
+// 拦截所有 /api/ 路径的请求，验证 Authorization: Bearer <token> 头。
+// /healthz 和 /metrics 不需要认证。
 inline void SetupAuthMiddleware(httplib::Server& srv,
                                 const std::string& auth_token) {
     if (auth_token.empty()) return;
@@ -61,9 +65,13 @@ inline void SetupAuthMiddleware(httplib::Server& srv,
         });
 }
 
+// RegisterApiRoutes — 注册核心 API 路由
+// 包括：/healthz、/api/v1/pipelines、/api/v1/pipelines/:name/collect、
+//       /api/v1/channel_stats、/api/v1/query、/metrics 等
 inline void RegisterApiRoutes(httplib::Server& srv,
                               PipelineController& controller,
                               FeatureManager* features = nullptr) {
+    // ---- 健康检查 ----
     srv.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(
             json{{"status", "ok"}, {"version", kIlluminatorVersion},
@@ -71,6 +79,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
             "application/json");
     });
 
+    // ---- 管道列表（包含 Controller 和 FeatureManager 管理的管道） ----
     srv.Get("/api/v1/pipelines",
             [&controller, features](const httplib::Request&, httplib::Response& res) {
                 json arr = json::array();
@@ -97,6 +106,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     });
                 }
 
+                // 包含 FeatureManager 管理的活跃 Feature 管道
                 // Include active feature-managed pipelines
                 json active_arr = json::array();
                 if (features) {
@@ -124,6 +134,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     "application/json");
             });
 
+    // ---- 管道数据采集（同步阻塞，已废弃，推荐使用 /api/v1/features/:name/collect） ----
     auto pipeline_collect = [&controller](const std::string& pipeline_name,
                                            httplib::Response& res) {
         auto* pipe = controller.GetPipeline(pipeline_name);
@@ -160,6 +171,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 pipeline_collect(req.path_params.at("name"), res);
             });
 
+    // ---- 已废弃的旧 API 端点（重定向到 feature API） ----
     auto deprecated_alias = [pipeline_collect](
             const std::string& feature_name,
             const httplib::Request&, httplib::Response& res) {
@@ -191,6 +203,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 deprecated_alias("sched_analysis", req, res);
             });
 
+    // ---- 已废弃：旧 QueryExtra 端点（推荐使用 /api/v1/features/:name/collect） ----
     // QueryExtra endpoints (deprecated — prefer /api/v1/features/:name/collect for standard data)
     auto query_handler = [&controller](const std::string& pipeline_name,
                                         const std::string& query_name,
@@ -230,6 +243,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 query_handler("sched_analysis", "wakeups", req, res);
             });
 
+    // ---- Channel 统计端点（所有管道的通道指标） ----
     // Channel stats endpoint
     srv.Get("/api/v1/channel_stats",
             [&controller](const httplib::Request&, httplib::Response& res) {
@@ -255,6 +269,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     "application/json");
             });
 
+    // ---- SQL 查询端点（只读，仅允许 SELECT 和 PRAGMA） ----
     // SQL Query endpoint — executes read-only SQL against the storage backend
     srv.Post("/api/v1/query",
             [&controller](const httplib::Request& req, httplib::Response& res) {
@@ -291,6 +306,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 }
             });
 
+    // ---- 指标端点（Prometheus 格式和 JSON 格式） ----
     // Metrics endpoints
     srv.Get("/metrics", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(InternalMetrics::Instance().ExportPrometheus(),
@@ -303,10 +319,29 @@ inline void RegisterApiRoutes(httplib::Server& srv,
 }
 
 // ============================================================================
-// Feature API — 按需启停 + 实时流控制
+// Feature API — 按需启停 + 实时流控制 + 录制
 // ============================================================================
+// 提供 Feature 的完整生命周期管理 API：
+//   - /api/v1/features               — 列出所有 Feature
+//   - /api/v1/features/:name/start   — 启动 Feature
+//   - /api/v1/features/:name/stop    — 停止 Feature
+//   - /api/v1/features/:name/pause   — 暂停 Feature
+//   - /api/v1/features/:name/resume  — 恢复 Feature
+//   - /api/v1/features/:name/reconfigure — 在线更新过滤条件
+//   - /api/v1/features/:name/collect — 拉取最新数据
+//   - /api/v1/features/:name/stream  — 增量数据拉取（支持 cursor）
+//   - /api/v1/features/:name/record/start — 开始录制
+//   - /api/v1/features/:name/record/stop  — 停止录制
+//   - /api/v1/features/:name/record/status — 录制状态
+//   - /api/v1/budget                  — 资源预算查询
+//   - /api/v1/recording/start         — 全局开始录制
+//   - /api/v1/recording/stop          — 全局停止录制
+//   - /api/v1/recording/status        — 全局录制状态
+//   - /api/v1/plugins/reload          — 插件热重载
+//   - /api/v1/plugins                 — 插件列表
 inline void RegisterFeatureRoutes(httplib::Server& srv,
                                    FeatureManager& features) {
+    // ---- 列出所有 Feature ----
     srv.Get("/api/v1/features",
             [&features](const httplib::Request&, httplib::Response& res) {
                 auto list = features.ListFeatures();
@@ -330,6 +365,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     "application/json");
             });
 
+    // ---- 启动 Feature ----
     srv.Post("/api/v1/features/:name/start",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -419,6 +455,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // ---- 在线重配置过滤条件（不重启 Pipeline） ----
     // Runtime filter reconfiguration (update target_pids without restart)
     srv.Post("/api/v1/features/:name/reconfigure",
              [&features](const httplib::Request& req, httplib::Response& res) {
@@ -465,6 +502,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // ---- 拉取最新数据（从 StreamSinkStore 读取，不干扰 Pipeline 采集） ----
     srv.Get("/api/v1/features/:name/collect",
             [&features](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.path_params.at("name");
@@ -489,6 +527,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     "application/json");
             });
 
+    // ---- 增量数据拉取（支持 cursor 参数避免重复消费） ----
     // 增量数据拉取（支持 cursor 参数避免重复消费）
     srv.Get("/api/v1/features/:name/stream",
             [](const httplib::Request& req, httplib::Response& res) {
@@ -512,6 +551,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                 res.set_content(j.dump() + "\n", "application/json");
             });
 
+    // ---- 录制 API（开始 / 停止 / 状态） ----
     // === 录制 API ===
     srv.Post("/api/v1/features/:name/record/start",
              [](const httplib::Request& req, httplib::Response& res) {
@@ -578,6 +618,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                 res.set_content(j.dump() + "\n", "application/json");
             });
 
+    // ---- 资源预算查询（当前资源使用 vs 限制） ----
     // === Resource Budget API ===
     srv.Get("/api/v1/budget",
             [&features](const httplib::Request&, httplib::Response& res) {

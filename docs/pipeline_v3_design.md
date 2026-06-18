@@ -171,58 +171,114 @@ TimerWheel 内部三大组件：
 
 **改造点**: 将 `LockFreeQueue<DataBatchPtr>` 扩展为 `LockFreeQueue<ChannelItem>`，支持数据和 sentinel 两种消息。
 
-```cpp
-// src/core/engine/async_channel.h
+**核心设计**: 事件多态 + 三级自适应退避 + 滞后反压 + 丢包策略。
 
-namespace illuminator {
+```
+AsyncChannel 内部结构：
 
-// FlushSentinel: 无载荷信号，占 1 字节
-struct FlushSentinel {};
+┌──────────────────────────────────────────────────────────────────┐
+│                        AsyncChannel                              │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  LockFreeQueue<ChannelItem> (无锁环形缓冲区)                │  │
+│  │                                                            │  │
+│  │  variant<DataBatchPtr, FlushSentinel>                     │  │
+│  │  ┌────┬────┬────┬────┬────┬────┬────┬────┬────┬────┐      │  │
+│  │  │ D1 │ D2 │  F │ D3 │ D4 │  F │ D5 │ D6 │ D7 │  F │ ...  │  │
+│  │  └────┴────┴────┴────┴────┴────┴────┴────┴────┴────┘      │  │
+│  │   D=DataBatch(指标/堆栈)  F=FlushSentinel(刷盘信号)         │  │
+│  │                                                            │  │
+│  │  容量: 默认 4096 (对齐到 2 的幂)                            │  │
+│  │  内存: 4096 × 32B ≈ 128KB                                 │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  生产端:                         消费端:                          │
+│  ┌──────────────┐               ┌──────────────────────────┐    │
+│  │ TryEnqueue() │               │ Dequeue() 三级退避        │    │
+│  │              │               │                          │    │
+│  │ 1. CAS 推入  │               │ Phase 1: Spin 16 次      │    │
+│  │ 2. 满→丢包   │               │ Phase 2: Yield 8 次      │    │
+│  │ 3. 更新反压  │               │ Phase 3: Sleep 1ms×N     │    │
+│  └──────────────┘               └──────────────────────────┘    │
+│                                                                  │
+│  ┌──────────────┐               ┌──────────────────────────┐    │
+│  │ InjectFlush()│               │ TryDequeue() 非阻塞       │    │
+│  │              │               │                          │    │
+│  │ 优先级高于   │               │ 用于 Drain 优雅停机      │    │
+│  │ 普通数据     │               │ 立即返回，不等待         │    │
+│  │ 队列满时驱逐 │               └──────────────────────────┘    │
+│  │ 旧数据腾空间 │                                               │
+│  └──────────────┘                                               │
+│                                                                  │
+│  反压机制 (滞后设计):                                             │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  [空] ──────→ 20% (low) ──────→ 80% (high) ──────→ [满]  │  │
+│  │   ↑              ↑                  ↑               ↑      │  │
+│  │   正常         解除反压          触发反压         全部丢弃   │  │
+│  │                                                            │  │
+│  │  滞后 (hysteresis) 避免在阈值附近反复震荡：                  │  │
+│  │  - 进入反压: 超过 80% (high watermark)                     │  │
+│  │  - 退出反压: 低于 20% (low watermark)                      │  │
+│  │  - 在 20%-80% 之间: 保持当前状态不变                        │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+```
 
-// ChannelItem: channel 中传输的两种消息类型
-using ChannelItem = std::variant<DataBatchPtr, FlushSentinel>;
+**三级自适应退避详解**:
 
-template <size_t Capacity = 4096>
-class AsyncChannel {
-public:
-    struct Stats {
-        std::atomic<uint64_t> enqueued{0};
-        std::atomic<uint64_t> dropped{0};
-        std::atomic<uint64_t> dequeued{0};
-        std::atomic<uint64_t> flush_injected{0};
-        std::atomic<uint64_t> backpressure_events{0};
-    };
+```
+数据到达频率高           数据到达频率中           数据到达频率低/空队列
+      │                        │                        │
+Phase 1: Spin 16次     Phase 2: Yield 8次      Phase 3: Sleep 1ms×N
+      │                        │                        │
+  ┌───▼────┐            ┌─────▼─────┐           ┌──────▼──────┐
+  │ 忙等    │            │ 让出 CPU  │           │ 睡眠 1ms    │
+  │ 不间断  │            │ 给其他线程 │           │ 期间检查    │
+  │ TryPop  │            │ TryPop    │           │ TryPop      │
+  └───┬────┘            └─────┬─────┘           └──────┬──────┘
+      │                       │                        │
+   延迟: ~几十ns            延迟: ~几μs              延迟: ~几ms
+   开销: 100% CPU           开销: 让出 CPU           开销: 接近 0% CPU
+```
 
-    explicit AsyncChannel(DropPolicy policy = DropPolicy::kDropNewest,
-                          double high_wm = 0.8, double low_wm = 0.2);
+| 退避阶段 | 策略 | 尝试次数 | 延迟 | CPU 开销 | 适用场景 |
+|---------|------|---------|------|---------|---------|
+| Phase 1 | Spin（忙等） | 16 次 | ~几十纳秒 | 100% 单核 | 高频数据（eBPF 事件流） |
+| Phase 2 | Yield（让出 CPU） | 8 次 | ~几微秒 | 低 | 中频数据（procfs 采集） |
+| Phase 3 | Sleep（睡眠） | 直到超时 | ~几毫秒 | ~0% | 低频/空队列（空闲管道） |
 
-    // 数据入队（生产端）
-    bool TryEnqueue(DataBatchPtr batch);
-    
-    // Sentinel 注入（TimerWheel 回调）
-    // Sentinel 不受 drop 策略影响 — 总是成功入队或替换最旧数据
-    bool InjectFlush();
-    
-    // 消费端：阻塞出队
-    std::optional<ChannelItem> Dequeue(std::chrono::milliseconds timeout);
-    
-    // 消费端：非阻塞出队
-    std::optional<ChannelItem> TryDequeue();
-    
-    bool IsBackpressured() const;
-    size_t SizeApprox() const;
-    static constexpr size_t capacity() { return Capacity; }
-    const Stats& stats() const { return stats_; }
+**丢包策略对比**:
 
-private:
-    void UpdateBackpressure();
-    
-    LockFreeQueue<ChannelItem, Capacity> queue_;
-    Stats stats_;
-    std::atomic<bool> backpressured_{false};
-    DropPolicy drop_policy_;
-    double high_wm_, low_wm_;
-};
+| 策略 | 行为 | 适用场景 |
+|------|------|---------|
+| `kDropNewest` | 拒绝新数据，保留旧数据 | 数据新鲜度优先，历史数据更有价值 |
+| `kDropOldest` | 弹出旧数据，为新数据腾空间 | 最新数据优先，旧数据可以被丢弃 |
+
+**InjectFlush 优先级设计**:
+
+```
+普通数据入队 (TryEnqueue):
+  队列满 → 根据丢包策略决定（丢弃或驱逐）
+
+FlushSentinel 入队 (InjectFlush):
+  队列满 → 驱逐一个旧数据（无论策略） → 重新尝试入队
+  Sentinel 是控制信号，必须送达，否则 Aggregator 中的数据永远无法刷出
+```
+
+**反压信号传递链**:
+
+```
+AsyncChannel::UpdateBackpressure()
+  → backpressured_ = true
+      ↓
+Pipeline::Enqueue() 检测到 backpressured_ 状态变化
+  → source_->OnBackpressure(true)
+      ↓
+SourcePlugin::OnBackpressure()
+  → 降低采集频率 / 丢弃低优先级数据
+      ↓
+队列水位下降 → UpdateBackpressure() → backpressured_ = false
+  → source_->OnBackpressure(false) → 恢复正常采集
 ```
 
 **variant 对 LockFreeQueue 的影响分析**:
@@ -234,29 +290,6 @@ sizeof(ChannelItem) = sizeof(variant<16B, 1B>) = 24 bytes (含 discriminant + pa
 
 每个 Cell = atomic<size_t>(8B) + ChannelItem(24B) = 32 bytes
 总内存 = 4096 × 32 = 128 KB (与之前相同量级，可接受)
-```
-
-**InjectFlush 的优先级保证**:
-
-```cpp
-bool AsyncChannel::InjectFlush() {
-    ChannelItem item = FlushSentinel{};
-    if (queue_.TryPush(std::move(item))) {
-        stats_.flush_injected.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
-    // 队列满时，丢弃一个旧数据腾出空间给 Sentinel
-    // flush 事件优先级高于普通数据
-    ChannelItem discarded;
-    if (queue_.TryPop(discarded)) {
-        stats_.dropped.fetch_add(1, std::memory_order_relaxed);
-    }
-    if (queue_.TryPush(std::move(item))) {
-        stats_.flush_injected.fetch_add(1, std::memory_order_relaxed);
-        return true;
-    }
-    return false;
-}
 ```
 
 ### 4.3 ProcessThread — 纯事件处理器

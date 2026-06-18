@@ -23,15 +23,36 @@
 
 namespace illuminator {
 
+// WebSocket 广播序列化器类型：将 pipeline_key + DataBatch 序列化为 JSON 字符串
 using WsBroadcastSerializer =
     std::function<std::string(const std::string& pipeline_key, DataBatchPtr batch)>;
 
+// ============================================================================
+// WebSocketManager — WebSocket 连接管理与数据广播
+// ============================================================================
+// 职责：
+//   1. 管理 WebSocket 连接（接受新连接、维护连接池、处理断开）
+//   2. 按管道订阅分组（一个 WebSocket 连接订阅一个 pipeline_key）
+//   3. 定期广播：从 WebSocketSinkStore 拉取最新数据，推送到所有订阅客户端
+//   4. 支持两种模式：独立端口监听（Legacy）和 HTTP 同端口升级（推荐）
+//   5. 处理 WebSocket 控制帧（Ping/Pong/Close）
+//
+// 线程模型：
+//   - ws-broadcast 线程：定期广播 + 处理入站消息（poll + 非阻塞）
+//   - ws-accept 线程：接受新连接（仅独立端口模式）
+//
+// 广播去重：如果数据与上次广播相同，跳过（避免推送重复数据）
+// ============================================================================
 class WebSocketManager {
 public:
+    // ---- 配置 ----
     void SetBroadcastInterval(int ms) { broadcast_interval_ms_ = ms; }
     void SetSerializer(WsBroadcastSerializer fn) { serializer_ = std::move(fn); }
     void SetAuthToken(const std::string& token) { auth_token_ = token; }
 
+    // ---- AddConnection — 添加 WebSocket 连接（HTTP 升级后调用） ----
+    // 从 URL 路径中提取 pipeline_key（如 /ws/cpu_util → "cpu_util"），
+    // 建立 fd → pipeline_key 的映射，记录到订阅表。
     void AddConnection(int fd, const std::string& subscribe_path) {
         std::string key = PathToPipelineKey(subscribe_path);
         IL_INFO("WebSocket: new connection fd={} subscribe={}", fd, key);
@@ -41,6 +62,9 @@ public:
         subscriptions_[key].insert(fd);
     }
 
+    // ---- HandleUpgrade — 处理 HTTP WebSocket 升级请求（同端口模式） ----
+    // 从 HTTP 请求中提取升级请求，验证认证，执行 WebSocket 握手，添加连接。
+    // 返回 true 表示升级成功（调用者不能关闭 fd），false 表示失败（调用者应关闭 fd）。
     // Handle a WebSocket upgrade from the HTTP server (same-port mode).
     // Returns true if the connection was accepted (caller must NOT close fd).
     bool HandleUpgrade(int fd, const std::string& raw_request) {
@@ -57,6 +81,9 @@ public:
         return true;
     }
 
+    // ---- Listen — 独立端口监听模式（Legacy） ----
+    // 创建 TCP socket，绑定到指定地址和端口，开始监听。
+    // 推荐使用同端口升级模式（HandleUpgrade），此方法仅保留兼容。
     // Legacy: listen on a separate port. Optional — prefer same-port via
     // HttpServer::SetWebSocketUpgradeHandler + HandleUpgrade.
     bool Listen(const std::string& addr, int port) {
@@ -85,6 +112,8 @@ public:
         return true;
     }
 
+    // ---- Start — 启动 WebSocket 服务 ----
+    // 启动广播线程（ws-broadcast）和（可选）接受线程（ws-accept）。
     void Start() {
         running_.store(true);
         thread_ = std::thread([this] {
@@ -101,6 +130,8 @@ public:
         IL_INFO("WebSocketManager started (interval={}ms)", broadcast_interval_ms_);
     }
 
+    // ---- Stop — 停止 WebSocket 服务 ----
+    // 停止广播线程和接受线程，关闭监听 socket，发送 Close 帧并关闭所有连接。
     void Stop() {
         running_.store(false);
         if (ws_fd_ >= 0) {
@@ -127,11 +158,17 @@ public:
     }
 
 private:
+    // ConnInfo — 每个 WebSocket 连接的状态信息
     struct ConnInfo {
-        std::string pipeline_key;
-        std::vector<uint8_t> recv_buf;
+        std::string pipeline_key;         // 订阅的管道标识
+        std::vector<uint8_t> recv_buf;    // 接收缓冲区（WebSocket 帧可能分片到达）
     };
 
+    // ---- BroadcastLoop — 广播主循环（ws-broadcast 线程） ----
+    // 每个广播周期执行：
+    //   1. ProcessIncoming() — 处理客户端入站消息（ping/pong/close/subscribe）
+    //   2. BroadcastData() — 从 WebSocketSinkStore 拉取最新数据，推送到所有订阅客户端
+    //   3. sleep(broadcast_interval_ms_) — 等待下一个周期
     void BroadcastLoop() {
         while (running_.load()) {
             ProcessIncoming();
@@ -142,6 +179,13 @@ private:
         }
     }
 
+    // ---- ProcessIncoming — 处理客户端入站消息 ----
+    // 使用 poll(POLLIN) 非阻塞检查所有连接的可读状态。
+    // 支持的 WebSocket 帧类型：
+    //   - Ping  → 回复 Pong
+    //   - Close  → 移除连接
+    //   - Text  → 处理订阅消息（subscribe:xxx）
+    // 连接断开时（read 返回 <= 0），自动移除。
     void ProcessIncoming() {
         std::vector<struct pollfd> pfds;
         std::vector<int> fd_list;
@@ -208,6 +252,9 @@ private:
             RemoveConnection(fd);
     }
 
+    // ---- HandleTextMessage — 处理文本消息（订阅切换） ----
+    // 消息格式：subscribe:<pipeline_key>
+    // 支持运行时切换订阅，先取消旧订阅，再建立新订阅。
     // REQUIRES: mu_ already held by caller (ProcessIncoming)
     void HandleTextMessage(int fd, const std::string& msg) {
         if (msg.find("subscribe:") == 0) {
@@ -222,6 +269,13 @@ private:
         }
     }
 
+    // ---- BroadcastData — 数据广播（三阶段） ----
+    // Phase 1（加锁）：快照当前订阅表，复制 fd 列表
+    // Phase 2（无锁）：遍历每个 pipeline_key，从 WebSocketSinkStore 获取最新数据
+    //                → 去重（与上次广播的数据相同则跳过）
+    //                → 序列化 → 写入所有订阅的 fd
+    //                → 记录写入失败的 fd（死连接）
+    // Phase 3（加锁）：清理死连接
     void BroadcastData() {
         // Phase 1 (locked): snapshot current subscriptions
         std::unordered_map<std::string, std::vector<int>> snapshot;
@@ -286,12 +340,16 @@ private:
         IL_DEBUG("WebSocket: removed connection fd={}", fd);
     }
 
+    // ---- PathToPipelineKey — 从 URL 路径提取 pipeline_key ----
+    // 如 /ws/cpu_utilization → "cpu_utilization"，/ws/ → "default"
     static std::string PathToPipelineKey(const std::string& path) {
         if (path.size() > 4 && path.substr(0, 4) == "/ws/")
             return path.substr(4);
         return "default";
     }
 
+    // ---- ValidateAuth — 验证 WebSocket 连接的认证 ----
+    // 支持两种方式：Authorization: Bearer <token> 头，或 ?token=<token> 查询参数
     bool ValidateAuth(const std::string& request) const {
         if (auth_token_.empty()) return true;
 
@@ -304,6 +362,8 @@ private:
         return false;
     }
 
+    // ---- ExtractQueryParam — 从 HTTP 请求行中提取查询参数 ----
+    // 解析 GET /ws/cpu?token=xxx HTTP/1.1 中的 token 参数
     static std::string ExtractQueryParam(const std::string& request,
                                           const std::string& param) {
         auto sp1 = request.find(' ');
@@ -323,6 +383,8 @@ private:
         return (end == std::string::npos) ? query.substr(pos) : query.substr(pos, end - pos);
     }
 
+    // ---- AcceptLoop — 独立端口模式的连接接受循环（ws-accept 线程） ----
+    // 阻塞 accept 新连接，验证 WebSocket 升级请求，完成握手，添加连接。
     void AcceptLoop() {
         while (running_.load()) {
             struct sockaddr_in client_addr{};
