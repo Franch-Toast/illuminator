@@ -1,8 +1,56 @@
 // ============================================================================
 // Illuminator HTTP API 路由注册
 // ============================================================================
-// 将所有 REST API 端点注册到 httplib::Server。
-// 拆分自 main.cc，职责单一化。
+//
+// 【架构定位】
+// 本文件将所有 REST API 端点注册到 httplib::Server，是 Server 层的核心组件。
+// 拆分自 main.cc，职责单一化：API 路由注册与请求处理。
+//
+// 【文件结构】
+//   1. 基础工具函数（JsonError、SetupAuthMiddleware）
+//   2. RegisterApiRoutes() — 核心 API 路由
+//      - /healthz:                健康检查（无需认证）
+//      - /api/v1/pipelines:       管道列表（含 Controller 和 FeatureManager 管理的管道）
+//      - /api/v1/pipelines/:name/collect: 管道数据采集（已废弃，推荐使用 Feature API）
+//      - /api/v1/channel_stats:   通道统计（所有管道的 AsyncChannel 指标）
+//      - /api/v1/query:           SQL 查询（只读，仅允许 SELECT 和 PRAGMA）
+//      - /metrics:                Prometheus 格式指标
+//      - /api/v1/internal_metrics: JSON 格式内部指标
+//   3. RegisterFeatureRoutes() — Feature API 路由
+//      - /api/v1/features:               列出所有 Feature
+//      - /api/v1/features/:name/start:   启动 Feature
+//      - /api/v1/features/:name/stop:    停止 Feature
+//      - /api/v1/features/:name/pause:   暂停 Feature
+//      - /api/v1/features/:name/resume:  恢复 Feature
+//      - /api/v1/features/:name/reconfigure: 在线更新过滤条件
+//      - /api/v1/features/:name/collect: 拉取最新数据
+//      - /api/v1/features/:name/stream:  增量数据拉取（支持 cursor）
+//      - /api/v1/features/:name/record/start: 开始录制
+//      - /api/v1/features/:name/record/stop:  停止录制
+//      - /api/v1/features/:name/record/status: 录制状态
+//   4. 全局录制 API
+//      - /api/v1/recording/start: 全局开始录制
+//      - /api/v1/recording/stop:  全局停止录制
+//      - /api/v1/recording/status: 全局录制状态
+//   5. 插件 API
+//      - /api/v1/plugins/reload: 插件热重载
+//      - /api/v1/plugins:        插件列表
+//   6. 资源预算 API
+//      - /api/v1/budget: 资源预算查询
+//   7. Session API（Tier 3 profiling 会话管理）
+//      - /api/v1/sessions:       创建/列出 profiling 会话
+//      - /api/v1/sessions/stop:  停止 profiling 会话
+//   8. Export API
+//      - /api/v1/export: 导出环形缓冲区数据为 .ilr 文件
+//
+// 【认证机制】
+//   所有 /api/ 路径的请求都需要 Bearer Token 认证（通过 SetupAuthMiddleware 设置）。
+//   /healthz 和 /metrics 不需要认证。
+//
+// 【API 版本演进】
+//   旧版 API（/api/v1/cpu/*、/api/v1/pipelines/:name/collect）已标记为
+//   Deprecated，推荐使用 Feature API（/api/v1/features/*）。
+//   旧 API 返回 Deprecation 和 Sunset 头，提示客户端迁移。
 // ============================================================================
 
 #pragma once
@@ -25,28 +73,51 @@ namespace illuminator {
 
 static constexpr const char* kIlluminatorVersion = kBuildVersion;
 
+// ============================================================================
 // JsonError — 统一 JSON 错误响应
+// ============================================================================
+// 设置 HTTP 状态码和 JSON 格式的错误响应体。
+//
+// 响应格式：{"error": "<msg>"}
+//
+// 参数：
+//   res:    httplib::Response 引用
+//   msg:    错误消息
+//   status: HTTP 状态码（默认 500）
 inline void JsonError(httplib::Response& res, const std::string& msg,
                       int status = 500) {
     res.status = status;
     res.set_content(json{{"error", msg}}.dump() + "\n", "application/json");
 }
 
+// ============================================================================
 // SetupAuthMiddleware — 设置认证中间件
+// ============================================================================
+//
 // 拦截所有 /api/ 路径的请求，验证 Authorization: Bearer <token> 头。
-// /healthz 和 /metrics 不需要认证。
+// /healthz 和 /metrics 不需要认证（用于健康检查和 Prometheus 抓取）。
+//
+// 如果 auth_token 为空，表示不需要认证，中间件不生效。
+//
+// 参数：
+//   srv:        httplib::Server 引用
+//   auth_token: 认证 Token（空字符串表示不需要认证）
 inline void SetupAuthMiddleware(httplib::Server& srv,
                                 const std::string& auth_token) {
-    if (auth_token.empty()) return;
+    if (auth_token.empty()) return;  // 不需要认证
 
+    // 使用 pre_routing_handler 在所有路由处理之前拦截请求
     srv.set_pre_routing_handler(
         [auth_token](const httplib::Request& req, httplib::Response& res) {
+            // 健康检查和指标端点不需要认证
             if (req.path == "/healthz" || req.path == "/metrics") {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
+            // 非 API 路径不需要认证（如静态文件）
             if (req.path.find("/api/") != 0) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
+            // 验证 Authorization 头
             auto it = req.headers.find("Authorization");
             if (it == req.headers.end()) {
                 res.status = 401;
@@ -65,13 +136,24 @@ inline void SetupAuthMiddleware(httplib::Server& srv,
         });
 }
 
+// ============================================================================
 // RegisterApiRoutes — 注册核心 API 路由
-// 包括：/healthz、/api/v1/pipelines、/api/v1/pipelines/:name/collect、
-//       /api/v1/channel_stats、/api/v1/query、/metrics 等
+// ============================================================================
+//
+// 注册 Illuminator 的核心 API 端点，包括健康检查、管道状态、数据采集、
+// 通道统计、SQL 查询和指标等。
+//
+// 参数：
+//   srv:        httplib::Server 引用
+//   controller: PipelineController 引用（用于查询管道状态和采集数据）
+//   features:   FeatureManager 指针（可选，用于包含活跃 Feature 管道信息）
 inline void RegisterApiRoutes(httplib::Server& srv,
                               PipelineController& controller,
                               FeatureManager* features = nullptr) {
-    // ---- 健康检查 ----
+    // ========================================================================
+    // /healthz — 健康检查（无需认证）
+    // ========================================================================
+    // 返回版本号、commit hash 和运行状态。用于 Kubernetes 健康检查探针。
     srv.Get("/healthz", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(
             json{{"status", "ok"}, {"version", kIlluminatorVersion},
@@ -79,10 +161,22 @@ inline void RegisterApiRoutes(httplib::Server& srv,
             "application/json");
     });
 
-    // ---- 管道列表（包含 Controller 和 FeatureManager 管理的管道） ----
+    // ========================================================================
+    // /api/v1/pipelines — 管道列表
+    // ========================================================================
+    // 返回所有管道的状态信息，包括：
+    //   - PipelineController 管理的管道（来自 YAML 配置）
+    //   - FeatureManager 管理的活跃 Feature 管道（通过 features 参数）
+    //
+    // 响应格式：
+    //   {
+    //     "pipelines": [...],         // PipelineController 管理的管道
+    //     "active_features": [...]    // FeatureManager 管理的活跃 Feature
+    //   }
     srv.Get("/api/v1/pipelines",
             [&controller, features](const httplib::Request&, httplib::Response& res) {
                 json arr = json::array();
+                // PipelineController 管理的管道
                 for (auto& p : controller.Pipelines()) {
                     auto* src = p->GetSource();
                     arr.push_back({
@@ -106,8 +200,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     });
                 }
 
-                // 包含 FeatureManager 管理的活跃 Feature 管道
-                // Include active feature-managed pipelines
+                // FeatureManager 管理的活跃 Feature 管道
                 json active_arr = json::array();
                 if (features) {
                     for (const auto& f : features->ListFeatures()) {
@@ -134,7 +227,14 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // ---- 管道数据采集（同步阻塞，已废弃，推荐使用 /api/v1/features/:name/collect） ----
+    // ========================================================================
+    // /api/v1/pipelines/:name/collect — 管道数据采集（已废弃）
+    // ========================================================================
+    // 同步阻塞式采集，直接调用 Source::Collect() 并返回 JSON 数据。
+    // 已废弃，推荐使用 /api/v1/features/:name/collect（从 StreamSinkStore 读取，
+    // 不干扰 Pipeline 正常采集）。
+    //
+    // 返回 Deprecation、Sunset 和 Link 头，提示客户端迁移到新 API。
     auto pipeline_collect = [&controller](const std::string& pipeline_name,
                                            httplib::Response& res) {
         auto* pipe = controller.GetPipeline(pipeline_name);
@@ -171,7 +271,11 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 pipeline_collect(req.path_params.at("name"), res);
             });
 
-    // ---- 已废弃的旧 API 端点（重定向到 feature API） ----
+    // ========================================================================
+    // 已废弃的旧 API 端点（重定向到 feature API）
+    // ========================================================================
+    // 这些是早期版本的 API 端点，已迁移到 Feature API。
+    // 保留这些端点以兼容旧客户端，但返回 Deprecation 头提示迁移。
     auto deprecated_alias = [pipeline_collect](
             const std::string& feature_name,
             const httplib::Request&, httplib::Response& res) {
@@ -203,8 +307,10 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 deprecated_alias("sched_analysis", req, res);
             });
 
-    // ---- 已废弃：旧 QueryExtra 端点（推荐使用 /api/v1/features/:name/collect） ----
-    // QueryExtra endpoints (deprecated — prefer /api/v1/features/:name/collect for standard data)
+    // ========================================================================
+    // 已废弃的 QueryExtra 端点
+    // ========================================================================
+    // 推荐使用 /api/v1/features/:name/collect 获取标准数据。
     auto query_handler = [&controller](const std::string& pipeline_name,
                                         const std::string& query_name,
                                         const httplib::Request& req,
@@ -222,29 +328,43 @@ inline void RegisterApiRoutes(httplib::Server& srv,
         res.set_content(*result + "\n", "application/json");
     };
 
+    // Off-CPU 火焰图快照
     srv.Get("/api/v1/cpu/profile/offcpu/snapshot",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("offcpu_profile", "snapshot", req, res);
             });
+    // On-CPU 火焰图快照
     srv.Get("/api/v1/cpu/profile/oncpu/snapshot",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("cpu_profile", "snapshot", req, res);
             });
+    // 调度历史
     srv.Get("/api/v1/cpu/sched/history",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("sched_analysis", "history", req, res);
             });
+    // 调度事件
     srv.Get("/api/v1/cpu/sched/events",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("sched_analysis", "events", req, res);
             });
+    // 唤醒事件
     srv.Get("/api/v1/cpu/sched/wakeups",
             [query_handler](const httplib::Request& req, httplib::Response& res) {
                 query_handler("sched_analysis", "wakeups", req, res);
             });
 
-    // ---- Channel 统计端点（所有管道的通道指标） ----
-    // Channel stats endpoint
+    // ========================================================================
+    // /api/v1/channel_stats — 通道统计（所有管道的 AsyncChannel 指标）
+    // ========================================================================
+    // 返回每个管道的 AsyncChannel 统计信息，包括：
+    //   - capacity: 通道容量
+    //   - size: 当前队列大小
+    //   - utilization: 利用率（size / capacity）
+    //   - enqueued/dequeued/dropped: 入队/出队/丢包计数
+    //   - flush_injected: 注入的 FlushSignal 计数
+    //   - backpressure_events: 反压事件计数
+    //   - backpressured: 当前是否处于反压状态
     srv.Get("/api/v1/channel_stats",
             [&controller](const httplib::Request&, httplib::Response& res) {
                 json arr = json::array();
@@ -269,8 +389,18 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // ---- SQL 查询端点（只读，仅允许 SELECT 和 PRAGMA） ----
-    // SQL Query endpoint — executes read-only SQL against the storage backend
+    // ========================================================================
+    // /api/v1/query — SQL 查询端点（只读）
+    // ========================================================================
+    // 对存储后端执行只读 SQL 查询。仅允许 SELECT 和 PRAGMA 语句，
+    // 防止 INSERT/UPDATE/DELETE/DROP 等危险操作。
+    //
+    // 请求体：
+    //   {"query": "SELECT * FROM cpu_metrics WHERE timestamp > ..."}
+    //
+    // 安全机制：
+    //   - 检查 SQL 前 20 个字符是否包含 SELECT 或 PRAGMA
+    //   - 这是一种简单的安全检查，不是完整的 SQL 注入防护
     srv.Post("/api/v1/query",
             [&controller](const httplib::Request& req, httplib::Response& res) {
                 try {
@@ -280,7 +410,7 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                         JsonError(res, "missing 'query' field", 400);
                         return;
                     }
-                    // Basic safety: only allow SELECT queries
+                    // 安全检查：只允许 SELECT 和 PRAGMA 查询
                     std::string upper;
                     for (size_t i = 0; i < sql.size() && i < 20; ++i)
                         upper += static_cast<char>(std::toupper(sql[i]));
@@ -306,12 +436,19 @@ inline void RegisterApiRoutes(httplib::Server& srv,
                 }
             });
 
-    // ---- 指标端点（Prometheus 格式和 JSON 格式） ----
-    // Metrics endpoints
+    // ========================================================================
+    // /metrics — Prometheus 格式指标（无需认证）
+    // ========================================================================
+    // 返回 Prometheus 文本格式的指标数据，可供 Prometheus 直接抓取。
     srv.Get("/metrics", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(InternalMetrics::Instance().ExportPrometheus(),
                         "text/plain");
     });
+
+    // ========================================================================
+    // /api/v1/internal_metrics — JSON 格式内部指标
+    // ========================================================================
+    // 返回 JSON 格式的内部指标数据，用于调试和监控。
     srv.Get("/api/v1/internal_metrics", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(InternalMetrics::Instance().ExportJson() + "\n",
                         "application/json");
@@ -319,29 +456,33 @@ inline void RegisterApiRoutes(httplib::Server& srv,
 }
 
 // ============================================================================
-// Feature API — 按需启停 + 实时流控制 + 录制
+// RegisterFeatureRoutes — Feature API 路由
 // ============================================================================
-// 提供 Feature 的完整生命周期管理 API：
-//   - /api/v1/features               — 列出所有 Feature
-//   - /api/v1/features/:name/start   — 启动 Feature
-//   - /api/v1/features/:name/stop    — 停止 Feature
-//   - /api/v1/features/:name/pause   — 暂停 Feature
-//   - /api/v1/features/:name/resume  — 恢复 Feature
-//   - /api/v1/features/:name/reconfigure — 在线更新过滤条件
-//   - /api/v1/features/:name/collect — 拉取最新数据
-//   - /api/v1/features/:name/stream  — 增量数据拉取（支持 cursor）
-//   - /api/v1/features/:name/record/start — 开始录制
-//   - /api/v1/features/:name/record/stop  — 停止录制
-//   - /api/v1/features/:name/record/status — 录制状态
-//   - /api/v1/budget                  — 资源预算查询
-//   - /api/v1/recording/start         — 全局开始录制
-//   - /api/v1/recording/stop          — 全局停止录制
-//   - /api/v1/recording/status        — 全局录制状态
-//   - /api/v1/plugins/reload          — 插件热重载
-//   - /api/v1/plugins                 — 插件列表
+//
+// 提供 Feature 的完整生命周期管理 API，包括：
+//   - 生命周期控制：start/stop/pause/resume
+//   - 数据访问：collect（最新数据）、stream（增量拉取）
+//   - 在线重配置：reconfigure（更新 target_pids 不重启）
+//   - 录制控制：record/start/stop/status
+//   - 资源预算：budget
+//   - 全局录制：recording/start/stop/status
+//   - 插件管理：plugins、plugins/reload
+//   - Session 管理：sessions（Tier 3 profiling 会话）
+//   - 导出：export（环形缓冲区数据导出为 .ilr 文件）
+//
+// 参数：
+//   srv:      httplib::Server 引用
+//   features: FeatureManager 引用
 inline void RegisterFeatureRoutes(httplib::Server& srv,
                                    FeatureManager& features) {
-    // ---- 列出所有 Feature ----
+    // ========================================================================
+    // GET /api/v1/features — 列出所有 Feature
+    // ========================================================================
+    // 返回所有 Feature 的运行时状态快照，包括：
+    //   - name, display_name, category, tier（静态信息）
+    //   - state, is_recording（状态信息）
+    //   - batches_processed, records_processed, errors（统计信息）
+    //   - uptime_ms（运行时长）
     srv.Get("/api/v1/features",
             [&features](const httplib::Request&, httplib::Response& res) {
                 auto list = features.ListFeatures();
@@ -365,13 +506,23 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // ---- 启动 Feature ----
+    // ========================================================================
+    // POST /api/v1/features/:name/start — 启动 Feature
+    // ========================================================================
+    // 请求体（可选）：
+    //   {
+    //     "target_pids": [1234, 5678],     // 目标进程 PID 列表
+    //     "target_comms": ["nginx"]         // 目标进程名列表
+    //   }
+    //
+    // 响应：
+    //   {"status": "ok", "feature": "cpu_utilization", "state": "active"}
     srv.Post("/api/v1/features/:name/start",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
                  FeatureManager::StartParams params;
 
-                 // Parse optional target_pids and target_comms from request body
+                 // 从请求体中解析 target_pids 和 target_comms
                  if (!req.body.empty()) {
                      try {
                          auto body = json::parse(req.body);
@@ -394,7 +545,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                              }
                          }
                      } catch (...) {
-                         // Non-JSON body is acceptable (backward compat)
+                         // 非 JSON 请求体可接受（向后兼容）
                      }
                  }
 
@@ -410,6 +561,9 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // ========================================================================
+    // POST /api/v1/features/:name/stop — 停止 Feature
+    // ========================================================================
     srv.Post("/api/v1/features/:name/stop",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -425,6 +579,11 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // ========================================================================
+    // POST /api/v1/features/:name/pause — 暂停 Feature
+    // ========================================================================
+    // 暂停时取消 TimerWheel 定时器，Pipeline 线程保持运行。
+    // 适用于用户切换标签页时暂停采集以节省资源。
     srv.Post("/api/v1/features/:name/pause",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -440,6 +599,11 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // ========================================================================
+    // POST /api/v1/features/:name/resume — 恢复 Feature
+    // ========================================================================
+    // 重新注册 TimerWheel 定时器，恢复数据采集。
+    // 相比 Stop+Start，Resume 是毫秒级的（不重建 Pipeline）。
     srv.Post("/api/v1/features/:name/resume",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -455,8 +619,17 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
-    // ---- 在线重配置过滤条件（不重启 Pipeline） ----
-    // Runtime filter reconfiguration (update target_pids without restart)
+    // ========================================================================
+    // POST /api/v1/features/:name/reconfigure — 在线重配置过滤条件
+    // ========================================================================
+    // 更新 Source 的 target_pids / target_comms，不重启 Pipeline。
+    // 适用于用户切换监控的目标进程时，无缝切换。
+    //
+    // 请求体：
+    //   {
+    //     "target_pids": [1234, 5678],
+    //     "target_comms": ["nginx"]
+    //   }
     srv.Post("/api/v1/features/:name/reconfigure",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -502,7 +675,12 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
-    // ---- 拉取最新数据（从 StreamSinkStore 读取，不干扰 Pipeline 采集） ----
+    // ========================================================================
+    // GET /api/v1/features/:name/collect — 拉取最新数据
+    // ========================================================================
+    // 从 StreamSinkStore 读取最新数据，不干扰 Pipeline 正常采集。
+    // 与已废弃的 /api/v1/pipelines/:name/collect 不同，这个端点不会触发
+    // 新的 Source::Collect()，而是从缓存中读取。
     srv.Get("/api/v1/features/:name/collect",
             [&features](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.path_params.at("name");
@@ -512,7 +690,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     return;
                 }
 
-                // 从 StreamSinkStore 拉取最新数据（不干扰 pipeline 正常采集）
+                // 从 StreamSinkStore 拉取最新数据
                 auto& buf = StreamSinkStore::Instance().GetBuffer(name);
                 auto recent = buf.Recent(1);
                 if (recent.empty()) {
@@ -527,8 +705,21 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // ---- 增量数据拉取（支持 cursor 参数避免重复消费） ----
-    // 增量数据拉取（支持 cursor 参数避免重复消费）
+    // ========================================================================
+    // GET /api/v1/features/:name/stream — 增量数据拉取
+    // ========================================================================
+    // 支持 cursor 参数避免重复消费。客户端通过 cursor 告诉服务端
+    // "我已经消费到第 N 条"，服务端只返回 N 之后的新数据。
+    //
+    // 查询参数：
+    //   cursor: 上次消费的序号（可选，默认为 0）
+    //
+    // 响应格式：
+    //   {
+    //     "feature": "cpu_utilization",
+    //     "cursor": 123,
+    //     "batches": [...]
+    //   }
     srv.Get("/api/v1/features/:name/stream",
             [](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.path_params.at("name");
@@ -551,8 +742,13 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                 res.set_content(j.dump() + "\n", "application/json");
             });
 
-    // ---- 录制 API（开始 / 停止 / 状态） ----
-    // === 录制 API ===
+    // ========================================================================
+    // 录制 API（开始 / 停止 / 状态）
+    // ========================================================================
+    // 录制功能由 RecordingSink 提供，录制数据写入磁盘文件（.ilr 格式），
+    // 可导出和回放。
+
+    // POST /api/v1/features/:name/record/start — 开始录制
     srv.Post("/api/v1/features/:name/record/start",
              [](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -573,6 +769,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // POST /api/v1/features/:name/record/stop — 停止录制
     srv.Post("/api/v1/features/:name/record/stop",
              [](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
@@ -595,6 +792,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // GET /api/v1/features/:name/record/status — 录制状态
     srv.Get("/api/v1/features/:name/record/status",
             [](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.path_params.at("name");
@@ -618,8 +816,16 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                 res.set_content(j.dump() + "\n", "application/json");
             });
 
-    // ---- 资源预算查询（当前资源使用 vs 限制） ----
-    // === Resource Budget API ===
+    // ========================================================================
+    // GET /api/v1/budget — 资源预算查询
+    // ========================================================================
+    // 返回当前资源使用 vs 限制的对比，包括：
+    //   - 内存使用（RSS）
+    //   - CPU 使用率
+    //   - 活跃 Feature 数量
+    //   - eBPF 探针数量（Tier 2 + Tier 3）
+    //   - 资源限制
+    //   - 是否超出限制
     srv.Get("/api/v1/budget",
             [&features](const httplib::Request&, httplib::Response& res) {
                 auto& limiter = ResourceLimiter::Instance();
@@ -655,7 +861,12 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                 res.set_content(j.dump() + "\n", "application/json");
             });
 
-    // === Global Recording API ===
+    // ========================================================================
+    // 全局录制 API
+    // ========================================================================
+
+    // POST /api/v1/recording/start — 全局开始录制
+    // 对所有活跃 Feature 启动录制。
     srv.Post("/api/v1/recording/start",
              [&features](const httplib::Request&, httplib::Response& res) {
                  auto list = features.ListFeatures();
@@ -679,6 +890,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // POST /api/v1/recording/stop — 全局停止录制
     srv.Post("/api/v1/recording/stop",
              [&features](const httplib::Request&, httplib::Response& res) {
                  auto list = features.ListFeatures();
@@ -699,6 +911,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // GET /api/v1/recording/status — 全局录制状态
     srv.Get("/api/v1/recording/status",
             [&features](const httplib::Request&, httplib::Response& res) {
                 auto list = features.ListFeatures();
@@ -723,7 +936,13 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // === Plugin Hot-Reload API ===
+    // ========================================================================
+    // 插件 API
+    // ========================================================================
+
+    // POST /api/v1/plugins/reload — 插件热重载
+    // 重新扫描插件目录，加载新的 .so 插件文件。
+    // 返回重载前后插件数量对比。
     srv.Post("/api/v1/plugins/reload",
              [](const httplib::Request&, httplib::Response& res) {
                  auto& mgr = PluginManager::Instance();
@@ -755,6 +974,8 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
+    // GET /api/v1/plugins — 插件列表
+    // 返回所有已注册的插件（包括内置插件和 .so 外部插件），标注来源（builtin/shared_object）。
     srv.Get("/api/v1/plugins",
             [](const httplib::Request&, httplib::Response& res) {
                 auto& reg = PluginRegistry::Instance();
@@ -764,6 +985,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                 for (auto& n : reg.ListAggregators()) plugins.push_back({{"name", n}, {"type", "aggregator"}, {"source", "builtin"}});
                 for (auto& n : reg.ListSinks())       plugins.push_back({{"name", n}, {"type", "sink"}, {"source", "builtin"}});
 
+                // 标记 .so 外部插件（覆盖 builtin 标记）
                 auto& mgr = PluginManager::Instance();
                 for (auto& desc : mgr.Loader().Descriptors()) {
                     if (desc && desc->name) {
@@ -781,19 +1003,38 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     "application/json");
             });
 
-    // === Export API (replaces global recording with lookback support) ===
-    // POST /api/v1/export — export recent data from ring buffers + continue capturing
+    // ========================================================================
+    // POST /api/v1/export — 导出 API
+    // ========================================================================
+    // 将环形缓冲区中的最近 N 条数据导出为 .ilr 文件。
+    // 与录制不同，导出是"回溯"操作——导出已完成采集的数据，不开启新录制。
+    //
+    // 请求体：
+    //   {
+    //     "features": ["cpu_utilization", "cpu_profiler"],  // 可选，不指定则导出所有活跃 Feature
+    //     "lookback_batches": 60                             // 可选，回溯的批次数（默认 60）
+    //   }
+    //
+    // 响应：
+    //   {
+    //     "status": "ok",
+    //     "file": "/tmp/illuminator_exports/export_1234567890.ilr",
+    //     "features_exported": 2,
+    //     "batches_exported": 120
+    //   }
     srv.Post("/api/v1/export",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  json body;
                  try { body = json::parse(req.body); }
                  catch (...) { JsonError(res, "Invalid JSON body", 400); return; }
 
+                 // 解析要导出的 Feature 列表
                  std::vector<std::string> target_features;
                  if (body.contains("features") && body["features"].is_array()) {
                      for (auto& f : body["features"])
                          target_features.push_back(f.get<std::string>());
                  } else {
+                     // 未指定时导出所有活跃 Feature
                      for (const auto& f : features.ListFeatures())
                          if (f.state == FeatureState::kActive)
                              target_features.push_back(f.name);
@@ -801,6 +1042,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
 
                  size_t lookback = body.value("lookback_batches", 60);
 
+                 // 生成文件名：export_<epoch_ms>.ilr
                  auto now = std::chrono::system_clock::now();
                  auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      now.time_since_epoch()).count();
@@ -809,12 +1051,14 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                  (void)std::system(("mkdir -p " + output_dir).c_str());
                  std::string path = output_dir + "/" + filename;
 
+                 // 写入文件
                  std::ofstream out(path, std::ios::binary);
                  if (!out.is_open()) {
                      JsonError(res, "Cannot create export file: " + path, 500);
                      return;
                  }
 
+                 // 写入文件头（JSON 格式的元数据）
                  json header;
                  header["format"] = "ilr";
                  header["version"] = 1;
@@ -824,11 +1068,12 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                  header["lookback_batches"] = lookback;
                  out << header.dump() << "\n";
 
+                 // 写入每个 Feature 的数据
                  size_t total_batches = 0;
                  auto& store = StreamSinkStore::Instance();
                  for (const auto& fname : target_features) {
                      auto& buf = store.GetBuffer(fname);
-                     auto recent = buf.Recent(lookback);
+                     auto recent = buf.Recent(lookback);  // 从环形缓冲区取最近 N 条
                      for (const auto& batch : recent) {
                          if (!batch) continue;
                          json j;
@@ -849,8 +1094,21 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
-    // === Session API (for Tier 3 profiling with auto-expiry) ===
-    // POST /api/v1/sessions — create a profiling session
+    // ========================================================================
+    // Session API（Tier 3 profiling 会话管理）
+    // ========================================================================
+    // Session 是 Tier 3 Profiling Feature 的会话管理机制。
+    // 用户创建 Session 时指定目标进程和采集时长，Session 到期后自动停止。
+
+    // POST /api/v1/sessions — 创建 profiling 会话
+    // 启动一个 Tier 3 Feature 并设置自动过期时间。
+    //
+    // 请求体：
+    //   {
+    //     "type": "cpu_profile",           // Feature 类型（如 cpu_profile, offcpu_profile）
+    //     "target_pids": [1234, 5678],    // 目标进程 PID（Tier 3 必须）
+    //     "duration_sec": 30               // 采集时长（秒），到期后自动停止
+    //   }
     srv.Post("/api/v1/sessions",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  json body;
@@ -875,12 +1133,14 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
 
                  int duration_sec = body.value("duration_sec", 30);
 
+                 // 启动 Feature（Tier 3 安全检查在 FeatureManager::Start 中执行）
                  auto status = features.Start(type, params);
                  if (!status.ok()) {
                      JsonError(res, "Failed to start session: " + status.message(), 400);
                      return;
                  }
 
+                 // 生成会话 ID
                  auto now = std::chrono::system_clock::now();
                  auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      now.time_since_epoch()).count();
@@ -898,7 +1158,7 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                  res.set_content(resp.dump() + "\n", "application/json");
              });
 
-    // POST /api/v1/sessions/stop — stop a profiling session by feature type
+    // POST /api/v1/sessions/stop — 停止 profiling 会话
     srv.Post("/api/v1/sessions/stop",
              [&features](const httplib::Request& req, httplib::Response& res) {
                  json body;
@@ -922,7 +1182,8 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                      "application/json");
              });
 
-    // GET /api/v1/sessions — list active profiling sessions (Tier 3 features)
+    // GET /api/v1/sessions — 列出活跃 profiling 会话
+    // 返回所有 Tier 3 且处于 Active 状态的 Feature。
     srv.Get("/api/v1/sessions",
             [&features](const httplib::Request&, httplib::Response& res) {
                 auto list = features.ListFeatures();
