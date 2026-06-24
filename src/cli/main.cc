@@ -334,23 +334,36 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                 auto_started, config.pipelines.size());
     }
 
+    if (!config.server.http_enabled) {
+        IL_WARN("HTTP server disabled by config (server.http.enabled=false). "
+                "No REST API or frontend will be served.");
+    }
+
     illuminator::HttpServer http_server;
     illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
     illuminator::RegisterApiRoutes(http_server.server(), controller, &feature_manager);
     illuminator::RegisterFeatureRoutes(http_server.server(), feature_manager);
 
-    // Same-port WebSocket: upgrade handler intercepts WS requests on HTTP port
-    http_server.SetWebSocketUpgradeHandler(
-        [&ws_manager](int fd, const std::string& raw_request) -> bool {
-            return ws_manager.HandleUpgrade(fd, raw_request);
-        });
+    if (config.server.ws_enabled) {
+        http_server.SetWebSocketUpgradeHandler(
+            [&ws_manager](int fd, const std::string& raw_request) -> bool {
+                return ws_manager.HandleUpgrade(fd, raw_request);
+            });
+        ws_manager.Start();
+    } else {
+        IL_WARN("WebSocket disabled by config (server.websocket.enabled=false). "
+                "Frontend will fall back to HTTP polling.");
+    }
 
     http_server.SetStaticDir("web/dist");
-    http_server.Start(http_host, http_port);
-    ws_manager.Start();
+    if (config.server.http_enabled) {
+        http_server.Start(http_host, http_port);
+    }
 
-    IL_INFO("Illuminator daemon running on {}:{} (HTTP + WS same port). Ctrl+C to stop.",
-            http_host, http_port);
+    IL_INFO("Illuminator daemon running on {}:{} (HTTP{} + WS{}). Ctrl+C to stop.",
+            http_host, http_port,
+            config.server.http_enabled ? "" : " [disabled]",
+            config.server.ws_enabled ? "" : " [disabled]");
 
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
@@ -361,8 +374,8 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
 
     IL_INFO("Shutting down...");
     feature_manager.StopAll();
-    ws_manager.Stop();
-    http_server.Stop();
+    if (config.server.ws_enabled) ws_manager.Stop();
+    if (config.server.http_enabled) http_server.Stop();
     controller.StopAll();
     IL_INFO("Illuminator stopped.");
     return 0;

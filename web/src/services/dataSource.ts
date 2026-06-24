@@ -1,6 +1,9 @@
+export type DataModelType = 'time_series' | 'profile' | 'trace' | 'log' | 'generic'
+
 export interface DataBatch {
   feature: string
   timestamp: number
+  modelType?: DataModelType
   data: unknown
 }
 

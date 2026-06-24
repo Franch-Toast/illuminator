@@ -18,7 +18,7 @@
 #   Processors:  passthrough, filter, stack_symbolizer, stack_merger
 #   Aggregators: cpu_stats_aggregator
 #   Sinks:       console, file_export, local_storage, pprof_export,
-#                prometheus, otlp_export, websocket_sink
+#                prometheus, otlp_export, stream_sink
 # ============================================================================
 
 # ---- 全局设置 ----
@@ -93,9 +93,7 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_utilization
-      - type: websocket_sink          # 实时推送到前端仪表盘
-        config:
-          max_buffer_size: 30           # 内存中保留的最大批次数 (默认 30)
+      - type: stream_sink               # 环形缓冲，供 HTTP/WS/Export 读取
 
   # ===========================================================================
   # 进程/线程级 CPU 监控 — 基于 /proc/[pid]/stat (Pull)
@@ -115,7 +113,7 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: cpu_processes
-      - type: websocket_sink
+      - type: stream_sink
 
   # ===========================================================================
   # On-CPU 性能剖析 — eBPF perf_event 采样 + 火焰图 (Push)
@@ -173,7 +171,7 @@ pipelines:
           backend: sqlite
           path: /tmp/illuminator_data
           pipeline: sched_analysis
-      - type: websocket_sink
+      - type: stream_sink
 
   # ===========================================================================
   # Off-CPU 剖析 — 追踪线程阻塞/等待时间 (Pull + BPF 聚合)
@@ -230,7 +228,7 @@ pipelines:
   #         backend: sqlite
   #         path: /tmp/illuminator_data
   #         pipeline: io_monitor
-  #     - type: websocket_sink
+  #     - type: stream_sink
 
   # ===========================================================================
   # 网络追踪 — eBPF 追踪 TCP/UDP 连接和流量 (Push)
@@ -249,4 +247,4 @@ pipelines:
   #         backend: sqlite
   #         path: /tmp/illuminator_data
   #         pipeline: net_tracer
-  #     - type: websocket_sink
+  #     - type: stream_sink

@@ -80,11 +80,11 @@ bazel build //src/cli:illuminator
 # 运行后端测试
 bazel test //src/...
 
-# 启动后端守护进程（需要 root，因为 eBPF）
-sudo ./bazel-bin/src/cli/illuminator daemon
+# 启动后端守护进程（需要 root，因为 eBPF；已默认开启 Always-On）
+sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 
-# 另一个终端：启动前端开发服务器
-cd web && npm run dev    # → http://localhost:3000
+# 另一个终端：启动前端开发服务器（Vite HMR 会自动代理 API 到 9527 端口）
+cd web && npm run dev    # → 访问 http://localhost:5173
 ```
 
 ### 2.3 验证
@@ -222,18 +222,19 @@ FeatureManager (高层抽象)
                │               │              │           │
                ▼               ▼              ▼           │
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    FRONTEND (React, LiveDataSource)                       │
+│                    FRONTEND (React, Link Chain)                           │
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  LiveDataSource (单例)                                                    │
-│  ├── 优先: WebSocket 通道 (/ws/features)                                  │
-│  │   └── 收到数据 → 通知所有 subscriber                                   │
-│  └── 降级: HTTP 轮询 (/features/:name/stream + cursor)                    │
-│      └── 周期 1s 拉取增量 → 通知 subscriber                               │
+│  LiveDataSource (编排层, 单例)                                            │
+│  ├── WsLink: ws://host/ws/features (优先通道)                             │
+│  │   └── 收到数据 → 推断 modelType → DataBatch → 通知 subscriber          │
+│  ├── HttpLink: api.featureCollect() (降级通道, 1s 轮询)                   │
+│  │   └── WS 断开时激活 → 恢复后自动停止                                   │
+│  └── 可见性感知: 页面隐藏 → 停止 HttpLink；可见 → 恢复                    │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │ useCpuData / useMemoryData / ... (各页面 hook)                     │  │
-│  │   └── subscribe(featureName) → 接收 DataBatch → 更新组件 state     │  │
+│  │ useCpuData / useIoData / useGpuData / ... (各页面 hook)            │  │
+│  │   └── subscribe(featureName, replaySource?) → DataBatch → state    │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
@@ -324,9 +325,17 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 web/src/
 ├── App.tsx                    路由 (10 页面, React.lazy + Suspense)
 ├── main.tsx                   挂载点
-├── components/charts/         图表组件 (ECharts + FlameGraph)
-├── hooks/                     数据 hooks (LiveDataSource 驱动)
-├── services/                  apiClient + liveDataSource + dataSource 接口
+├── components/
+│   ├── charts/                图表组件 (ECharts + FlameGraph)
+│   ├── shared/                共享组件 (SummaryCard/Sparkline/EmptyChart)
+│   └── Layout/                布局组件 (Sidebar/ExportControl/ConnectionIndicator)
+├── hooks/                     数据 hooks (LiveDataSource 驱动, 支持 replaySource)
+├── services/
+│   ├── apiClient.ts           REST API 客户端
+│   ├── dataSource.ts          DataSource 接口 + DataBatch (含 modelType)
+│   ├── liveDataSource.ts      Link Chain 编排层
+│   └── links/                 WsLink + HttpLink (独立可测试)
+├── utils/                     工具库 (TimeSeriesBuffer 等)
 ├── stores/                    Zustand 状态 (time/pipeline/annotation)
 ├── workers/                   Web Worker (火焰图异步计算)
 └── pages/                     10 个懒加载页面
@@ -334,8 +343,10 @@ web/src/
 
 **必读文件**：
 1. `web/src/App.tsx` — 路由、全局布局、键盘快捷键
-2. `web/src/services/dataSource.ts` — `DataSource` 接口定义
-3. `web/src/services/liveDataSource.ts` — WS+HTTP 双通道实现
+2. `web/src/services/dataSource.ts` — `DataSource` 接口 + `DataModelType` 定义
+3. `web/src/services/liveDataSource.ts` — Link Chain 编排（WsLink + HttpLink 路由）
+4. `web/src/services/links/WsLink.ts` — WebSocket 连接管理、消息解析、重连
+5. `web/src/utils/timeSeriesBuffer.ts` — 滑动窗口时间序列缓冲
 
 ### 阶段二：数据流（1 小时）
 
@@ -405,21 +416,29 @@ DataBatch
     └── count: 42
 ```
 
-### 5.2 LiveDataSource — 前端数据供应核心
+### 5.2 LiveDataSource — Link Chain 架构
 
 ```typescript
-LiveDataSource (全局单例)
-├── connectWs() → ws://host/ws/features
-│   ├── onopen → 停止所有 HTTP 轮询，发送 subscribe:{feature}
-│   ├── onmessage → 解析 JSON，分发给对应 feature 的回调
-│   └── onclose → 启动 HTTP 轮询降级，指数退避重连
-├── subscribe(feature, callback) → 注册回调
-│   ├── WS 已连接 → 直接发送 subscribe:{feature}
-│   └── WS 未连接 → 启动该 feature 的 HTTP 轮询
-├── startPolling(feature) → api.featureCollect(feature) 每 1s
-├── setupVisibility() → 页面隐藏时停止轮询/推送，可见时恢复
-└── scheduleReconnect() → 指数退避 (1s → 2s → 4s → ... → 30s max)
+LiveDataSource (薄编排层，全局单例)
+├── WsLink (WebSocket 通道)
+│   ├── connect() → ws://host/ws/features
+│   ├── onopen → 通知 LiveDataSource 停止 HTTP 降级
+│   ├── onmessage → 解析 JSON + 自动推断 modelType → DataBatch
+│   ├── onclose → 通知 LiveDataSource 激活 HTTP 降级
+│   ├── subscribe(feature) → 发送 subscribe:{feature}
+│   └── scheduleReconnect() → 指数退避 (1s → 30s max)
+├── HttpLink (HTTP 轮询通道)
+│   ├── connect() → 标记 active
+│   ├── subscribe(feature) → setInterval(poll, 1s)
+│   ├── poll → api.featureCollect(feature) → DataBatch
+│   └── unsubscribe(feature) → clearInterval
+└── 编排逻辑
+    ├── WS connected → HttpLink.disconnect() (停止轮询)
+    ├── WS disconnected → activateHttpFallback() (恢复轮询)
+    └── Page hidden → HttpLink.disconnect(); Page visible → 恢复
 ```
+
+**关键设计：** 各 Link 职责单一、可独立单元测试。LiveDataSource 仅负责路由和可见性感知。
 
 ### 5.3 Feature 生命周期（Always-On 模式）
 
@@ -920,4 +939,4 @@ server:
 
 ---
 
-> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、**Always-On 自动启动 Tier 1-2**、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 **StreamSinkStore → WebSocketManager 广播给前端**——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可通过 LiveDataSource 订阅已在流动的数据。
+> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、**Always-On 自动启动 Tier 1-2**、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 **StreamSinkStore → WebSocketManager 广播给前端**——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可通过 LiveDataSource（Link Chain: WsLink + HttpLink）订阅已在流动的数据。

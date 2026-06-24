@@ -137,6 +137,17 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
     }
   }
 
+  const stopProfiling = async () => {
+    try {
+      await Promise.all([
+        api.stopSession({ type: 'cpu_profile' }),
+        api.stopSession({ type: 'offcpu_profile' }),
+      ])
+    } catch { /* best effort */ }
+    setProfilingStatus('idle')
+    startedRef.current = false
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginTop: 16 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -245,11 +256,19 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
         )}
         {profilingStatus === 'active' && (
           <>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
               <ProfileTypeButton label="On-CPU" active={profileType === 'on_cpu'}
                 onClick={() => setProfileType('on_cpu')} />
               <ProfileTypeButton label="Off-CPU" active={profileType === 'off_cpu'}
                 onClick={() => setProfileType('off_cpu')} />
+              <div style={{ flex: 1 }} />
+              <button onClick={stopProfiling} style={{
+                padding: '5px 12px', borderRadius: 4, fontSize: 11, fontWeight: 500,
+                border: '1px solid rgba(239,68,68,0.4)', background: 'rgba(239,68,68,0.08)',
+                color: '#ef4444', cursor: 'pointer',
+              }}>
+                Stop Session
+              </button>
             </div>
             <ProfileSnapshot
               pid={pid}

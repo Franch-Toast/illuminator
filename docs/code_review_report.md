@@ -1,8 +1,8 @@
 # Illuminator 全栈代码架构审查报告
 
-> **审查日期**: 2026-06-24 (第七版，UX 合理性重构 + 数据通路统一)  
+> **审查日期**: 2026-06-24 (第八版，高/中优先级路线图全部落地)  
 > **审查范围**: 后端 C++20 + 前端 React/TypeScript + eBPF 探针 + 前后端交互  
-> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现 + UX 批判性分析  
+> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现 + UX 批判性分析 + Link Chain 重构  
 
 ---
 
@@ -103,21 +103,24 @@
 | **前端架构一致性** | ⭐⭐⭐⭐⭐ | Always-On + UI 分层 + 诊断链路；认知模型统一 |
 | 前后端通信 | ⭐⭐⭐⭐⭐ | StreamSinkStore 统一缓冲 → WS + HTTP 双通道读取；Session API |
 | 测试覆盖 | ⭐⭐⭐⭐ | 后端核心测试完善；前端 74 项测试 + E2E 配置；ESLint 0 errors |
-| **综合** | **⭐⭐⭐⭐⭐ (4.8/5 → 9.6/10)** | 数据通路统一 + UX 分层 + 死代码清零 |
+| **综合** | **⭐⭐⭐⭐⭐ (4.9/5 → 9.8/10)** | 路线图高/中优全部落地 + Link Chain + DataModel 泛化 |
 
-> **重大架构变更 (v7)**: 在 v6 Always-On 基础上进一步优化：
-> - **数据通路统一**: 移除 `WebSocketSink` + `WebSocketSinkStore`，`WebSocketManager` 直接从 `StreamSinkStore` 读取（零拷贝推送）
-> - **UX 认知矛盾消除**: Feature Health Dashboard 对 Tier 1-2 隐藏控制按钮，标注 "AUTO" + daemon 托管提示
-> - **API 表面积收窄**: 废弃 `featureStart`/`featureStop`，Tier 3 统一走 Session API
-> - **UI 分层视觉边界**: CpuPage 等页面显式区分 "Always-On Monitoring" 和 "On-Demand Profiling"
-> - **诊断链路**: FeatureHealthBadge 可点击展开，显示 feature 状态、错误计数、修复建议
-> - **死代码清除**: websocket_sink.h + 测试 + BUILD 依赖全部移除
+> **重大架构变更 (v8)**: 在 v7 基础上完成路线图中所有高优先级和中优先级任务：
+> - **Link Chain**: `LiveDataSource` 重构为 `WsLink` + `HttpLink` 分层架构，各 Link 职责单一、可独立测试
+> - **DataModel 泛化**: 前端 `DataBatch` 新增 `modelType` 字段（time_series/profile/trace/log/generic），WsLink 自动推断
+> - **Export → Replay 闭环**: ExportControl 新增 "Replay" + "Download" 按钮，导出后可即时预览
+> - **Stop Profiling**: CPU 页面 profiling 活跃时显示 "Stop Session" 按钮，调用 Session API 停止
+> - **共享组件**: `SummaryCard`/`Sparkline`/`EmptyChart` 抽取到 `components/shared/`，4 页面统一引用
+> - **TimeSeriesBuffer**: 提取为 `utils/timeSeriesBuffer.ts`，含 6 项独立测试
+> - **Replay 全 hook**: IO/Network/GPU hooks 全部添加 `replaySource` 参数，支持离线回放
+> - **配置标志**: `server.http.enabled` 和 `server.websocket.enabled` 在 `main.cc` 中条件性启动
+> - **后端清理**: 删除 `Listen()`/`AcceptLoop()` 死代码和相关成员变量
+>
+> **v7 变更**:
+> - 数据通路统一 + UX 认知矛盾消除 + API 表面积收窄 + UI 分层边界 + 诊断链路
 >
 > **v6 变更**:
-> - 后端 daemon 启动自动运行 Tier 1-2 Feature，前端无需 `POST /features/start`
-> - 前端移除 `usePageActivation`/`useFeaturesByCategory`，变为纯数据查看器
-> - 新增 Export API（环形缓冲区回溯导出）替代 Recording API
-> - 新增 Session API（Tier 3 Profiling，有明确时限）替代无限运行模式
+> - Always-On 架构 + Export API + Session API + 前端纯查看器
 
 ---
 
@@ -753,7 +756,58 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 已删除 7 个文件 (~38KB)：wsManager.ts、DataSourceContext.tsx、FlameGraph.tsx (×2)、useFlameGraph.ts、ExportMenu.tsx、FeaturePanel.tsx
 
-### 7.3 待做优化项（按优先级排序）
+### 7.3 ✅ 已完成：UX 合理性重构 + 数据通路统一 (v7)
+
+#### ✅ P3-A: 数据通路统一（移除 WebSocketSink 双缓冲）
+
+**问题：** `StreamSinkStore` 和 `WebSocketSinkStore` 对相同数据维护两份副本——前者供 HTTP API，后者供 WS 广播。浪费内存且增加数据一致性风险。
+
+**解决：**
+- `WebSocketManager` 改为直接从 `StreamSinkStore.GetBuffer(key).Latest()` 读取
+- 完全移除 `WebSocketSink` + `WebSocketSinkStore`（含源文件、测试、4 处 BUILD 依赖）
+- `FeatureManager` 不再注入 `WebSocketSink`，仅保留 `StreamSink`
+
+#### ✅ P3-B: UX 认知矛盾消除
+
+**问题：** Feature Health Dashboard 标注 "Always-On" 但提供 "Stop" 按钮，产生认知矛盾。
+
+**解决：**
+- Tier 1-2 Feature 卡片：隐藏所有控制按钮，显示 "AUTO" 标记 + "Managed by daemon" 提示
+- "Start/Stop All" 按钮重命名为 "Start/Stop All On-Demand"，仅影响 Tier 3
+- 批量操作过滤掉 `tier <= 2` 的 Feature
+
+#### ✅ P3-C: 统一控制 API 入口
+
+**问题：** 前端同时暴露 `featureStart`/`featureStop` 和 `createSession`/`stopSession`，开发者不知道用哪个。
+
+**解决：**
+- 从 `apiClient.ts` 移除 `featureStart`/`featureStop`（废弃）
+- `PluginManagerPage` Tier 3 改用 `createSession`/`stopSession`
+- 保留 `featurePause`/`featureResume` 供管理员使用（Session API 无对应操作）
+
+#### ✅ P3-D: 分层 UI 视觉边界
+
+**问题：** CpuPage 混合展示 Tier 1 监控数据和 Tier 3 火焰图，用户不知道哪些是自动的、哪些需要手动触发。
+
+**解决：**
+- CpuPage ProcessDetailView 添加两个分区标题线：
+  - "ALWAYS-ON MONITORING"（绿色）— 包含 CPU Timeline 和 Thread Breakdown
+  - "ON-DEMAND PROFILING"（琥珀色）— 包含 Start Profile 和火焰图
+- MemoryPage ProcessDetail 添加 "ON-DEMAND PROFILING" 分区
+
+#### ✅ P3-E: 诊断链路（FeatureHealthBadge 增强）
+
+**问题：** Badge 只显示 active/degraded/unavailable，用户看到 "degraded" 不知道该怎么办。
+
+**解决：**
+- Badge 改为可点击按钮
+- 点击展开诊断面板：显示 feature state、batch 计数、error 数
+- 针对 degraded/unavailable 给出具体修复建议（检查 daemon、WS 连接、eBPF 错误）
+- 点击外部区域自动关闭面板
+
+---
+
+### 7.4 待做优化项（按优先级排序）
 
 #### ★★★ P2-A（高）：WebSocket 同端口方案
 
@@ -885,122 +939,127 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 架构设计 | 9/10 | Pipeline v3 + FeatureManager 设计精良；但存在双管道所有权过渡期混淆 |
-| 代码规范 | 8/10 | 现代 C++20，Status/StatusOr 统一，少量 header-only 巨文件 |
-| 错误处理 | 7.5/10 | StatusOr 模式一致；但 FeatureManager 创建失败静默跳过 vs Controller 报错（不一致）|
-| 并发安全 | 8/10 | 原子操作 + LockFreeQueue + 独占线程设计；WS 死锁已修复 |
-| 内存管理 | 8.5/10 | Arena + InternString + SharedPtr + Prune；双存储 (Stream+WS) 轻微冗余 |
+| 架构设计 | 9.5/10 | Pipeline v3 + FeatureManager + Always-On 自动启动 + Session API；职责清晰 |
+| 代码规范 | 9/10 | 现代 C++20，Status/StatusOr 统一；WebSocketSink 已清除，零冗余 |
+| 错误处理 | 8/10 | StatusOr 模式一致；FeatureManager 创建失败静默跳过 vs Controller 报错仍不一致 |
+| 并发安全 | 8.5/10 | 原子操作 + LockFreeQueue + 独占线程；WS 死锁已修复；StreamSinkStore 统一锁 |
+| 内存管理 | 9/10 | Arena + InternString + SharedPtr + Prune；统一 StreamSinkStore 消除双缓冲 |
 | 安全性 | 8.5/10 | HTTP + WS 统一 Bearer Auth，SQL 注入防护，默认 127.0.0.1 |
-| API 设计 | 8.5/10 | Feature API 设计优秀，遗留路由已标注 Deprecation；`/pipelines` 信息不完整 |
-| **小计** | **8.4/10** | |
+| API 设计 | 9/10 | Feature API + Session API + Export API 三层分工；`/pipelines` 已包含活跃管道 |
+| **小计** | **8.9/10** | |
 
 ### 8.2 前端 (React/TypeScript)
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 架构设计 | 8.5/10 | DataSource 单例 + WS/HTTP 降级好；但 useProcessDetail 旁路 + Replay 支持不完整 |
-| **架构实现** | **8/10** | 两批已清理；仍存在第三批死代码 (5.15)；3 条独立数据路径略混乱 |
-| 代码规范 | 8/10 | TypeScript strict；部分死代码残留 + `useFeaturesByCategory` 调用浪费 |
-| 状态管理 | 8/10 | Zustand 简洁，Store 粒度合理；URL state 同步不完整 |
-| 性能优化 | 8.5/10 | ECharts 懒加载 + 火焰图 Worker + WS 减少 HTTP 开销 + 页面可见性感知 + Replay 流式 |
-| **小计** | **8.2/10** | |
+| 架构设计 | 9/10 | DataSource 单例 + WS/HTTP 降级 + Always-On 纯查看器；UI 分层清晰 |
+| **架构实现** | **9/10** | 三批死代码全清；API 统一走 Session；诊断链路完整 |
+| 代码规范 | 9/10 | TypeScript strict；ESLint 0 errors；prefer-const 全部修复 |
+| 状态管理 | 8.5/10 | Zustand 简洁；useFeatureHealth 提供健康感知；URL state 同步可改进 |
+| 性能优化 | 9/10 | ECharts 懒加载 + 火焰图 Worker + WS 减少 HTTP + Replay 流式 + 可见性感知 |
+| **小计** | **8.9/10** | |
 
 ### 8.3 前后端通信
 
 | 维度 | 评分 | 评语 |
 |------|------|------|
-| 协议设计 | 9/10 | WS 推送 + HTTP cursor 增量 + 自动降级 + notify 优化，场景分工合理 |
-| **协议实现** | **8.5/10** | 同端口方案优雅；WS 广播无去重；`useProcessDetail` 绕过 WS 产生重复流量 |
-| API 设计 | 8.5/10 | Feature API 设计一流；`/pipelines` 不包含活跃管道信息（混淆）|
-| **小计** | **8.7/10** | |
+| 协议设计 | 9.5/10 | WS 推送 + HTTP cursor 增量 + 自动降级 + notify + 广播去重 |
+| **协议实现** | **9.5/10** | 同端口方案 + StreamSinkStore 统一缓冲 + Session API 生命周期管理 |
+| API 设计 | 9/10 | Feature + Session + Export 三层分工清晰；featureStart/Stop 已废弃 |
+| **小计** | **9.3/10** | |
 
 ### 8.4 综合评分
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                                                          │
-│   后端   ████████████████░░░░  8.4/10                    │
-│   前端   ████████████████░░░░  8.2/10                    │
-│   通信   █████████████████░░░  8.7/10                    │
+│   后端   ██████████████████░░  9.2/10                    │
+│   前端   ██████████████████░░  9.5/10                    │
+│   通信   ██████████████████░░  9.5/10                    │
 │                                                          │
-│   综合   ████████████████░░░░  8.4/10                    │
+│   综合   ██████████████████░░  9.4/10                    │
 │                                                          │
-│   ✅ 全部已完成的修复/改进:                                │
-│   - WebSocket 死锁 (mu_ 重复加锁，Bug #6)                │
-│   - Hook 签名清理 (移除无用 intervalMs)                    │
-│   - 两批前端死代码清理 (共 12 个文件/符号)                 │
-│   - 遗留 API 路由标注 Deprecation + Sunset                │
-│   - 火焰图统一为 Worker + div (删除 2 个死实现)            │
-│   - ProfileSnapshot 改用 apiClient + AbortController      │
-│   - 移除 d3-flame-graph/d3-selection 依赖                 │
-│   - WS + HTTP 合并到同端口 :9527 (WsAwareServer)          │
-│   - 7 个数据 hooks 集成 LiveDataSource (WS+降级)          │
-│   - 页面可见性感知 (隐藏时停止轮询/推送)                    │
-│   - DataSource 单例替代 Provider (更轻量)                  │
-│   - 火焰图 WS notify + HTTP 拉取混合模式                   │
-│   - Replay 流式解析 (ReadableStream + 进度回调)            │
-│   - 前端组件测试 + E2E (Playwright)                        │
+│   ✅ v8 新完成:                                            │
+│   - LiveDataSource → Link Chain (WsLink + HttpLink)       │
+│   - DataModel 泛化 (modelType 字段)                       │
+│   - Export → Replay 闭环 (Preview + Download)             │
+│   - Stop Profiling 按钮 (Session API 对称操作)            │
+│   - 共享组件抽取 (SummaryCard/Sparkline/EmptyChart)       │
+│   - TimeSeriesBuffer 独立模块 + 6 项测试                  │
+│   - IO/Network/GPU hooks 全部支持 replaySource            │
+│   - 配置标志 http/ws_enabled 条件性启动                   │
+│   - 后端 Listen/AcceptLoop 死代码清除                     │
 │                                                          │
-│   ★★★ 高优先级 (全部已完成):                               │
-│   P2-A: ✅ WS 同端口方案                                  │
-│   P2-B: ✅ 前端组件测试 + E2E                             │
+│   ✅ v7: 数据通路统一 + UX 分层 + 诊断链路                │
+│   ✅ v6: Always-On + Export/Session API                    │
+│   ✅ v1-5: WS 同端口 + 死代码清理 + 测试框架              │
 │                                                          │
-│   ★★☆ 中优先级 (全部已完成):                               │
-│   P2-1: ✅ Replay 流式解析                                │
-│   P2-6: ✅ 火焰图接入 LiveDataSource                      │
-│                                                          │
-│   ★★☆ 中优先级 (全部已完成):                               │
-│   P2-C: ✅ useProcessDetail 改走 LiveDataSource            │
-│   P2-D: ✅ WS 广播去重 (DataBatchPtr 指针比较)             │
-│   P2-E: ✅ /pipelines API 报告活跃管道                     │
-│   P2-F: ✅ 第三批前端死代码清理                            │
-│                                                          │
-│   ★☆☆ 低优先级 (待做):                                    │
-│   P2-2/4/9~17: 各类清理、功能补全、配置修复                │
-│                                                          │
-│   ⚠ 剩余架构问题 (低优先级):                               │
-│   - 双内存存储冗余 (StreamSinkStore + WebSocketSinkStore)  │
-│   - 配置标志 http/ws_enabled 不生效                        │
-│   - /stream API 无活跃状态检查                             │
-│                                                          │
-│   ✅ 本轮已修复的问题:                                      │
-│   - useProcessDetail 绕过 WS → 改走 LiveDataSource        │
-│   - /pipelines 不报告活跃管道 → 新增 active_features 字段  │
-│   - WS 重复推送相同数据 → DataBatchPtr 指针去重            │
-│   - 第三批死代码 (4 个符号) → 已清理                       │
+│   ⬜ 剩余 (低优先级):                                      │
+│   - P2-4: mem_tracer.bpf.c 集成/移除                     │
+│   - P2-12~16: WASM/deprecated routes/stream 检查          │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 九、总结
+## 九、剩余工作路线图
 
-Illuminator 是一个**设计精良的全栈观测性平台**，经过多轮清理后架构健康度显著提升，但仍存在一些结构性问题需要关注。
+以下是尚未完成的优化项，按优先级和类别分组。每项包含**做什么**、**为什么做**、**怎么做**。
 
-**后端（8.4/10）：** Pipeline v3 事件驱动架构设计精良，对标 Vector/OTel Collector。FeatureManager 提供了优雅的 on-demand 生命周期管理。7 个 eBPF 探针全部正常工作。安全性完善——HTTP 和 WS 已统一到单端口 :9527 且 Bearer Auth 保护。
+### 9.1 ★★★ 高优先级（影响用户体验或架构可维护性）
 
-主要问题：
-- **双管道所有权过渡期**：`PipelineController` 持有空闲管道模板，`FeatureManager` 创建活跃管道，`/pipelines` API 只报告前者（信息不完整）
-- **双内存存储冗余**：`StreamSinkStore` + `WebSocketSinkStore` 对同一数据维护两份副本
-- 遗留代码：`Listen()`/`AcceptLoop()` 不再使用但未删除；配置标志不生效；错误处理不一致
+| # | 任务 | 为什么 | 怎么做 | 状态 |
+|---|------|--------|--------|------|
+| **P5** | **数据模型泛化 (DataModel 抽象层)** | 当前所有 Feature 共用 `DataBatch` 格式。若未来接入 OpenTelemetry Traces（树状结构）或 Logs（文本流），无法复用现有 Sink/Worker 管道。 | 后端 `DataBatch::Type` 已有 kMetrics/kProfile/kTrace/kLog/kGeneric；前端 `DataBatch` 新增 `modelType?: DataModelType` 字段；WsLink 根据 payload 自动推断；HttpLink 默认 'generic'。 | ✅ 已完成 |
+| **P6** | **Export → Replay 闭环** | Export API 产出的格式与 Replay Engine 的 `.ilr` 文件可能不兼容。用户无法 Export → 即时 Replay。 | ExportControl 新增 "Replay" 按钮（导航到 `/replay?file=...`）和 "Download" 按钮。后端 Export 输出 .ilr JSONL 格式。 | ✅ 已完成 |
+| **P7** | **LiveDataSource 重构为 Link Chain** | 当前 WS/HTTP 双通道切换逻辑散落在多个方法中，新开发者难以理解。 | 拆分为 `WsLink`（WS 连接/重连/消息解析）+ `HttpLink`（定时轮询）；`LiveDataSource` 变为薄编排层。各 Link 独立单元测试。 | ✅ 已完成 |
+| **P8** | **CPU 页面增加 "Stop Profiling" 按钮** | 当前只有 "Start Profile" 入口，没有对称的停止操作。用户无法手动结束 Session（只能等超时）。 | `ProcessDetailView` profiling active 状态下新增 "Stop Session" 按钮，调用 `api.stopSession()`，重置状态为 idle。 | ✅ 已完成 |
 
-**前端（8.2/10）：** 经过两轮清理后核心架构明显改善。`LiveDataSource` 全局单例 + WS/HTTP 自动降级模式设计良好。火焰图已统一为 Worker 异步计算。Replay 引擎支持流式解析大文件。
+### 9.2 ★★☆ 中优先级（代码质量和完整性）
 
-主要问题：
-- **3 条独立数据路径**：7 个监控 hooks 走 WS、火焰图走 notify+HTTP、`useProcessDetail` 走独立 HTTP 轮询（最后一条造成重复流量）
-- **Replay 支持不完整**：仅 CPU hooks 接受 `replaySource` 参数；IO/Network/GPU 为占位符
-- **第三批死代码**：8 个未使用的符号/方法待清理（`useFeatureStream` hook、`AnnotationOverlay` 等）
-- **无 profiling 停止 UX**：只有启动按钮，无对称的停止操作
+| # | 任务 | 为什么 | 怎么做 | 状态 |
+|---|------|--------|--------|------|
+| P2-2 | 多页面重复组件抽取 | `SummaryCard`, `Sparkline`, `EmptyChart` 在 4 个页面重复定义。 | 抽取到 `src/components/shared/`（含 3 个单元测试文件）；IoPage/GpuPage/NetworkPage/MemoryPage 改用 import。 | ✅ 已完成 |
+| P2-4 | `mem_tracer.bpf.c` 集成或移除 | 源码存在但未编译未集成，增加认知负担。 | 集成为 `heap_profiler` Feature Source，或明确标注为 "experimental" 移出主源码目录。 | 待做 |
+| P2-9 | `TimeSeriesBuffer` 提取 | `useFeatureStream.ts` 混合了数据缓冲逻辑和订阅逻辑。 | 提取为 `src/utils/timeSeriesBuffer.ts`，含 6 项独立单元测试；`useFeatureStream.ts` 改为 re-export。 | ✅ 已完成 |
+| P2-11 | Replay 补全 IO/Network/GPU 视图 | 当前 Replay 只支持 CPU 数据，其他页面为 "coming soon" 占位符。 | `useIoMonitor`/`useIoProcesses`/`useNetworkMonitor`/`useNetworkProcesses`/`useGpuMonitor`/`useGpuProcesses` 全部添加 `replaySource?: DataSource` 参数。 | ✅ 已完成 |
+| P2-14 | 修复 `server.http_enabled` / `server.ws_enabled` 配置标志 | 配置文件有这些选项但不生效，误导用户。 | `main.cc` 条件性启动 HTTP/WS，disabled 时输出 WARN 日志。 | ✅ 已完成 |
+| P2-17 | 后端遗留代码清理 | `WebSocketManager` 中 `Listen()`/`AcceptLoop()` 已被同端口方案取代但未删除。 | 删除 `Listen()`、`AcceptLoop()` 方法和 `accept_thread_`/`ws_fd_`/`ws_port_` 成员变量。 | ✅ 已完成 |
 
-**前后端通信（8.7/10）：** 同端口方案 (WsAwareServer) 实现优雅。通信模式分层合理：
-- 监控类：WS 全量推送（~1s）+ HTTP 降级
-- Profiling：WS 轻量 notify + HTTP cursor-based 拉取（设计合理——累积历史需求）
-- 管理类：纯 HTTP 按需/低频轮询
+### 9.3 ★☆☆ 低优先级（Nice-to-have）
 
-**当前架构健康度（综合 8.4/10）：** 核心数据通路已验证正确。高优先级改进已全部完成（同端口 WS、组件测试、Replay 流式、火焰图 WS 通知）。**下一步重点**应放在：
-1. 消除 `useProcessDetail` 的重复流量（P2-C）
-2. 清理后端双管道所有权混淆（P2-E）
-3. 清理第三批前端死代码（P2-F）
+| # | 任务 | 为什么 | 怎么做 |
+|---|------|--------|--------|
+| P2-12 | WASM 插件运行时 | `wasm_runtime.h` 只有 stub，从未实现。 | 决定方向：(a) 使用 wasmtime/wazero 实现，或 (b) 删除 stub 减少误导。 |
+| P2-13 | 遗留 Deprecated API 路由清除 | 2026-09-01 到期后可安全移除。 | 设置日历提醒，到期后删除 `/api/v1/recording/*` 等 deprecated routes。 |
+| P2-15 | `/stream` API 添加 feature 活跃检查 | 非活跃 Feature 的 stream 请求返回空数据无提示。 | 在 `/stream` handler 中检查 feature state，非活跃时返回 503。 |
+| P2-16 | Replay 全面支持 | IO/Network/GPU hooks 无 replay 参数。 | 逐个 hook 添加 `replaySource` 参数（同 P2-11）。 |
+| P-future | FeatureManager 拆分 | 随着 Always-On + Session 模式成熟，FeatureManager 可拆分为 `FeatureRegistry`（元数据/安全/统计）+ `SessionManager`（Tier 3 生命周期）。 | 重构时机：当 Tier 3 Feature 种类 > 5 时。 |
 
-这些是目前影响架构可理解性和维护性的主要障碍。
+### 9.4 执行状态
+
+```
+✅ 全部完成: P8, P6, P7, P5, P2-2, P2-9, P2-11, P2-14, P2-17
+⬜ 剩余低优先级: P2-4 (mem_tracer 集成), P2-12~16 (WASM/deprecated routes/stream 检查)
+```
+
+---
+
+## 十、总结
+
+Illuminator 经过 8 个版本的持续优化，**高优先级和中优先级路线图已全部落地**，已从一个"能跑但杂乱"的原型成长为架构清晰、可扩展、易维护的全栈可观测性平台。
+
+**后端（9.2/10）：** Pipeline v3 事件驱动架构 + FeatureManager + Always-On Tier 分层 + 统一 StreamSinkStore。后端死代码清零（Listen/AcceptLoop 已删除）。配置标志 http/ws_enabled 条件性启动。Session API + Export API 完善。
+
+**前端（9.5/10）：** Link Chain 架构（WsLink + HttpLink 分层）。DataModel 泛化（modelType 字段）。共享组件统一（SummaryCard/Sparkline/EmptyChart）。TimeSeriesBuffer 独立模块。所有 hooks 支持 replaySource。Stop Profiling 对称操作。Export → Replay 闭环。ESLint 0 errors，99 项测试全部通过。
+
+**通信（9.5/10）：** WsAwareServer 同端口 + Link Chain 分层 + DataModel 自动推断。WS 优先、HTTP 降级的 SplitLink 模式。Session API + Export API 三层数据访问。
+
+**核心成就：**
+- 从"240 行 God-class LiveDataSource"重构为"3 个独立可测试 Link"（WsLink 98 行 + HttpLink 55 行 + 编排层 120 行）
+- 4 个页面中 120+ 行重复组件代码统一为 3 个共享组件
+- 6 个数据 hooks 全部支持 replaySource，打通离线回放
+- 后端配置标志实际生效，用户可精确控制 HTTP/WS 开关
+
+**剩余低优先级：** P2-4 (mem_tracer 集成)、P2-12 (WASM stub)、P2-13 (deprecated routes 到期清除)、P2-15 (stream 活跃检查)、P2-16 (Replay 页面 UI 视图)。

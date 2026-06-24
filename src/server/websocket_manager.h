@@ -81,65 +81,21 @@ public:
         return true;
     }
 
-    // ---- Listen — 独立端口监听模式（Legacy） ----
-    // 创建 TCP socket，绑定到指定地址和端口，开始监听。
-    // 推荐使用同端口升级模式（HandleUpgrade），此方法仅保留兼容。
-    // Legacy: listen on a separate port. Optional — prefer same-port via
-    // HttpServer::SetWebSocketUpgradeHandler + HandleUpgrade.
-    bool Listen(const std::string& addr, int port) {
-        ws_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-        if (ws_fd_ < 0) return false;
-        int opt = 1;
-        setsockopt(ws_fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        struct sockaddr_in sa{};
-        sa.sin_family = AF_INET;
-        if (addr == "0.0.0.0") {
-            sa.sin_addr.s_addr = htonl(INADDR_ANY);
-        } else {
-            if (::inet_aton(addr.c_str(), &sa.sin_addr) == 0) {
-                ::close(ws_fd_); ws_fd_ = -1; return false;
-            }
-        }
-        sa.sin_port = htons(port);
-        if (::bind(ws_fd_, reinterpret_cast<struct sockaddr*>(&sa), sizeof(sa)) < 0) {
-            ::close(ws_fd_); ws_fd_ = -1; return false;
-        }
-        if (::listen(ws_fd_, 16) < 0) {
-            ::close(ws_fd_); ws_fd_ = -1; return false;
-        }
-        ws_port_ = port;
-        return true;
-    }
-
-    // ---- Start — 启动 WebSocket 服务 ----
-    // 启动广播线程（ws-broadcast）和（可选）接受线程（ws-accept）。
+    // ---- Start — 启动 WebSocket 广播线程 ----
+    // 连接通过 HandleUpgrade() 从 WsAwareServer 同端口注入。
     void Start() {
         running_.store(true);
         thread_ = std::thread([this] {
             SetThreadName("ws-broadcast");
             BroadcastLoop();
         });
-        if (ws_fd_ >= 0) {
-            accept_thread_ = std::thread([this] {
-                SetThreadName("ws-accept");
-                AcceptLoop();
-            });
-            IL_INFO("WebSocket server listening on port {}", ws_port_);
-        }
         IL_INFO("WebSocketManager started (interval={}ms)", broadcast_interval_ms_);
     }
 
     // ---- Stop — 停止 WebSocket 服务 ----
-    // 停止广播线程和接受线程，关闭监听 socket，发送 Close 帧并关闭所有连接。
+    // 停止广播线程，发送 Close 帧并关闭所有连接。
     void Stop() {
         running_.store(false);
-        if (ws_fd_ >= 0) {
-            ::shutdown(ws_fd_, SHUT_RDWR);
-            ::close(ws_fd_);
-            ws_fd_ = -1;
-        }
-        if (accept_thread_.joinable()) accept_thread_.join();
         if (thread_.joinable()) thread_.join();
         std::lock_guard<std::mutex> lk(mu_);
         for (auto& [fd, _] : connections_) {
@@ -383,55 +339,12 @@ private:
         return (end == std::string::npos) ? query.substr(pos) : query.substr(pos, end - pos);
     }
 
-    // ---- AcceptLoop — 独立端口模式的连接接受循环（ws-accept 线程） ----
-    // 阻塞 accept 新连接，验证 WebSocket 升级请求，完成握手，添加连接。
-    void AcceptLoop() {
-        while (running_.load()) {
-            struct sockaddr_in client_addr{};
-            socklen_t client_len = sizeof(client_addr);
-            int client_fd = ::accept(ws_fd_,
-                reinterpret_cast<struct sockaddr*>(&client_addr), &client_len);
-            if (client_fd < 0) continue;
-
-            char buf[4096] = {};
-            ssize_t n = ::read(client_fd, buf, sizeof(buf) - 1);
-            if (n <= 0) { ::close(client_fd); continue; }
-
-            std::string request(buf, n);
-            if (!WebSocketCodec::IsUpgradeRequest(request)) {
-                const char* resp = "HTTP/1.1 400 Bad Request\r\n\r\n";
-                ::write(client_fd, resp, strlen(resp));
-                ::close(client_fd);
-                continue;
-            }
-
-            if (!ValidateAuth(request)) {
-                const char* resp = "HTTP/1.1 401 Unauthorized\r\n\r\n";
-                ::write(client_fd, resp, strlen(resp));
-                ::close(client_fd);
-                IL_WARN("WebSocket: rejected connection - invalid auth token");
-                continue;
-            }
-
-            if (!WebSocketCodec::PerformHandshake(client_fd, request)) {
-                ::close(client_fd);
-                continue;
-            }
-
-            auto path = WebSocketCodec::GetUpgradePath(request);
-            AddConnection(client_fd, path);
-        }
-    }
-
     mutable std::mutex mu_;
     std::unordered_map<int, ConnInfo> connections_;
     std::unordered_map<std::string, std::unordered_set<int>> subscriptions_;
 
     std::atomic<bool> running_{false};
     std::thread thread_;
-    std::thread accept_thread_;
-    int ws_fd_ = -1;
-    int ws_port_ = 0;
     int broadcast_interval_ms_ = 1000;
     WsBroadcastSerializer serializer_;
     std::string auth_token_;

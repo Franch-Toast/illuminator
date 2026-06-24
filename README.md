@@ -170,8 +170,7 @@ illuminator/
 │   │   ├── prometheus_exposition/#  Prometheus 指标暴露
 │   │   ├── otlp_export/        #   OpenTelemetry OTLP (JSON over HTTP)
 │   │   ├── recording_sink/     #   按需录制落盘 (.ilr NDJSON 格式)
-│   │   ├── stream_sink/        #   实时流缓冲 (per-Feature RingBuffer)
-│   │   └── websocket_sink/     #   WebSocket 实时推送
+│   │   └── stream_sink/        #   统一环形数据缓冲 (HTTP/WS/Export 共用)
 │   │
 │   ├── serialization/          # JSON 序列化 (nlohmann/json)
 │   │   └── json_serializer.h   #   DataBatch → JSON
@@ -479,7 +478,7 @@ pipelines:
         window_sec: 30
     sinks:
       - type: local_storage
-      - type: websocket_sink
+      - type: stream_sink
 ```
 
 ---
@@ -590,8 +589,7 @@ src/
     ├── otlp_export/test/           # OtlpExportSink 测试
     ├── pprof_export/test/          # PprofExportSink 测试
     ├── prometheus_exposition/test/ # PrometheusSink 测试
-    ├── stream_sink/test/           # StreamSink + StreamBuffer 测试
-    └── websocket_sink/test/        # WebSocketSink + Store 测试
+    └── stream_sink/test/           # StreamSink + StreamBuffer 测试
 ```
 
 ### 运行测试

@@ -1,48 +1,78 @@
 import type { DataBatch, DataCallback, DataSource, ConnectionStatus, DataSourceEvents } from './dataSource'
-import { api } from './apiClient'
+import { WsLink } from './links/WsLink'
+import { HttpLink } from './links/HttpLink'
 
 type FeatureSubscription = {
   callbacks: Set<DataCallback>
   latest: DataBatch | null
-  pollTimer: ReturnType<typeof setInterval> | null
 }
 
+/**
+ * LiveDataSource — Link Chain architecture.
+ *
+ * Uses WsLink as the primary data channel (real-time push).
+ * Falls back to HttpLink (polling) when WS is disconnected.
+ * Visibility-aware: pauses polling when page is hidden.
+ */
 export class LiveDataSource implements DataSource {
   private subs = new Map<string, FeatureSubscription>()
-  private ws: WebSocket | null = null
-  private wsRetries = 0
-  private wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private wsLink: WsLink
+  private httpLink: HttpLink
   private status: ConnectionStatus = 'disconnected'
   private events: DataSourceEvents
   private visible = true
   private visibilityHandler: (() => void) | null = null
-  private pollIntervalMs: number
 
   constructor(events: DataSourceEvents = {}, pollIntervalMs = 1000) {
     this.events = events
-    this.pollIntervalMs = pollIntervalMs
+
+    const handleData = (batch: DataBatch) => {
+      const sub = this.subs.get(batch.feature)
+      if (sub) {
+        sub.latest = batch
+        for (const cb of sub.callbacks) cb(batch)
+      }
+    }
+
+    const handleStatus = (s: ConnectionStatus) => {
+      if (this.status === s) return
+      this.status = s
+      this.events.onConnectionChange?.(s)
+
+      if (s === 'connected') {
+        this.httpLink.disconnect()
+      } else if (s === 'disconnected' && this.visible) {
+        this.activateHttpFallback()
+      }
+    }
+
+    this.wsLink = new WsLink(this.getWsUrl(), handleData, handleStatus)
+    this.httpLink = new HttpLink(handleData, pollIntervalMs)
+
     this.setupVisibility()
-    this.connectWs()
+    this.wsLink.connect()
   }
 
   subscribe(feature: string, cb: DataCallback): () => void {
     let sub = this.subs.get(feature)
     if (!sub) {
-      sub = { callbacks: new Set(), latest: null, pollTimer: null }
+      sub = { callbacks: new Set(), latest: null }
       this.subs.set(feature, sub)
     }
     sub.callbacks.add(cb)
 
-    if (this.status !== 'connected') {
-      this.startPolling(feature, sub)
+    if (this.wsLink.isConnected()) {
+      this.wsLink.subscribe(feature)
     } else {
-      this.sendWsSubscribe(feature)
+      this.httpLink.connect()
+      this.httpLink.subscribe(feature)
     }
 
     return () => {
       sub!.callbacks.delete(cb)
       if (sub!.callbacks.size === 0) {
-        this.stopPolling(sub!)
+        this.wsLink.unsubscribe(feature)
+        this.httpLink.unsubscribe(feature)
         this.subs.delete(feature)
       }
     }
@@ -56,19 +86,23 @@ export class LiveDataSource implements DataSource {
     return Array.from(this.subs.keys())
   }
 
+  getStatus(): ConnectionStatus {
+    return this.status
+  }
+
   destroy(): void {
     if (this.visibilityHandler) {
       document.removeEventListener('visibilitychange', this.visibilityHandler)
     }
-    for (const [, sub] of this.subs) {
-      this.stopPolling(sub)
-    }
+    this.wsLink.disconnect()
+    this.httpLink.disconnect()
     this.subs.clear()
-    this.disconnectWs()
   }
 
-  getStatus(): ConnectionStatus {
-    return this.status
+  private getWsUrl(): string {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const host = window.location.host
+    return `${protocol}//${host}/ws/features`
   }
 
   private setupVisibility() {
@@ -77,164 +111,21 @@ export class LiveDataSource implements DataSource {
       this.visible = document.visibilityState === 'visible'
 
       if (!wasVisible && this.visible) {
-        this.onVisible()
+        if (!this.wsLink.isConnected()) {
+          this.wsLink.connect()
+          this.activateHttpFallback()
+        }
       } else if (wasVisible && !this.visible) {
-        this.onHidden()
+        this.httpLink.disconnect()
       }
     }
     document.addEventListener('visibilitychange', this.visibilityHandler)
   }
 
-  private onVisible() {
-    if (this.status !== 'connected') {
-      this.connectWs()
+  private activateHttpFallback() {
+    this.httpLink.connect()
+    for (const feature of this.subs.keys()) {
+      this.httpLink.subscribe(feature)
     }
-    for (const [feature, sub] of this.subs) {
-      if (this.status !== 'connected') {
-        this.startPolling(feature, sub)
-      }
-    }
-  }
-
-  private onHidden() {
-    for (const [, sub] of this.subs) {
-      this.stopPolling(sub)
-    }
-  }
-
-  private getWsUrl(): string {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const host = window.location.host // includes port if non-default
-    return `${protocol}//${host}/ws/features`
-  }
-
-  private connectWs() {
-    if (this.ws && this.ws.readyState <= WebSocket.OPEN) return
-
-    const url = this.getWsUrl()
-
-    try {
-      this.setStatus('connecting')
-      this.ws = new WebSocket(url)
-
-      this.ws.onopen = () => {
-        this.wsRetries = 0
-        this.setStatus('connected')
-        for (const [, sub] of this.subs) {
-          this.stopPolling(sub)
-        }
-        for (const feature of this.subs.keys()) {
-          this.sendWsSubscribe(feature)
-        }
-      }
-
-      this.ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data)
-          const feature = msg.pipeline || msg.feature
-          if (!feature) return
-
-          const batch: DataBatch = {
-            feature,
-            timestamp: msg.ts || Date.now(),
-            data: msg,
-          }
-
-          const sub = this.subs.get(feature)
-          if (sub) {
-            sub.latest = batch
-            for (const cb of sub.callbacks) cb(batch)
-          }
-        } catch { /* ignore parse errors */ }
-      }
-
-      this.ws.onclose = () => {
-        this.ws = null
-        this.setStatus('disconnected')
-        this.fallbackToPolling()
-        this.scheduleReconnect()
-      }
-
-      this.ws.onerror = () => {
-        this.ws?.close()
-      }
-    } catch {
-      this.setStatus('disconnected')
-      this.fallbackToPolling()
-      this.scheduleReconnect()
-    }
-  }
-
-  private disconnectWs() {
-    if (this.wsReconnectTimer) {
-      clearTimeout(this.wsReconnectTimer)
-      this.wsReconnectTimer = null
-    }
-    if (this.ws) {
-      this.ws.onclose = null
-      this.ws.close()
-      this.ws = null
-    }
-  }
-
-  private scheduleReconnect() {
-    if (this.wsReconnectTimer) return
-    const delay = Math.min(1000 * Math.pow(2, this.wsRetries), 30000)
-    this.wsRetries++
-    this.wsReconnectTimer = setTimeout(() => {
-      this.wsReconnectTimer = null
-      if (this.visible) this.connectWs()
-    }, delay)
-  }
-
-  private sendWsSubscribe(feature: string) {
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(`subscribe:${feature}`)
-    }
-  }
-
-  private fallbackToPolling() {
-    if (!this.visible) return
-    for (const [feature, sub] of this.subs) {
-      if (!sub.pollTimer) {
-        this.startPolling(feature, sub)
-      }
-    }
-  }
-
-  private startPolling(feature: string, sub: FeatureSubscription) {
-    if (sub.pollTimer) return
-    const interval = this.visible ? this.pollIntervalMs : this.pollIntervalMs * 5
-
-    const poll = async () => {
-      try {
-        const resp = await api.featureCollect(feature)
-        if (resp && typeof resp === 'object') {
-          const batch: DataBatch = {
-            feature,
-            timestamp: Date.now(),
-            data: resp,
-          }
-          sub.latest = batch
-          for (const cb of sub.callbacks) cb(batch)
-        }
-      } catch { /* retry on next interval */ }
-    }
-
-    poll()
-    sub.pollTimer = setInterval(poll, interval)
-  }
-
-  private stopPolling(sub: FeatureSubscription) {
-    if (sub.pollTimer) {
-      clearInterval(sub.pollTimer)
-      sub.pollTimer = null
-    }
-  }
-
-  private setStatus(s: ConnectionStatus) {
-    if (this.status === s) return
-    this.status = s
-    this.events.onConnectionChange?.(s)
   }
 }

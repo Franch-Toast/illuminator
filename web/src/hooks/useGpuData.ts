@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
 import { getDataSource } from './useDataSource'
-import type { DataBatch } from '../services/dataSource'
+import type { DataBatch, DataSource } from '../services/dataSource'
 
 export interface GpuDataPoint {
   timestamp: number
@@ -38,16 +38,16 @@ interface GpuCollectResponse {
   }>
 }
 
-export function useGpuMonitor(active = true) {
+export function useGpuMonitor(active = true, replaySource?: DataSource) {
   const [data, setData] = useState<GpuDataPoint[]>([])
   const [summary, setSummary] = useState<GpuSummary | null>(null)
   const buffer = useRef(new TimeSeriesBuffer<GpuDataPoint>(60))
   const mode = useTimeStore(s => s.mode)
 
   useEffect(() => {
+    const source = replaySource ?? getDataSource()
     if (!active || mode === 'paused') return
 
-    const source = getDataSource()
     const unsub = source.subscribe('gpu_monitor', (batch: DataBatch) => {
       const resp = batch.data as GpuCollectResponse
       if (!resp?.records) return
@@ -80,7 +80,7 @@ export function useGpuMonitor(active = true) {
       setSummary({ computePct, memoryUsedMb: memUsedMb, memoryTotalMb: memTotalMb, temperatureC: tempC, powerW: powerW })
     })
     return unsub
-  }, [active, mode])
+  }, [active, mode, replaySource])
 
   const clear = useCallback(() => {
     buffer.current.clear()
@@ -91,15 +91,15 @@ export function useGpuMonitor(active = true) {
   return { data, summary, clear }
 }
 
-export function useGpuProcesses(active = true) {
+export function useGpuProcesses(active = true, replaySource?: DataSource) {
   const [processes, setProcesses] = useState<GpuProcess[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)
 
   useEffect(() => {
+    const source = replaySource ?? getDataSource()
     if (!active || mode === 'paused') return
 
-    const source = getDataSource()
     const unsub = source.subscribe('gpu_monitor', (batch: DataBatch) => {
       const resp = batch.data as GpuCollectResponse
       if (!resp?.records) return
@@ -125,7 +125,7 @@ export function useGpuProcesses(active = true) {
       setProcesses(result)
     })
     return unsub
-  }, [active, mode])
+  }, [active, mode, replaySource])
 
   const clear = useCallback(() => {
     historyMap.current.clear()

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { api } from '../../services/apiClient'
 import { colors } from '../../styles/theme'
 
@@ -19,6 +20,7 @@ export default function ExportControl() {
   const [result, setResult] = useState<ExportResult | null>(null)
   const [lookback, setLookback] = useState(60)
   const [error, setError] = useState('')
+  const navigate = useNavigate()
 
   const handleExport = async () => {
     setExporting(true)
@@ -31,6 +33,21 @@ export default function ExportControl() {
       setError(e instanceof Error ? e.message : 'Export failed')
     } finally {
       setExporting(false)
+    }
+  }
+
+  const handlePreviewReplay = () => {
+    if (result?.file) {
+      navigate(`/replay?file=${encodeURIComponent(result.file)}`)
+    }
+  }
+
+  const handleDownload = () => {
+    if (result?.file) {
+      const a = document.createElement('a')
+      a.href = `/api/v1/export/download?file=${encodeURIComponent(result.file)}`
+      a.download = result.file
+      a.click()
     }
   }
 
@@ -77,8 +94,26 @@ export default function ExportControl() {
       </button>
 
       {result && (
-        <div style={{ color: colors.success, fontSize: 10, lineHeight: 1.4 }}>
-          {result.features_exported} features, {result.batches_exported} batches
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ color: colors.success, fontSize: 10, lineHeight: 1.4 }}>
+            {result.features_exported} features, {result.batches_exported} batches
+          </div>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button onClick={handlePreviewReplay} style={{
+              padding: '3px 6px', borderRadius: 3, fontSize: 9,
+              border: `1px solid ${colors.accent}`, background: 'transparent',
+              color: colors.accent, cursor: 'pointer',
+            }}>
+              Replay
+            </button>
+            <button onClick={handleDownload} style={{
+              padding: '3px 6px', borderRadius: 3, fontSize: 9,
+              border: `1px solid ${colors.cardBorder}`, background: 'transparent',
+              color: colors.textMuted, cursor: 'pointer',
+            }}>
+              Download
+            </button>
+          </div>
         </div>
       )}
       {error && (

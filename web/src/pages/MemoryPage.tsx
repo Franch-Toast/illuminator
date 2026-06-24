@@ -6,6 +6,7 @@ import type { MemoryProcess } from '../hooks/useMemoryData'
 import EChart from '../components/charts/EChart'
 import type { EChartsOption } from '../components/charts/EChart'
 import FeatureHealthBadge from '../components/FeatureHealthBadge'
+import { SummaryCard, Sparkline, EmptyChart } from '../components/shared'
 
 const subTabs = [
   { id: 'system', label: 'System' },
@@ -318,45 +319,6 @@ function MemoryProcessDetail({ pid, comm, onBack }: { pid: number; comm: string;
   )
 }
 
-function SummaryCard({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div style={{
-      background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
-      borderRadius: 8, padding: '12px 16px',
-    }}>
-      <div style={{ fontSize: 10, color: colors.textMuted, marginBottom: 4 }}>{label}</div>
-      <div style={{ fontSize: 18, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: color ?? colors.textPrimary }}>
-        {value}
-      </div>
-    </div>
-  )
-}
-
-function Sparkline({ data, color }: { data: number[]; color: string }) {
-  if (data.length < 2) return null
-  const max = Math.max(...data, 1)
-  const h = 20
-  const w = 100
-  const step = w / (data.length - 1)
-  const points = data.map((v, i) => `${i * step},${h - (v / max) * h}`).join(' ')
-
-  return (
-    <svg width={w} height={h} style={{ display: 'block' }}>
-      <polyline fill="none" stroke={color} strokeWidth="1.5" points={points} />
-    </svg>
-  )
-}
-
-function EmptyChart({ message }: { message: string }) {
-  return (
-    <div style={{
-      height: 100, display: 'flex', alignItems: 'center', justifyContent: 'center',
-      color: colors.textMuted, fontSize: 12,
-    }}>
-      {message}
-    </div>
-  )
-}
 
 function formatMb(mb: number): string {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`
