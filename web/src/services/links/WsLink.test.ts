@@ -72,6 +72,51 @@ describe('WsLink', () => {
     }))
   })
 
+  it('infers modelType as time_series for records payload', () => {
+    const onData = vi.fn()
+    const link = new WsLink('ws://test/ws', onData, vi.fn())
+    link.connect()
+    mockWsInstance!.simulateOpen()
+    mockWsInstance!.simulateMessage(JSON.stringify({ feature: 'cpu', ts: 100, records: [{ cpu: 50 }] }))
+    expect(onData).toHaveBeenCalledWith(expect.objectContaining({ modelType: 'time_series' }))
+  })
+
+  it('infers modelType as profile for stack_samples payload', () => {
+    const onData = vi.fn()
+    const link = new WsLink('ws://test/ws', onData, vi.fn())
+    link.connect()
+    mockWsInstance!.simulateOpen()
+    mockWsInstance!.simulateMessage(JSON.stringify({ feature: 'cpu_profile', ts: 100, stack_samples: [] }))
+    expect(onData).toHaveBeenCalledWith(expect.objectContaining({ modelType: 'profile' }))
+  })
+
+  it('infers modelType as trace for spans payload', () => {
+    const onData = vi.fn()
+    const link = new WsLink('ws://test/ws', onData, vi.fn())
+    link.connect()
+    mockWsInstance!.simulateOpen()
+    mockWsInstance!.simulateMessage(JSON.stringify({ feature: 'sched', ts: 100, spans: [] }))
+    expect(onData).toHaveBeenCalledWith(expect.objectContaining({ modelType: 'trace' }))
+  })
+
+  it('infers modelType as log for log_lines payload', () => {
+    const onData = vi.fn()
+    const link = new WsLink('ws://test/ws', onData, vi.fn())
+    link.connect()
+    mockWsInstance!.simulateOpen()
+    mockWsInstance!.simulateMessage(JSON.stringify({ feature: 'syslog', ts: 100, log_lines: ['hello'] }))
+    expect(onData).toHaveBeenCalledWith(expect.objectContaining({ modelType: 'log' }))
+  })
+
+  it('respects explicit model_type field', () => {
+    const onData = vi.fn()
+    const link = new WsLink('ws://test/ws', onData, vi.fn())
+    link.connect()
+    mockWsInstance!.simulateOpen()
+    mockWsInstance!.simulateMessage(JSON.stringify({ feature: 'custom', ts: 100, model_type: 'trace', data: {} }))
+    expect(onData).toHaveBeenCalledWith(expect.objectContaining({ modelType: 'trace' }))
+  })
+
   it('isConnected returns true when WS is open', () => {
     const link = new WsLink('ws://test/ws', vi.fn(), vi.fn())
     link.connect()

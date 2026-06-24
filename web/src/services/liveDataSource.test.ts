@@ -5,7 +5,6 @@ vi.mock('./apiClient', () => ({
   api: {
     featureCollect: vi.fn().mockResolvedValue({ pipeline: 'test', records: [] }),
     features: vi.fn().mockResolvedValue({ features: [] }),
-    featureStart: vi.fn().mockResolvedValue({ status: 'ok' }),
   },
 }))
 

@@ -916,20 +916,20 @@ const data = await api.featureStream(featureName, cursorRef.current, abortRef.cu
 | **P2-D** | **WS 广播去重**（DataBatchPtr 指针比较，未变化时跳过序列化和发送） | **中** | ✅ 已完成 |
 | **P2-E** | **统一 `/api/v1/pipelines` 报告**（新增 `active_features` 字段含 FeatureManager 管道） | **中** | ✅ 已完成 |
 | **P2-F** | **清理第三批前端死代码**（useFeatureStream hook、pluginsList、featureRecordStatus、gc） | **中** | ✅ 已完成 |
-| P2-2 | 多页面重复组件抽取 (SummaryCard, Sparkline, EmptyChart) | 低 | 待做 |
+| P2-2 | 多页面重复组件抽取 (SummaryCard, Sparkline, EmptyChart) | 中 | ✅ 已完成 |
 | P2-4 | `mem_tracer.bpf.c` 集成为 `heap_profiler` Source 或移除 | 低 | 待做 |
 | ~~P2-5~~ | ~~`useCpuData` 等 hook 签名中 `intervalMs` 参数清理~~ | ~~低~~ | ✅ 已完成 |
 | ~~P2-7~~ | ~~清理第二批前端死代码~~ | ~~低~~ | ✅ 已完成 |
 | ~~P2-8~~ | ~~遗留 API 路由添加 Deprecation 头~~ | ~~中~~ | ✅ 已完成 |
-| P2-9 | `useFeatureStream.ts` 职责分离：`TimeSeriesBuffer` 提取为独立工具文件 | 低 | 待做 |
+| P2-9 | `TimeSeriesBuffer` 提取为独立工具文件 | 中 | ✅ 已完成 |
 | P2-10 | 前端 per-feature recording UI 集成（后端已支持，前端仅侧边栏全局录制） | 低 | 待做 |
-| P2-11 | Replay 补全 IO/Network/GPU 视图（当前为占位符 "coming soon"） | 低 | 待做 |
+| P2-11 | Replay 补全 IO/Network/GPU hooks (replaySource) | 中 | ✅ 已完成 |
 | P2-12 | WASM 插件运行时：决定实现或移除 stub (`wasm_runtime.h`) | 低 | 待做 |
 | P2-13 | 2026-09-01 后移除遗留 Deprecated API 路由 | 低 | 定时 |
-| P2-14 | 修复 `server.http_enabled` / `server.ws_enabled` 配置标志不生效 | 低 | 待做 |
+| P2-14 | 修复 `server.http_enabled` / `server.ws_enabled` 配置标志条件启动 | 中 | ✅ 已完成 |
 | P2-15 | `/stream` API 添加 feature 活跃状态检查 | 低 | 待做 |
-| P2-16 | Replay 全面支持：IO/Network/GPU hooks 添加 `replaySource` 参数 | 低 | 待做 |
-| P2-17 | CPU 页面增加"停止 Profiling"按钮（当前只有启动，无对称停止 UX） | 低 | 待做 |
+| P2-16 | Replay 全面支持：IO/Network/GPU 页面 UI 视图 | 低 | 待做 |
+| P2-17 | 后端遗留代码清理 (Listen/AcceptLoop 删除) | 中 | ✅ 已完成 |
 
 ---
 
