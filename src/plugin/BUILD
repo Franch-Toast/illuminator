@@ -73,7 +73,6 @@ cc_library(
         "//src/sinks:pprof_export",
         "//src/sinks:prometheus_exposition",
         "//src/sinks:otlp_export",
-        "//src/sinks:websocket_sink",
         # Storage
         "//src/storage:sqlite_backend",
     ],

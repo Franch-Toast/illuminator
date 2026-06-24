@@ -6,7 +6,7 @@
 >
 > **预计阅读时间**：30 分钟精读 + 2-3 天实操探索
 >
-> **更新日期**：2026-06-16
+> **更新日期**：2026-06-24
 
 ---
 
@@ -93,14 +93,17 @@ cd web && npm run dev    # → http://localhost:3000
 # 后端健康检查
 curl http://localhost:9527/healthz
 
-# 查看已注册的 Feature（管道）
+# 查看已注册的 Feature（Always-On 模式下 Tier 1-2 自动运行）
 curl http://localhost:9527/api/v1/features
+# → 所有 tier<=2 的 feature 应为 "active" 状态
 
-# 启动 CPU 监控
-curl -X POST http://localhost:9527/api/v1/features/cpu_utilization/start -d '{}'
-
-# 获取实时数据
+# 获取实时数据（无需手动 start，daemon 已自动启动监控）
 curl http://localhost:9527/api/v1/features/cpu_utilization/collect | python3 -m json.tool
+
+# 按需启动 Tier 3 profiling（Session API）
+curl -X POST http://localhost:9527/api/v1/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"cpu_profile","target_pids":[1234],"duration_sec":30}'
 ```
 
 ### 2.4 访问界面
@@ -132,10 +135,11 @@ Source (数据源) → AsyncChannel → Processor (处理器) → Aggregator (�
 
 **实验**：
 ```bash
-# 启动后，触发一次 CPU 采集
-curl -X POST http://localhost:9527/api/v1/features/cpu_utilization/start -d '{}'
-sleep 2
+# daemon 启动后 Tier 1-2 自动运行，直接查看数据
 curl http://localhost:9527/api/v1/features/cpu_utilization/collect | python3 -m json.tool
+
+# 增量拉取（带 cursor，模拟前端 LiveDataSource 的行为）
+curl "http://localhost:9527/api/v1/features/cpu_utilization/stream?cursor=0"
 ```
 
 ### 阶段二：理解线程模型（Day 1-2）
@@ -160,25 +164,118 @@ SinkPool (K 线程)          — 并行执行 Sink::Write()
 2. `src/core/engine/pipeline_controller.h` — `Pipeline` 类的 `Start()` 和 `ProcessLoop()`
 3. `src/core/engine/pipeline_controller.cc` — `BuildFromConfig()` 和 `StartAll()` 编排逻辑
 
-### 阶段三：理解 FeatureManager（Day 2）
+### 阶段三：理解 FeatureManager 与 Always-On 架构（Day 2）
 
-**目标**：理解 Feature 生命周期管理和前后端交互的核心
+**目标**：理解 Feature 生命周期管理和数据推送到前端的完整路径
+
+#### Always-On 模式
+
+```
+daemon 启动
+├── FeatureManager 注册所有 Feature 元数据
+├── 自动 Start Tier 1 (Monitoring) + Tier 2 (Tracing) features
+│   └── 无需用户干预，打开浏览器即有数据
+└── Tier 3 (Profiling) 通过 Session API 按需启动
+```
+
+#### FeatureManager 职责
 
 ```
 FeatureManager (高层抽象)
-├── 接收 HTTP API 请求 (start/stop/pause/resume/reconfigure)
+├── 接收 API 请求 (Session API for Tier 3, pause/resume for admin)
 ├── 按需创建独立 Pipeline 实例
-├── 自动注入 3 种运行时 Sink:
-│   ├── StreamSink → StreamSinkStore (供 /collect 和 /stream API 查询)
-│   ├── WebSocketSink → WebSocketSinkStore (供 WS 广播推送)
-│   └── RecordingSink (录制时按需注入)
+├── 自动注入运行时 Sink:
+│   └── StreamSink → StreamSinkStore (统一环形数据缓冲区)
+│       ├── HTTP /collect 和 /stream API 增量拉取
+│       ├── WebSocketManager 直接从此 Store 拉取数据广播
+│       └── Export API 回溯导出
 └── 注册定时器到共享 TimerWheel
+```
+
+#### 数据推送到前端全路径
+
+这是整个项目中最关键的数据通路。理解这条路径就掌握了前后端通信的核心：
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         BACKEND (C++, port 9527)                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  eBPF Source ─→ AsyncChannel ─→ Processor ─→ Aggregator                 │
+│                                                       │                 │
+│                                                       ▼                 │
+│                                              ┌─── SinkFanout ───┐       │
+│                                              │                  │       │
+│                                              ▼                  ▼       │
+│                                      StreamSink         LocalStorageSink│
+│                                          │                      │       │
+│                                          ▼                      ▼       │
+│                              StreamSinkStore (统一环形缓冲)    SQLite    │
+│                              ┌──── 60 batch/feature ────┐               │
+│                              │                          │               │
+│              ┌───────────────┼──────────────┐           │               │
+│              ▼               ▼              ▼           │               │
+│        HTTP /collect    HTTP /stream   WS broadcast     │               │
+│        (一次性拉取)     (cursor 增量)  (WebSocketManager)│               │
+│              │               │              │           │               │
+└──────────────┼───────────────┼──────────────┼───────────┼───────────────┘
+               │               │              │           │
+               ▼               ▼              ▼           │
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    FRONTEND (React, LiveDataSource)                       │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│  LiveDataSource (单例)                                                    │
+│  ├── 优先: WebSocket 通道 (/ws/features)                                  │
+│  │   └── 收到数据 → 通知所有 subscriber                                   │
+│  └── 降级: HTTP 轮询 (/features/:name/stream + cursor)                    │
+│      └── 周期 1s 拉取增量 → 通知 subscriber                               │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │ useCpuData / useMemoryData / ... (各页面 hook)                     │  │
+│  │   └── subscribe(featureName) → 接收 DataBatch → 更新组件 state     │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+│  ┌────────────────────────────────────────────────────────────────────┐  │
+│  │ useFeatureHealth(featureName) — 监测数据到达间隔                    │  │
+│  │   ├── < 5s → "active"                                              │  │
+│  │   ├── 5-15s → "degraded"                                           │  │
+│  │   └── > 15s → "unavailable"                                        │  │
+│  └────────────────────────────────────────────────────────────────────┘  │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 前端 UI 分层模型
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Always-On Monitoring (Tier 1-2)                    │
+│  ────────────────────────────────────               │
+│  用户打开页面 → 数据自动流入 → 图表实时更新          │
+│  无按钮、无等待                                      │
+│  例：CPU Timeline, Memory Chart, IO Throughput       │
+├─────────────────────────────────────────────────────┤
+│  On-Demand Profiling (Tier 3)                       │
+│  ────────────────────────────────────               │
+│  用户点击 "Start Profile" → Session API 创建会话    │
+│  → 数据采集 → 火焰图渲染 → 会话自动过期或手动停止   │
+│  例：On-CPU Flame Graph, Off-CPU Analysis           │
+├─────────────────────────────────────────────────────┤
+│  Offline Replay                                     │
+│  ────────────────────────────────────               │
+│  用户上传 .ilr 文件 → ReplayEngine 流式解析         │
+│  → 同一 UI 组件渲染历史数据                         │
+│  Export API: ring buffer → .ilr → 可回放             │
+└─────────────────────────────────────────────────────┘
 ```
 
 **必读文件**：
 1. `src/core/engine/feature_manager.h` — Feature 状态机、生命周期管理
-2. `src/server/api_routes.h` — REST API 全景
-3. `src/server/websocket_manager.h` — WS 推送 + 认证逻辑
+2. `src/sinks/stream_sink/stream_sink.h` — 统一环形数据缓冲区
+3. `src/server/websocket_manager.h` — WS 广播（从 StreamSinkStore 拉取）
+4. `src/server/api_routes.h` — REST API + Session API + Export API
+5. `web/src/services/liveDataSource.ts` — 前端 WS/HTTP 双通道 DataSource
 
 ### 阶段四：理解配置系统（Day 2）
 
@@ -324,26 +421,31 @@ LiveDataSource (全局单例)
 └── scheduleReconnect() → 指数退避 (1s → 2s → 4s → ... → 30s max)
 ```
 
-### 5.3 Feature 生命周期
+### 5.3 Feature 生命周期（Always-On 模式）
 
 ```
-前端操作               →   HTTP API              →   后端状态
-─────────────────────────────────────────────────────────────
-页面进入 CPU 标签页    →   POST /features/cpu_utilization/start
-                       →   FeatureManager::Start() → Pipeline 启动
-                       →   TimerWheel 注册 1s 采集定时器
-                       →   Source::Collect() 开始周期执行
-                       →   数据流入 StreamSink + WebSocketSink
+系统事件                   →   行为                      →   说明
+───────────────────────────────────────────────────────────────────
+daemon 启动               →   Tier 1-2 全部自动 Start   →   无需前端干预
+                          →   数据流入 StreamSinkStore   →   前端打开即有数据
 
-页面切到 Memory 标签页 →   POST /features/cpu_utilization/stop
-                       →   FeatureManager::Stop() → Pipeline 停止
-                       →   POST /features/memory_utilization/start
-                       →   新管道启动...
+用户打开 CPU 页面         →   subscribe("cpu_utilization")
+                          →   LiveDataSource 从 WS/HTTP 接收数据
+                          →   图表实时更新（无等待、无按钮）
 
-火焰图设置 PID         →   POST /features/cpu_profile/reconfigure
-                       →   {target_pids: [1234]}
-                       →   Source 更新 BPF 过滤器
-                       →   清空 StreamSinkStore + BPF maps
+用户点击 "Start Profile"  →   POST /api/v1/sessions
+                          →   {type:"cpu_profile", target_pids:[1234]}
+                          →   FeatureManager::Start() → Tier 3 Pipeline 启动
+                          →   Source 配置 BPF perf_event + PID 过滤
+                          →   数据流入 StreamSinkStore → 火焰图渲染
+
+Session 超时或手动 Stop   →   POST /api/v1/sessions/stop
+                          →   Pipeline 停止 → 资源释放
+                          →   已采集数据保留在 StreamSinkStore 中（环形缓冲）
+
+用户点击 "Export"         →   POST /api/v1/export
+                          →   从 StreamSinkStore 回溯最近 N batch
+                          →   生成 .ilr 文件 → 前端下载
 ```
 
 ### 5.4 AsyncChannel — 异步通信
@@ -818,4 +920,4 @@ server:
 
 ---
 
-> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、**Always-On 自动启动**、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 WebSocketSink 广播给前端——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可订阅已在流动的数据。
+> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、**Always-On 自动启动 Tier 1-2**、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 **StreamSinkStore → WebSocketManager 广播给前端**——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可通过 LiveDataSource 订阅已在流动的数据。

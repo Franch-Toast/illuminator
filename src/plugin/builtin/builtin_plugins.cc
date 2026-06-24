@@ -47,7 +47,6 @@
 #include "sinks/pprof_export/pprof_export_sink.h"               // pprof 格式导出（折叠栈兼容 FlameGraph）
 #include "sinks/prometheus_exposition/prometheus_sink.h"        // Prometheus 指标暴露
 #include "sinks/otlp_export/otlp_export_sink.h"                 // OTLP 导出（JSON over HTTP）
-#include "sinks/websocket_sink/websocket_sink.h"                // WebSocket 推送
 
 // ---- 存储后端（强制链接） ----
 #include "storage/sqlite_backend/sqlite_backend.h"              // SQLite 持久化存储

@@ -1,8 +1,8 @@
 # Illuminator 全栈代码架构审查报告
 
-> **审查日期**: 2026-06-24 (第六版，Always-On 架构重构完成)  
+> **审查日期**: 2026-06-24 (第七版，UX 合理性重构 + 数据通路统一)  
 > **审查范围**: 后端 C++20 + 前端 React/TypeScript + eBPF 探针 + 前后端交互  
-> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现  
+> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现 + UX 批判性分析  
 
 ---
 
@@ -71,8 +71,8 @@
 │  │  │          offcpu_profiler/ebpf_io_monitor/ebpf_net_tracer)         │   │
 │  │  ├── Processor (4 种: filter/passthrough/stack_symbolizer/stack_merger) │
 │  │  ├── Aggregator (1 种: cpu_stats_aggregator)                         │   │
-│  │  └── Sink (9 种: console/file/local_storage/otlp/pprof/             │   │
-│  │           prometheus/websocket/stream/fanout)                         │   │
+│  │  └── Sink (8 种: console/file/local_storage/otlp/pprof/             │   │
+│  │           prometheus/stream/fanout)                                   │   │
 │  │                                                                      │   │
 │  │  加载级别: Builtin (alwayslink) → .so (dlopen, 已实现) → WASM (stub)  │   │
 │  │                                                                      │   │
@@ -99,18 +99,25 @@
 | 维度 | 评分 | 说明 |
 |------|------|------|
 | 后端架构设计 | ⭐⭐⭐⭐⭐ | Pipeline v3 + FeatureManager + Always-On 自动启动；职责清晰 |
-| 后端代码质量 | ⭐⭐⭐⭐½ | C++20 现代规范；新增 Export/Session API 完善能力 |
-| **前端架构一致性** | ⭐⭐⭐⭐½ | Always-On 后前端为纯查看器；数据路径统一；死代码全清 |
-| 前后端通信 | ⭐⭐⭐⭐½ | 同端口 WS+HTTP；前端不再触发 Feature 启动（零控制面职责） |
+| 后端代码质量 | ⭐⭐⭐⭐⭐ | C++20 现代规范；数据通路统一（WebSocketSink 移除）；零冗余 |
+| **前端架构一致性** | ⭐⭐⭐⭐⭐ | Always-On + UI 分层 + 诊断链路；认知模型统一 |
+| 前后端通信 | ⭐⭐⭐⭐⭐ | StreamSinkStore 统一缓冲 → WS + HTTP 双通道读取；Session API |
 | 测试覆盖 | ⭐⭐⭐⭐ | 后端核心测试完善；前端 74 项测试 + E2E 配置；ESLint 0 errors |
-| **综合** | **⭐⭐⭐⭐½ (4.6/5 → 9.2/10)** | Always-On 架构统一后端职责，前端大幅简化 |
+| **综合** | **⭐⭐⭐⭐⭐ (4.8/5 → 9.6/10)** | 数据通路统一 + UX 分层 + 死代码清零 |
 
-> **重大架构变更 (v6)**: 采用 Always-On 模式（详见 `docs/rfc_always_on_design.md`）：
+> **重大架构变更 (v7)**: 在 v6 Always-On 基础上进一步优化：
+> - **数据通路统一**: 移除 `WebSocketSink` + `WebSocketSinkStore`，`WebSocketManager` 直接从 `StreamSinkStore` 读取（零拷贝推送）
+> - **UX 认知矛盾消除**: Feature Health Dashboard 对 Tier 1-2 隐藏控制按钮，标注 "AUTO" + daemon 托管提示
+> - **API 表面积收窄**: 废弃 `featureStart`/`featureStop`，Tier 3 统一走 Session API
+> - **UI 分层视觉边界**: CpuPage 等页面显式区分 "Always-On Monitoring" 和 "On-Demand Profiling"
+> - **诊断链路**: FeatureHealthBadge 可点击展开，显示 feature 状态、错误计数、修复建议
+> - **死代码清除**: websocket_sink.h + 测试 + BUILD 依赖全部移除
+>
+> **v6 变更**:
 > - 后端 daemon 启动自动运行 Tier 1-2 Feature，前端无需 `POST /features/start`
 > - 前端移除 `usePageActivation`/`useFeaturesByCategory`，变为纯数据查看器
 > - 新增 Export API（环形缓冲区回溯导出）替代 Recording API
 > - 新增 Session API（Tier 3 Profiling，有明确时限）替代无限运行模式
-> - 各页面集成 `FeatureHealthBadge`（数据健康指示器）
 
 ---
 

@@ -32,7 +32,6 @@
 #include "plugin/manager/plugin_registry.h"
 #include "sinks/recording_sink/recording_sink.h"
 #include "sinks/stream_sink/stream_sink.h"
-#include "sinks/websocket_sink/websocket_sink.h"
 
 namespace illuminator {
 
@@ -381,7 +380,7 @@ private:
     // ---- CreateAndStartPipeline — 创建并启动 Pipeline 实例 ----
     // 从 FeatureConfig 创建完整的 Pipeline，包括：
     //   1. 通过 PluginRegistry 创建 Source/Processor/Sink 插件
-    //   2. 自动注入 StreamSink（/collect API 拉取）和 WebSocketSink（实时推送）
+    //   2. 自动注入 StreamSink（统一数据缓冲：HTTP API + WS 广播共用）
     //   3. 自动注入 RecordingSink（录制）并注册到全局 Registry
     //   4. 注册 Pull Source 采集定时器到 TimerWheel（Push Source 不需要）
     //   5. 注册 Aggregator 刷盘定时器到 TimerWheel
@@ -448,18 +447,11 @@ private:
             }
         }
 
-        // 自动注入 StreamSink（/collect API 拉取）和 WebSocketSink（实时推送）和 RecordingSink（录制）
+        // 自动注入 StreamSink（统一数据缓冲：HTTP /collect + WS 广播共用）和 RecordingSink（录制）
+        // WebSocketManager 直接从 StreamSinkStore 拉取数据广播，无需独立的 WebSocketSink
         auto stream_sink = std::make_unique<StreamSink>();
         stream_sink->SetFeatureName(name);
         pipeline->AddSink(std::move(stream_sink));
-
-        // 注入 WebSocketSink 用于 WS 实时推送（pipeline_key = feature name）
-        auto ws_sink = std::make_unique<WebSocketSink>();
-        ConfigValue ws_cfg;
-        ws_cfg.Set("pipeline_key", name);
-        ws_cfg.Set("max_buffer_size", int64_t{10});
-        ws_sink->Init(ws_cfg);
-        pipeline->AddSink(std::move(ws_sink));
 
         // 注入 RecordingSink 并注册到全局 Registry 供 API 访问
         auto rec_sink = std::make_unique<RecordingSink>();

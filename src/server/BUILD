@@ -52,6 +52,6 @@ cc_library(
         ":websocket_server",
         "//src/core:common",
         "//src/core:threading",
-        "//src/sinks:websocket_sink",
+        "//src/sinks:stream_sink",
     ],
 )

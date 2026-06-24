@@ -166,7 +166,14 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
         </div>
       )}
 
-      {/* CPU Timeline (Tier 1 — auto) */}
+      {/* Always-On section header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 600, color: '#4ade80', textTransform: 'uppercase', letterSpacing: 1 }}>
+          Always-On Monitoring
+        </span>
+        <span style={{ flex: 1, height: 1, background: 'rgba(74,222,128,0.2)' }} />
+      </div>
+
       <div style={{
         background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
         borderRadius: 8, padding: 16,
@@ -177,7 +184,6 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
         <ProcessCpuTimeline data={timeline} selectedTimestamp={null} onTimeSelect={setTimeSelection} />
       </div>
 
-      {/* Thread Breakdown (Tier 1 — auto) */}
       <div style={{
         background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
         borderRadius: 8, padding: 16,
@@ -190,7 +196,15 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
         </div>
       </div>
 
-      {/* CPU Profiling (Tier 3 — manual trigger) */}
+      {/* On-Demand section header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+        <span style={{ fontSize: 10, fontWeight: 600, color: '#f59e0b', textTransform: 'uppercase', letterSpacing: 1 }}>
+          On-Demand Profiling
+        </span>
+        <span style={{ flex: 1, height: 1, background: 'rgba(245,158,11,0.2)' }} />
+        <span style={{ fontSize: 9, color: colors.textMuted }}>Session-based · ~3% CPU overhead</span>
+      </div>
+
       <div style={{
         background: colors.cardBg, border: `1px solid ${colors.cardBorder}`,
         borderRadius: 8, padding: 16,

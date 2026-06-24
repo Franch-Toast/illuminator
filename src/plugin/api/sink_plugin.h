@@ -12,10 +12,10 @@
 // - ConsoleSink     — 输出到 stdout（调试用）
 // - FileExportSink  — 写入 JSONL 文件
 // - LocalStorageSink — 写入本地 SQLite 存储
+// - StreamSink      — 统一环形缓冲（HTTP/WS/Export 共用）
 // - PrometheusSink  — 暴露为 Prometheus 指标
 // - PprofExportSink — 导出为 pprof/折叠栈格式
 // - OtlpExportSink  — 导出到 OpenTelemetry Collector
-// - WebSocketSink   — 通过 WebSocket 推送到前端
 // ============================================================================
 
 #pragma once

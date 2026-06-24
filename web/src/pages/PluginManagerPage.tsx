@@ -51,8 +51,12 @@ export default function PluginManagerPage() {
     setPendingActions(prev => new Set(prev).add(feature))
     try {
       switch (action) {
-        case 'start': await api.featureStart(feature); break
-        case 'stop': await api.featureStop(feature); break
+        case 'start':
+          await api.createSession({ type: feature })
+          break
+        case 'stop':
+          await api.stopSession({ type: feature })
+          break
         case 'pause': await api.featurePause(feature); break
         case 'resume': await api.featureResume(feature); break
       }
@@ -84,6 +88,7 @@ export default function PluginManagerPage() {
 
   const handleBatchAction = useCallback(async (action: 'start' | 'stop') => {
     const targets = features.filter(f => {
+      if (f.tier <= 2) return false // Always-On features are daemon-managed
       if (action === 'start') return f.state === 'inactive'
       return f.state === 'active' || f.state === 'paused'
     })
@@ -192,13 +197,13 @@ export default function PluginManagerPage() {
           padding: '5px 12px', borderRadius: 4, border: `1px solid ${colors.cardBorder}`,
           background: 'transparent', color: '#4ade80', cursor: 'pointer', fontSize: 12,
         }}>
-          Start All
+          Start All On-Demand
         </button>
         <button onClick={() => handleBatchAction('stop')} style={{
           padding: '5px 12px', borderRadius: 4, border: `1px solid ${colors.cardBorder}`,
           background: 'transparent', color: '#ef4444', cursor: 'pointer', fontSize: 12,
         }}>
-          Stop All
+          Stop All On-Demand
         </button>
       </div>
 
@@ -250,6 +255,7 @@ function FeatureCard({ feature, isPending, onAction }: {
   const stateColor = STATE_COLORS[feature.state] || '#6b7280'
   const isActive = feature.state === 'active'
   const isPaused = feature.state === 'paused'
+  const isAlwaysOn = feature.tier <= 2
 
   return (
     <div style={{
@@ -270,6 +276,11 @@ function FeatureCard({ feature, isPending, onAction }: {
             }}>
               {feature.state.toUpperCase()}
             </span>
+            {isAlwaysOn && isActive && (
+              <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 3, background: 'rgba(74,222,128,0.1)', color: '#4ade80' }}>
+                AUTO
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 2 }}>
             {feature.name}
@@ -299,32 +310,41 @@ function FeatureCard({ feature, isPending, onAction }: {
       {(isActive || isPaused) && feature.uptime_ms > 0 && (
         <div style={{ fontSize: 10, color: colors.textMuted, marginTop: 6 }}>
           Uptime: {formatUptime(feature.uptime_ms)}
-          {feature.is_recording && <span style={{ color: '#ef4444', marginLeft: 8 }}>● Recording</span>}
         </div>
       )}
 
-      <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
-        {feature.state === 'inactive' && (
-          <ActionBtn label="Start" color="#4ade80" onClick={() => onAction('start')} disabled={isPending} />
-        )}
-        {isActive && (
-          <>
-            <ActionBtn label="Pause" color="#f59e0b" onClick={() => onAction('pause')} disabled={isPending} />
-            <ActionBtn label="Stop" color="#ef4444" onClick={() => onAction('stop')} disabled={isPending} />
-          </>
-        )}
-        {isPaused && (
-          <>
-            <ActionBtn label="Resume" color="#60a5fa" onClick={() => onAction('resume')} disabled={isPending} />
-            <ActionBtn label="Stop" color="#ef4444" onClick={() => onAction('stop')} disabled={isPending} />
-          </>
-        )}
-        {(feature.state === 'starting' || feature.state === 'stopping') && (
-          <span style={{ fontSize: 11, color: colors.textMuted, padding: '6px 0' }}>
-            {feature.state === 'starting' ? 'Starting...' : 'Stopping...'}
-          </span>
-        )}
-      </div>
+      {/* Tier 1-2 (Always-On): read-only status, no control buttons */}
+      {isAlwaysOn && (
+        <div style={{ fontSize: 11, color: colors.textMuted, marginTop: 10, padding: '6px 10px', background: 'rgba(74,222,128,0.03)', borderRadius: 4, border: '1px solid rgba(74,222,128,0.1)' }}>
+          Managed by daemon (auto-start). Use CLI or config to override.
+        </div>
+      )}
+
+      {/* Tier 3 (On-Demand): full control buttons */}
+      {!isAlwaysOn && (
+        <div style={{ display: 'flex', gap: 6, marginTop: 12 }}>
+          {feature.state === 'inactive' && (
+            <ActionBtn label="Start Session" color="#4ade80" onClick={() => onAction('start')} disabled={isPending} />
+          )}
+          {isActive && (
+            <>
+              <ActionBtn label="Pause" color="#f59e0b" onClick={() => onAction('pause')} disabled={isPending} />
+              <ActionBtn label="Stop" color="#ef4444" onClick={() => onAction('stop')} disabled={isPending} />
+            </>
+          )}
+          {isPaused && (
+            <>
+              <ActionBtn label="Resume" color="#60a5fa" onClick={() => onAction('resume')} disabled={isPending} />
+              <ActionBtn label="Stop" color="#ef4444" onClick={() => onAction('stop')} disabled={isPending} />
+            </>
+          )}
+          {(feature.state === 'starting' || feature.state === 'stopping') && (
+            <span style={{ fontSize: 11, color: colors.textMuted, padding: '6px 0' }}>
+              {feature.state === 'starting' ? 'Starting...' : 'Stopping...'}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   )
 }

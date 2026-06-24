@@ -48,17 +48,16 @@ export const api = {
   internalMetrics: () => get('/api/v1/internal_metrics'),
   query: (sql: string) => post<{ rows?: Record<string, unknown>[] }>('/api/v1/query', { query: sql }),
 
-  // Feature management API
+  // Feature query API
   features: () => get<{ features: FeatureEntry[] }>('/api/v1/features'),
-  featureStart: (name: string, opts?: { target_pids?: number[]; target_comms?: string[] }) =>
-    post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/start`, opts ?? {}),
-  featureStop: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/stop`, {}),
-  featurePause: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/pause`, {}),
-  featureResume: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/resume`, {}),
   featureCollect: (name: string) => get(`/api/v1/features/${name}/collect`),
   featureStream: (name: string, cursor: number, signal?: AbortSignal) =>
     fetch(`/api/v1/features/${name}/stream?cursor=${cursor}`, { signal })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<{ cursor: number; batches: Array<Record<string, unknown>> }> }),
+
+  // Feature lifecycle (admin-only, prefer Session API for Tier 3)
+  featurePause: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/pause`, {}),
+  featureResume: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/resume`, {}),
 
   // Resource Budget
   budget: () => get<BudgetResponse>('/api/v1/budget'),

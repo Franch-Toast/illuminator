@@ -1,15 +1,15 @@
 // =============================================================================
-// StreamSink — Feature 实时数据流 Sink
+// StreamSink — 统一数据缓冲 Sink
 // =============================================================================
-// 为每个 Feature 提供独立的数据缓冲区，支持：
-//   1. HTTP API 拉取（/api/v1/features/:name/collect）
-//   2. WebSocket 实时推送
-//   3. 未来的录制功能扩展（通过 SinkFanout 组合）
+// 为每个 Feature 提供独立的环形数据缓冲区，同时服务于：
+//   1. HTTP API 拉取（/api/v1/features/:name/collect、/stream）
+//   2. WebSocket 实时广播（WebSocketManager 直接从 StreamSinkStore 读取）
+//   3. Export API 回溯导出（Recent(n) 获取历史 batch）
 //
-// 与 WebSocketSink 的区别：
-//   - StreamSink 面向 Feature 维度，而非全局 pipeline_key
+// 设计：
+//   - 每个 Feature 一个独立 StreamBuffer（60 batch 环形）
 //   - 支持增量拉取（带 cursor），避免重复消费
-//   - 内置淘汰策略和内存上限
+//   - WebSocketManager 通过 Latest() 轮询 + 去重实现零拷贝推送
 // =============================================================================
 
 #pragma once

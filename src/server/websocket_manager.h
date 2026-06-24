@@ -19,7 +19,7 @@
 #include "core/common/logging.h"
 #include "core/threading/thread_util.h"
 #include "server/websocket_server.h"
-#include "sinks/websocket_sink/websocket_sink.h"
+#include "sinks/stream_sink/stream_sink.h"
 
 namespace illuminator {
 
@@ -33,7 +33,7 @@ using WsBroadcastSerializer =
 // 职责：
 //   1. 管理 WebSocket 连接（接受新连接、维护连接池、处理断开）
 //   2. 按管道订阅分组（一个 WebSocket 连接订阅一个 pipeline_key）
-//   3. 定期广播：从 WebSocketSinkStore 拉取最新数据，推送到所有订阅客户端
+//   3. 定期广播：从 StreamSinkStore 拉取最新数据，推送到所有订阅客户端
 //   4. 支持两种模式：独立端口监听（Legacy）和 HTTP 同端口升级（推荐）
 //   5. 处理 WebSocket 控制帧（Ping/Pong/Close）
 //
@@ -167,7 +167,7 @@ private:
     // ---- BroadcastLoop — 广播主循环（ws-broadcast 线程） ----
     // 每个广播周期执行：
     //   1. ProcessIncoming() — 处理客户端入站消息（ping/pong/close/subscribe）
-    //   2. BroadcastData() — 从 WebSocketSinkStore 拉取最新数据，推送到所有订阅客户端
+    //   2. BroadcastData() — 从 StreamSinkStore 拉取最新数据，推送到所有订阅客户端
     //   3. sleep(broadcast_interval_ms_) — 等待下一个周期
     void BroadcastLoop() {
         while (running_.load()) {
@@ -271,7 +271,7 @@ private:
 
     // ---- BroadcastData — 数据广播（三阶段） ----
     // Phase 1（加锁）：快照当前订阅表，复制 fd 列表
-    // Phase 2（无锁）：遍历每个 pipeline_key，从 WebSocketSinkStore 获取最新数据
+    // Phase 2（无锁）：遍历每个 pipeline_key，从 StreamSinkStore 获取最新数据
     //                → 去重（与上次广播的数据相同则跳过）
     //                → 序列化 → 写入所有订阅的 fd
     //                → 记录写入失败的 fd（死连接）
@@ -289,7 +289,7 @@ private:
 
         // Phase 2 (lock-free): serialize + send (with dedup)
         for (auto& [key, fds] : snapshot) {
-            auto batch = WebSocketSinkStore::Instance().Latest(key);
+            auto batch = StreamSinkStore::Instance().GetBuffer(key).Latest();
             if (!batch) continue;
 
             // Dedup: skip if data hasn't changed since last broadcast
