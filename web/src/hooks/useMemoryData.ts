@@ -40,7 +40,7 @@ interface MemoryCollectResponse {
   }>
 }
 
-export function useMemoryUtilization(active: boolean) {
+export function useMemoryUtilization(active = true) {
   const [data, setData] = useState<MemoryDataPoint[]>([])
   const [summary, setSummary] = useState<MemorySummary | null>(null)
   const buffer = useRef(new TimeSeriesBuffer<MemoryDataPoint>(60))
@@ -100,7 +100,7 @@ export function useMemoryUtilization(active: boolean) {
   return { data, summary, clear }
 }
 
-export function useMemoryProcesses(active: boolean) {
+export function useMemoryProcesses(active = true) {
   const [processes, setProcesses] = useState<MemoryProcess[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)

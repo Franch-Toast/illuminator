@@ -316,6 +316,24 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     }
     IL_INFO("FeatureManager: {} features registered", config.pipelines.size());
 
+    // Always-On: auto-start Tier 1-2 features (monitoring + tracing)
+    {
+        int auto_started = 0;
+        for (const auto& f : feature_manager.ListFeatures()) {
+            if (static_cast<int>(f.tier) <= 2 && f.state == illuminator::FeatureState::kInactive) {
+                illuminator::FeatureManager::StartParams auto_params;
+                auto status = feature_manager.Start(f.name, auto_params);
+                if (status.ok()) {
+                    ++auto_started;
+                } else {
+                    IL_WARN("Auto-start failed for '{}': {}", f.name, status.message());
+                }
+            }
+        }
+        IL_INFO("Always-On: {}/{} features auto-started (Tier 1-2)",
+                auto_started, config.pipelines.size());
+    }
+
     illuminator::HttpServer http_server;
     illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
     illuminator::RegisterApiRoutes(http_server.server(), controller, &feature_manager);

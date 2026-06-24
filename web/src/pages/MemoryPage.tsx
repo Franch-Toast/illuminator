@@ -1,11 +1,11 @@
 import { useState, useMemo } from 'react'
 import { colors } from '../styles/theme'
 import SubTabBar from '../components/SubTabBar'
-import { usePageActivation, useFeaturesByCategory } from '../hooks/useDataSource'
 import { useMemoryUtilization, useMemoryProcesses } from '../hooks/useMemoryData'
 import type { MemoryProcess } from '../hooks/useMemoryData'
 import EChart from '../components/charts/EChart'
 import type { EChartsOption } from '../components/charts/EChart'
+import FeatureHealthBadge from '../components/FeatureHealthBadge'
 
 const subTabs = [
   { id: 'system', label: 'System' },
@@ -14,14 +14,13 @@ const subTabs = [
 
 export default function MemoryPage() {
   const [activeTab, setActiveTab] = useState('system')
-  usePageActivation('memory', [
-    { name: 'memory_utilization', tier: 1 },
-    { name: 'memory_processes', tier: 1 },
-  ])
-  useFeaturesByCategory('memory')
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '0 0 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 0 8px' }}>
+        <h2 style={{ margin: 0, fontSize: 20, color: colors.textPrimary }}>Memory</h2>
+        <FeatureHealthBadge featureName="memory_utilization" />
+      </div>
       <SubTabBar tabs={subTabs} active={activeTab} onChange={setActiveTab} />
       {activeTab === 'system' && <SystemSubTab />}
       {activeTab === 'process' && <ProcessSubTab />}

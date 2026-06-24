@@ -558,12 +558,10 @@ export function useMemoryUtilization(active: boolean, replaySource?: DataSource)
 
 ```typescript
 import { useMemoryUtilization } from '../hooks/useMemoryData'
-import { usePageActivation } from '../hooks/useDataSource'
+import FeatureHealthBadge from '../components/FeatureHealthBadge'
 
 export default function MemoryPage() {
-  usePageActivation('memory', [
-    { name: 'memory_utilization', tier: 1 },
-  ])
+  // Always-On: 无需激活 Feature，数据已在后端持续流动
 
   const { data } = useMemoryUtilization(true)
 
@@ -583,7 +581,8 @@ const MemoryPage = lazy(() => import('./pages/MemoryPage'))
 ### 关键设计点
 
 - **Hook 使用 `getDataSource().subscribe()`**：自动获得 WS 推送 + HTTP 降级
-- **页面使用 `usePageActivation()`**：进入页面时自动 start feature，离开时可 stop
+- **Always-On 模式**：Tier 1-2 Feature 由 daemon 自动启动，前端不需要 `usePageActivation`
+- **Health 监控**：使用 `useFeatureHealth(name)` 检测数据可用性
 - **支持 Replay**：hook 接受可选 `replaySource` 参数
 - **暂停感知**：从 `useTimeStore` 读取 mode，paused 时取消订阅
 
@@ -819,4 +818,4 @@ server:
 
 ---
 
-> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、HTTP API 触发 start、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 WebSocketSink 广播给前端——就能理解整个系统的运转方式。
+> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、**Always-On 自动启动**、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 WebSocketSink 广播给前端——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可订阅已在流动的数据。

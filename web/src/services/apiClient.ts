@@ -52,8 +52,6 @@ export const api = {
   features: () => get<{ features: FeatureEntry[] }>('/api/v1/features'),
   featureStart: (name: string, opts?: { target_pids?: number[]; target_comms?: string[] }) =>
     post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/start`, opts ?? {}),
-  featureReconfigure: (name: string, opts: { target_pids?: number[]; target_comms?: string[] }) =>
-    post<{ status: string; feature: string; message: string }>(`/api/v1/features/${name}/reconfigure`, opts),
   featureStop: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/stop`, {}),
   featurePause: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/pause`, {}),
   featureResume: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/resume`, {}),
@@ -62,20 +60,21 @@ export const api = {
     fetch(`/api/v1/features/${name}/stream?cursor=${cursor}`, { signal })
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<{ cursor: number; batches: Array<Record<string, unknown>> }> }),
 
-  // Recording API
-  featureRecordStart: (name: string) =>
-    post<{ status: string; feature: string; file: string }>(`/api/v1/features/${name}/record/start`, {}),
-  featureRecordStop: (name: string) =>
-    post<{ status: string; feature: string; file: string; batches: number; bytes: number }>(`/api/v1/features/${name}/record/stop`, {}),
-
   // Resource Budget
   budget: () => get<BudgetResponse>('/api/v1/budget'),
 
   // Plugin Hot-reload
   pluginsReload: () => post<{ status: string; loaded: number; plugins: string[] }>('/api/v1/plugins/reload', {}),
 
-  // Global Recording
-  recordingStart: () => post<{ status: string; recording_features: string[] }>('/api/v1/recording/start', {}),
-  recordingStop: () => post<{ status: string; stopped_features: Array<{ feature: string; file: string; bytes: number }> }>('/api/v1/recording/stop', {}),
-  recordingStatus: () => get<{ recording: boolean; features: Array<{ feature: string; bytes_written: number }>; total_bytes: number }>('/api/v1/recording/status'),
+  // Export API (Always-On: export from ring buffer with lookback)
+  exportData: (opts: { features?: string[]; lookback_batches?: number }) =>
+    post<{ status: string; file: string; features_exported: number; batches_exported: number }>('/api/v1/export', opts),
+
+  // Session API (Tier 3 profiling with auto-expiry)
+  createSession: (opts: { type: string; target_pids?: number[]; target_comms?: string[]; duration_sec?: number }) =>
+    post<{ session_id: string; type: string; status: string; started_at: number; expires_at?: number; duration_sec?: number }>('/api/v1/sessions', opts),
+  stopSession: (opts: { type: string }) =>
+    post<{ status: string; type: string; stopped: boolean }>('/api/v1/sessions/stop', opts),
+  listSessions: () =>
+    get<{ sessions: Array<{ type: string; category: string; status: string; uptime_ms: number }> }>('/api/v1/sessions'),
 }

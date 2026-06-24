@@ -38,7 +38,7 @@ interface NetworkCollectResponse {
   }>
 }
 
-export function useNetworkMonitor(active: boolean) {
+export function useNetworkMonitor(active = true) {
   const [data, setData] = useState<NetworkDataPoint[]>([])
   const [summary, setSummary] = useState<NetworkSummary | null>(null)
   const buffer = useRef(new TimeSeriesBuffer<NetworkDataPoint>(60))
@@ -90,7 +90,7 @@ export function useNetworkMonitor(active: boolean) {
   return { data, summary, clear }
 }
 
-export function useNetworkProcesses(active: boolean) {
+export function useNetworkProcesses(active = true) {
   const [processes, setProcesses] = useState<NetworkProcess[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)

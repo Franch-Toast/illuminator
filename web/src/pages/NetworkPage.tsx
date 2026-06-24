@@ -1,11 +1,11 @@
 import { useState, useMemo } from 'react'
 import { colors } from '../styles/theme'
 import SubTabBar from '../components/SubTabBar'
-import { usePageActivation, useFeaturesByCategory } from '../hooks/useDataSource'
 import { useNetworkMonitor, useNetworkProcesses, formatBytes } from '../hooks/useNetworkData'
 import type { NetworkProcess } from '../hooks/useNetworkData'
 import EChart from '../components/charts/EChart'
 import type { EChartsOption } from '../components/charts/EChart'
+import FeatureHealthBadge from '../components/FeatureHealthBadge'
 
 const subTabs = [
   { id: 'system', label: 'System' },
@@ -14,11 +14,13 @@ const subTabs = [
 
 export default function NetworkPage() {
   const [activeTab, setActiveTab] = useState('system')
-  usePageActivation('network', [{ name: 'net_tracer', tier: 2 }])
-  useFeaturesByCategory('network')
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, padding: '0 0 24px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0 0 8px' }}>
+        <h2 style={{ margin: 0, fontSize: 20, color: colors.textPrimary }}>Network</h2>
+        <FeatureHealthBadge featureName="net_tracer" />
+      </div>
       <SubTabBar tabs={subTabs} active={activeTab} onChange={setActiveTab} />
       {activeTab === 'system' && <SystemSubTab />}
       {activeTab === 'process' && <ProcessSubTab />}

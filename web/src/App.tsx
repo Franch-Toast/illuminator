@@ -4,7 +4,7 @@ import TimeControls from './components/TimeControls/TimeControls'
 import StatusBar from './components/Layout/StatusBar'
 import ResourceBudget from './components/Layout/ResourceBudget'
 import ConnectionIndicator from './components/Layout/ConnectionIndicator'
-import RecordingControl from './components/Layout/RecordingControl'
+import ExportControl from './components/Layout/ExportControl'
 import { usePipelinePolling } from './hooks/usePipelinePolling'
 import { useTimeStore } from './stores/useTimeStore'
 
@@ -139,7 +139,7 @@ export default function App() {
 
         <div style={{ flex: 1 }} />
         <div style={{ padding: '8px 12px', borderTop: '1px solid #2a2d35', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <RecordingControl />
+          <ExportControl />
           <ConnectionIndicator />
           <ResourceBudget />
         </div>

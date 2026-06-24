@@ -24,8 +24,8 @@ vi.mock('./services/apiClient', () => ({
     featureStart: vi.fn().mockResolvedValue({ status: 'ok' }),
     featureStop: vi.fn().mockResolvedValue({ status: 'ok' }),
     pipelineStatus: vi.fn().mockResolvedValue([]),
-    recordingStatus: vi.fn().mockResolvedValue({ recording: false }),
     budget: vi.fn().mockResolvedValue(null),
+    exportData: vi.fn().mockResolvedValue({ status: 'ok', file: '/tmp/test.ilr', features_exported: 0, batches_exported: 0 }),
   },
 }))
 

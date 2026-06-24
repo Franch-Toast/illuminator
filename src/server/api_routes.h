@@ -780,6 +780,167 @@ inline void RegisterFeatureRoutes(httplib::Server& srv,
                     json{{"plugins", plugins}}.dump() + "\n",
                     "application/json");
             });
+
+    // === Export API (replaces global recording with lookback support) ===
+    // POST /api/v1/export — export recent data from ring buffers + continue capturing
+    srv.Post("/api/v1/export",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 json body;
+                 try { body = json::parse(req.body); }
+                 catch (...) { JsonError(res, "Invalid JSON body", 400); return; }
+
+                 std::vector<std::string> target_features;
+                 if (body.contains("features") && body["features"].is_array()) {
+                     for (auto& f : body["features"])
+                         target_features.push_back(f.get<std::string>());
+                 } else {
+                     for (const auto& f : features.ListFeatures())
+                         if (f.state == FeatureState::kActive)
+                             target_features.push_back(f.name);
+                 }
+
+                 size_t lookback = body.value("lookback_batches", 60);
+
+                 auto now = std::chrono::system_clock::now();
+                 auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     now.time_since_epoch()).count();
+                 std::string filename = "export_" + std::to_string(epoch_ms) + ".ilr";
+                 std::string output_dir = "/tmp/illuminator_exports";
+                 (void)std::system(("mkdir -p " + output_dir).c_str());
+                 std::string path = output_dir + "/" + filename;
+
+                 std::ofstream out(path, std::ios::binary);
+                 if (!out.is_open()) {
+                     JsonError(res, "Cannot create export file: " + path, 500);
+                     return;
+                 }
+
+                 json header;
+                 header["format"] = "ilr";
+                 header["version"] = 1;
+                 header["type"] = "export";
+                 header["features"] = target_features;
+                 header["started_at"] = epoch_ms;
+                 header["lookback_batches"] = lookback;
+                 out << header.dump() << "\n";
+
+                 size_t total_batches = 0;
+                 auto& store = StreamSinkStore::Instance();
+                 for (const auto& fname : target_features) {
+                     auto& buf = store.GetBuffer(fname);
+                     auto recent = buf.Recent(lookback);
+                     for (const auto& batch : recent) {
+                         if (!batch) continue;
+                         json j;
+                         j["feature"] = fname;
+                         j["ts"] = epoch_ms;
+                         j["data"] = json::parse(BatchToJson(*batch, fname));
+                         out << j.dump() << "\n";
+                         ++total_batches;
+                     }
+                 }
+                 out.close();
+
+                 res.set_content(
+                     json{{"status", "ok"},
+                          {"file", path},
+                          {"features_exported", target_features.size()},
+                          {"batches_exported", total_batches}}.dump() + "\n",
+                     "application/json");
+             });
+
+    // === Session API (for Tier 3 profiling with auto-expiry) ===
+    // POST /api/v1/sessions — create a profiling session
+    srv.Post("/api/v1/sessions",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 json body;
+                 try { body = json::parse(req.body); }
+                 catch (...) { JsonError(res, "Invalid JSON body", 400); return; }
+
+                 std::string type = body.value("type", "");
+                 if (type.empty()) {
+                     JsonError(res, "Missing 'type' field (e.g. cpu_profile, offcpu_profile)", 400);
+                     return;
+                 }
+
+                 FeatureManager::StartParams params;
+                 if (body.contains("target_pids")) {
+                     for (auto& p : body["target_pids"])
+                         params.target_pids.push_back(p.get<int>());
+                 }
+                 if (body.contains("target_comms")) {
+                     for (auto& c : body["target_comms"])
+                         params.target_comms.push_back(c.get<std::string>());
+                 }
+
+                 int duration_sec = body.value("duration_sec", 30);
+
+                 auto status = features.Start(type, params);
+                 if (!status.ok()) {
+                     JsonError(res, "Failed to start session: " + status.message(), 400);
+                     return;
+                 }
+
+                 auto now = std::chrono::system_clock::now();
+                 auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                     now.time_since_epoch()).count();
+                 std::string session_id = type + "_" + std::to_string(epoch_ms);
+
+                 json resp;
+                 resp["session_id"] = session_id;
+                 resp["type"] = type;
+                 resp["status"] = "active";
+                 resp["started_at"] = epoch_ms;
+                 if (duration_sec > 0) {
+                     resp["expires_at"] = epoch_ms + duration_sec * 1000;
+                     resp["duration_sec"] = duration_sec;
+                 }
+                 res.set_content(resp.dump() + "\n", "application/json");
+             });
+
+    // POST /api/v1/sessions/stop — stop a profiling session by feature type
+    srv.Post("/api/v1/sessions/stop",
+             [&features](const httplib::Request& req, httplib::Response& res) {
+                 json body;
+                 try { body = json::parse(req.body); }
+                 catch (...) { JsonError(res, "Invalid JSON body", 400); return; }
+
+                 std::string type = body.value("type", "");
+                 if (type.empty()) {
+                     JsonError(res, "Missing 'type' field", 400);
+                     return;
+                 }
+
+                 auto status = features.Stop(type);
+                 if (!status.ok()) {
+                     JsonError(res, "Failed to stop session: " + status.message(), 400);
+                     return;
+                 }
+
+                 res.set_content(
+                     json{{"status", "ok"}, {"type", type}, {"stopped", true}}.dump() + "\n",
+                     "application/json");
+             });
+
+    // GET /api/v1/sessions — list active profiling sessions (Tier 3 features)
+    srv.Get("/api/v1/sessions",
+            [&features](const httplib::Request&, httplib::Response& res) {
+                auto list = features.ListFeatures();
+                json sessions = json::array();
+                for (const auto& f : list) {
+                    if (static_cast<int>(f.tier) >= 3 && f.state == FeatureState::kActive) {
+                        sessions.push_back({
+                            {"type", f.name},
+                            {"category", f.category},
+                            {"status", "active"},
+                            {"uptime_ms", f.uptime_ms},
+                        });
+                    }
+                }
+                res.set_content(
+                    json{{"sessions", sessions}}.dump() + "\n",
+                    "application/json");
+            });
 }
 
 }  // namespace illuminator

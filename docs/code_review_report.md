@@ -1,8 +1,8 @@
 # Illuminator 全栈代码架构审查报告
 
-> **审查日期**: 2026-06-16 (第五版，架构全面审计 + P2-1 完成 + 新问题发现)  
+> **审查日期**: 2026-06-24 (第六版，Always-On 架构重构完成)  
 > **审查范围**: 后端 C++20 + 前端 React/TypeScript + eBPF 探针 + 前后端交互  
-> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计  
+> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现  
 
 ---
 
@@ -38,10 +38,11 @@
 │  │     ├── Web Worker (flameGraphWorker.ts → 火焰图异步计算)             │   │
 │  │     └── Chart Components (ECharts 6 / Worker-backed FlameGraph)       │   │
 │  │                                                                      │   │
-│  │   通信模式（已统一为 LiveDataSource 双通道，同端口 :9527）:             │   │
+│  │   通信模式（Always-On: 前端为纯查看器，同端口 :9527）:                 │   │
 │  │   ├── WebSocket ws://host:9527/ws/features → 主通道，实时推送          │   │
 │  │   ├── HTTP REST :9527 → 降级通道，1s 轮询 (WS 断开时自动切换)        │   │
-│  │   ├── HTTP REST :9527 → Feature 管理 API (start/stop/reconfigure)    │   │
+│  │   ├── HTTP REST :9527 → Session API (Tier 3 profiling)              │   │
+│  │   ├── HTTP REST :9527 → Export API (环形缓冲区回溯)                  │   │
 │  │   └── Vite Proxy → 开发环境代理 (/api→:9527, /ws→:9527)             │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                    │                                         │
@@ -97,12 +98,19 @@
 
 | 维度 | 评分 | 说明 |
 |------|------|------|
-| 后端架构设计 | ⭐⭐⭐⭐½ | Pipeline v3 + FeatureManager 设计精良；但存在双管道所有权过渡期混淆 |
-| 后端代码质量 | ⭐⭐⭐⭐ | C++20 现代规范，Status/StatusOr 统一；少量遗留未清理 |
-| **前端架构一致性** | ⭐⭐⭐⭐ | WS+HTTP 降级已集成；但存在 3 条独立数据路径 + 第三批死代码 |
-| 前后端通信 | ⭐⭐⭐⭐ | 同端口方案优雅，WS/HTTP 分层合理；useProcessDetail 旁路产生重复流量 |
-| 测试覆盖 | ⭐⭐⭐½ | 后端核心测试完善；前端 74 项测试 + E2E 配置；Replay 流式 16 项测试 |
-| **综合** | **⭐⭐⭐⭐ (4.2/5 → 8.4/10)** | 后端优秀，前端经全面清理后显著提升；中优先级问题可逐步解决 |
+| 后端架构设计 | ⭐⭐⭐⭐⭐ | Pipeline v3 + FeatureManager + Always-On 自动启动；职责清晰 |
+| 后端代码质量 | ⭐⭐⭐⭐½ | C++20 现代规范；新增 Export/Session API 完善能力 |
+| **前端架构一致性** | ⭐⭐⭐⭐½ | Always-On 后前端为纯查看器；数据路径统一；死代码全清 |
+| 前后端通信 | ⭐⭐⭐⭐½ | 同端口 WS+HTTP；前端不再触发 Feature 启动（零控制面职责） |
+| 测试覆盖 | ⭐⭐⭐⭐ | 后端核心测试完善；前端 74 项测试 + E2E 配置；ESLint 0 errors |
+| **综合** | **⭐⭐⭐⭐½ (4.6/5 → 9.2/10)** | Always-On 架构统一后端职责，前端大幅简化 |
+
+> **重大架构变更 (v6)**: 采用 Always-On 模式（详见 `docs/rfc_always_on_design.md`）：
+> - 后端 daemon 启动自动运行 Tier 1-2 Feature，前端无需 `POST /features/start`
+> - 前端移除 `usePageActivation`/`useFeaturesByCategory`，变为纯数据查看器
+> - 新增 Export API（环形缓冲区回溯导出）替代 Recording API
+> - 新增 Session API（Tier 3 Profiling，有明确时限）替代无限运行模式
+> - 各页面集成 `FeatureHealthBadge`（数据健康指示器）
 
 ---
 

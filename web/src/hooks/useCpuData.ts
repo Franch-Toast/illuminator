@@ -69,7 +69,7 @@ function parseCpuUtilization(resp: CpuCollectResponse, now: number) {
   }
 }
 
-export function useCpuUtilization(active: boolean, replaySource?: DataSource) {
+export function useCpuUtilization(active = true, replaySource?: DataSource) {
   const [areaData, setAreaData] = useState<CpuDataPoint[]>([])
   const [coreData, setCoreData] = useState<CoreDataPoint[]>([])
   const [summary, setSummary] = useState<CpuSummary | null>(null)
@@ -140,7 +140,7 @@ function parseCpuProcesses(resp: CpuCollectResponse, historyMap: Map<number, num
   return result
 }
 
-export function useCpuProcesses(active: boolean, replaySource?: DataSource) {
+export function useCpuProcesses(active = true, replaySource?: DataSource) {
   const [processes, setProcesses] = useState<ProcessEntry[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)

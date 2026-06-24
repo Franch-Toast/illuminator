@@ -38,7 +38,7 @@ interface GpuCollectResponse {
   }>
 }
 
-export function useGpuMonitor(active: boolean) {
+export function useGpuMonitor(active = true) {
   const [data, setData] = useState<GpuDataPoint[]>([])
   const [summary, setSummary] = useState<GpuSummary | null>(null)
   const buffer = useRef(new TimeSeriesBuffer<GpuDataPoint>(60))
@@ -91,7 +91,7 @@ export function useGpuMonitor(active: boolean) {
   return { data, summary, clear }
 }
 
-export function useGpuProcesses(active: boolean) {
+export function useGpuProcesses(active = true) {
   const [processes, setProcesses] = useState<GpuProcess[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)

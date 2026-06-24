@@ -3,7 +3,6 @@ import { colors } from '../styles/theme'
 import SubTabBar from '../components/SubTabBar'
 import { useCpuUtilization, useCpuProcesses } from '../hooks/useCpuData'
 import { useProcessDetail } from '../hooks/useProcessDetail'
-import { usePageActivation, useFeaturesByCategory } from '../hooks/useDataSource'
 import { useUrlState } from '../hooks/useUrlState'
 import { api } from '../services/apiClient'
 import StackedAreaChart from '../components/charts/StackedAreaChart'
@@ -13,6 +12,7 @@ import ProcessTable from '../components/charts/ProcessTable'
 import ProcessCpuTimeline from '../components/charts/ProcessCpuTimeline'
 import ProfileSnapshot from '../components/charts/ProfileSnapshot'
 import ThreadBreakdown from '../components/charts/ThreadBreakdown'
+import FeatureHealthBadge from '../components/FeatureHealthBadge'
 
 const SUB_TABS = [
   { id: 'system', label: 'System' },
@@ -22,9 +22,6 @@ const SUB_TABS = [
 export default function CpuPage() {
   const { subTab, setUrlState } = useUrlState()
   const [activeTab, setActiveTab] = useState(subTab || 'system')
-  const features = useFeaturesByCategory('cpu')
-
-  usePageActivation('cpu', features)
 
   const handleTabChange = (tab: string) => {
     setActiveTab(tab)
@@ -33,7 +30,9 @@ export default function CpuPage() {
 
   return (
     <div style={{ padding: 24, display: 'flex', flexDirection: 'column' }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: 20, color: colors.textPrimary }}>CPU</h2>
+      <h2 style={{ margin: '0 0 16px', fontSize: 20, color: colors.textPrimary, display: 'flex', alignItems: 'center', gap: 8 }}>
+        CPU <FeatureHealthBadge featureName="cpu_utilization" />
+      </h2>
       <SubTabBar tabs={SUB_TABS} active={activeTab} onChange={handleTabChange} />
 
       {activeTab === 'system' && <SystemSubTab />}
@@ -126,23 +125,11 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
     startedRef.current = true
     setProfilingStatus('starting')
     try {
-      const targetOpts = { target_pids: [pid], target_comms: [comm] }
-      const resp = await api.features()
-      const cpuProf = resp.features?.find(f => f.name === 'cpu_profile')
-      const offcpuProf = resp.features?.find(f => f.name === 'offcpu_profile')
-
-      const starts: Promise<unknown>[] = []
-      if (cpuProf && cpuProf.state === 'inactive') {
-        starts.push(api.featureStart('cpu_profile', targetOpts))
-      } else if (cpuProf && cpuProf.state === 'active') {
-        starts.push(api.featureReconfigure('cpu_profile', targetOpts))
-      }
-      if (offcpuProf && offcpuProf.state === 'inactive') {
-        starts.push(api.featureStart('offcpu_profile', targetOpts))
-      } else if (offcpuProf && offcpuProf.state === 'active') {
-        starts.push(api.featureReconfigure('offcpu_profile', targetOpts))
-      }
-      if (starts.length > 0) await Promise.all(starts)
+      const sessionOpts = { target_pids: [pid], target_comms: [comm], duration_sec: 0 }
+      await Promise.all([
+        api.createSession({ type: 'cpu_profile', ...sessionOpts }),
+        api.createSession({ type: 'offcpu_profile', ...sessionOpts }),
+      ])
       setProfilingStatus('active')
     } catch {
       setProfilingStatus('failed')

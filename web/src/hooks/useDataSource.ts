@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import type { ConnectionStatus } from '../services/dataSource'
 import { LiveDataSource } from '../services/liveDataSource'
 
@@ -29,44 +29,6 @@ export function useConnectionStatus(): ConnectionStatus {
   return status
 }
 
-export function usePageActivation(
-  category: string,
-  features: Array<{ name: string; tier: number }>
-) {
-  const activatedRef = useRef(new Set<string>())
-
-  const activateFeatures = useCallback(async () => {
-    const { api } = await import('../services/apiClient')
-
-    const tierFeatures = features.filter(f => f.tier <= 2)
-    for (const f of tierFeatures) {
-      if (activatedRef.current.has(f.name)) continue
-      try {
-        await api.featureStart(f.name)
-        activatedRef.current.add(f.name)
-      } catch { /* already running or failed — both ok */ }
-    }
-  }, [features])
-
-  useEffect(() => {
-    activateFeatures()
-  }, [activateFeatures])
-
-  const getActivated = useCallback(() => activatedRef.current, [])
-  const manualStart = useCallback(async (name: string) => {
-    const { api } = await import('../services/apiClient')
-    await api.featureStart(name)
-    activatedRef.current.add(name)
-  }, [])
-  const manualStop = useCallback(async (name: string) => {
-    const { api } = await import('../services/apiClient')
-    await api.featureStop(name)
-    activatedRef.current.delete(name)
-  }, [])
-
-  return { activatedFeatures: getActivated, manualStart, manualStop }
-}
-
 export interface BudgetInfo {
   usage: { rss_bytes: number; cpu_pct: number; active_features: number; ebpf_probes: number }
   limits: { max_memory_bytes: number; max_cpu_pct: number; max_ebpf_probes: number }
@@ -90,26 +52,4 @@ export function useResourceBudget(pollMs = 5000): BudgetInfo | null {
   }, [pollMs])
 
   return budget
-}
-
-export function useFeaturesByCategory(category: string) {
-  const [features, setFeatures] = useState<Array<{ name: string; tier: number; state: string }>>([])
-
-  useEffect(() => {
-    const fetch = async () => {
-      const { api } = await import('../services/apiClient')
-      const resp = await api.features()
-      const filtered = (resp.features || [])
-        .filter(f => f.category === category)
-        .map(f => ({
-          name: f.name,
-          tier: (f as unknown as { tier: number }).tier || 1,
-          state: f.state,
-        }))
-      setFeatures(filtered)
-    }
-    fetch()
-  }, [category])
-
-  return useMemo(() => features, [features])
 }

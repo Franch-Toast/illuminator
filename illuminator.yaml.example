@@ -44,6 +44,17 @@ server:
   #                                   # 启用后所有 /api/* 请求需携带 Authorization: Bearer <token>
   #                                   # /healthz 和 /metrics 端点免认证
 
+# ---- Always-On 模式 ----
+# Daemon 启动时自动运行 Tier 1-2 Feature（前端无需触发），
+# 前端变为纯数据查看器。设 enabled: false 回退到手动激活模式。
+always_on:
+  enabled: true                      # 全局开关
+  auto_start_tier: 2                 # 自动启动 tier <= N 的 Feature (1=仅监控, 2=含追踪)
+  # low_power_mode: false            # 低功耗模式（降低采集频率，嵌入式/车端用）
+  # intervals:                       # low_power_mode=true 时的覆盖间隔
+  #   cpu_utilization: 5000          # 5s 代替 1s
+  #   cpu_processes: 10000           # 10s 代替 2s
+
 # ---- 管道引擎配置 (v3) ----
 engine:
   collect_pool_threads: 2             # CollectPool 线程数 (0=auto: 2)

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useFeatureList } from '../hooks/useFeatureStream'
+import { useConnectionStatus } from '../hooks/useDataSource'
 import { api } from '../services/apiClient'
 import { colors } from '../styles/theme'
 
@@ -18,6 +19,7 @@ function stateColor(state: string): string {
 
 export default function OverviewPage() {
   const { features } = useFeatureList()
+  const connStatus = useConnectionStatus()
   const [version, setVersion] = useState('...')
   const [uptime, setUptime] = useState('')
 
@@ -39,6 +41,7 @@ export default function OverviewPage() {
   }, [])
 
   const activeCount = features.filter(f => f.state === 'active').length
+  const alwaysOnCount = features.filter(f => (f as unknown as { tier: number }).tier <= 2 && f.state === 'active').length
   const categories = [...new Set(features.map(f => f.category || 'default'))]
 
   return (
@@ -46,6 +49,21 @@ export default function OverviewPage() {
       <h2 style={{ margin: '0 0 20px', fontSize: 20, color: colors.textPrimary }}>
         System Overview
       </h2>
+
+      {/* Always-On status banner */}
+      <div style={{
+        background: alwaysOnCount > 0 ? 'rgba(74,222,128,0.05)' : 'rgba(239,68,68,0.05)',
+        border: `1px solid ${alwaysOnCount > 0 ? 'rgba(74,222,128,0.2)' : 'rgba(239,68,68,0.2)'}`,
+        borderRadius: 8, padding: '12px 16px', marginBottom: 20,
+        display: 'flex', alignItems: 'center', gap: 10,
+      }}>
+        <span style={{ fontSize: 16 }}>{alwaysOnCount > 0 ? '●' : '○'}</span>
+        <span style={{ fontSize: 13, color: alwaysOnCount > 0 ? colors.success : '#ef4444' }}>
+          Always-On: {alwaysOnCount} features collecting data
+          {connStatus === 'connected' && ' · WebSocket real-time'}
+          {connStatus === 'disconnected' && ' · HTTP polling fallback'}
+        </span>
+      </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 16, marginBottom: 24 }}>
         <div style={card}>

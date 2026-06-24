@@ -38,7 +38,7 @@ interface IoCollectResponse {
   }>
 }
 
-export function useIoMonitor(active: boolean) {
+export function useIoMonitor(active = true) {
   const [data, setData] = useState<IoDataPoint[]>([])
   const [summary, setSummary] = useState<IoSummary | null>(null)
   const buffer = useRef(new TimeSeriesBuffer<IoDataPoint>(60))
@@ -91,7 +91,7 @@ export function useIoMonitor(active: boolean) {
   return { data, summary, clear }
 }
 
-export function useIoProcesses(active: boolean) {
+export function useIoProcesses(active = true) {
   const [processes, setProcesses] = useState<IoProcess[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)

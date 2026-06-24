@@ -3,9 +3,9 @@ import { api, FeatureEntry, BudgetResponse } from '../services/apiClient'
 import { colors } from '../styles/theme'
 
 const TIER_LABELS: Record<number, { label: string; color: string; desc: string }> = {
-  1: { label: 'Tier 1 · Monitoring', color: '#4ade80', desc: 'procfs reading, < 0.5% CPU, auto-start' },
-  2: { label: 'Tier 2 · Tracing', color: '#60a5fa', desc: 'lightweight eBPF, 1-3% CPU, auto-start' },
-  3: { label: 'Tier 3 · Profiling', color: '#f59e0b', desc: 'high-freq sampling, 3-10% CPU, manual' },
+  1: { label: 'Always-On · Monitoring', color: '#4ade80', desc: 'procfs, < 0.5% CPU, daemon auto-start' },
+  2: { label: 'Always-On · Tracing', color: '#60a5fa', desc: 'eBPF, 1-3% CPU, daemon auto-start' },
+  3: { label: 'On-Demand · Profiling', color: '#f59e0b', desc: 'high-freq, 3-10% CPU, session-based' },
 }
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -107,7 +107,7 @@ export default function PluginManagerPage() {
     <div style={{ padding: 20, maxWidth: 1200, margin: '0 auto' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
         <h2 style={{ margin: 0, fontSize: 20, color: colors.textPrimary }}>
-          Plugin & Feature Manager
+          Feature Health Dashboard
         </h2>
         <span style={{ fontSize: 12, color: colors.textMuted, background: colors.cardBg, padding: '4px 10px', borderRadius: 12 }}>
           {activeCount}/{totalFeatures} active
