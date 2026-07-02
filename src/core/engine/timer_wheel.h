@@ -160,6 +160,7 @@ public:
     // ---- 启动调度线程 ----
     void Start() {
         if (epoll_fd_ < 0) return;
+        if (running_.load(std::memory_order_acquire)) return;
         running_.store(true, std::memory_order_release);
         thread_ = std::thread([this] { Run(); });
         IL_INFO("TimerWheel started");

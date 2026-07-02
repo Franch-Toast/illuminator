@@ -1,27 +1,30 @@
 import { useEffect, useState } from 'react'
 import type { ConnectionStatus } from '../services/dataSource'
-import { LiveDataSource } from '../services/liveDataSource'
+import { dataBus, DataBus } from '../services/dataBus'
 
-let globalDataSource: LiveDataSource | null = null
 const connectionListeners = new Set<(s: ConnectionStatus) => void>()
 
-export function getDataSource(): LiveDataSource {
-  if (!globalDataSource) {
-    globalDataSource = new LiveDataSource({
-      onConnectionChange: (s) => {
-        for (const cb of connectionListeners) cb(s)
-      },
-    })
-  }
-  return globalDataSource
+let unsubStatus: (() => void) | null = null
+
+function ensureStatusWiring() {
+  if (unsubStatus) return
+  unsubStatus = dataBus.onConnectionChange((s) => {
+    for (const cb of connectionListeners) cb(s)
+  })
+}
+
+export function getDataSource(): DataBus {
+  ensureStatusWiring()
+  return dataBus
 }
 
 export function useConnectionStatus(): ConnectionStatus {
   const [status, setStatus] = useState<ConnectionStatus>(
-    () => getDataSource().getStatus()
+    () => dataBus.getStatus()
   )
 
   useEffect(() => {
+    ensureStatusWiring()
     connectionListeners.add(setStatus)
     return () => { connectionListeners.delete(setStatus) }
   }, [])

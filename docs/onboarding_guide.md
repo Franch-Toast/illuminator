@@ -6,7 +6,7 @@
 >
 > **预计阅读时间**：30 分钟精读 + 2-3 天实操探索
 >
-> **更新日期**：2026-06-24
+> **更新日期**：2026-07-02
 
 ---
 
@@ -28,9 +28,9 @@
 
 ## 1. 项目是什么
 
-Illuminator 是一个 **高性能、插件化的全栈可观测性平台**。它通过 eBPF 技术在 Linux 上进行零侵入数据采集（CPU、调度器、I/O、网络），配套自研 Web 可视化平台实时展示，支持 WebSocket 实时推送 + HTTP 降级双通道。
+Illuminator 是一个 **高性能、插件化的全栈可观测性平台**。它通过 eBPF 技术在 Linux 上进行零侵入数据采集（CPU、调度器、I/O、网络），配套自研 Web 可视化平台实时展示，通过 SSE（Server-Sent Events）推送实时数据，REST API 负责控制面。
 
-**一句话总结**：`eBPF 数据采集 → 异步管道处理 → WS 实时推送/REST API → React 可视化`
+**一句话总结**：`eBPF 数据采集 → FeatureDriver Pipeline → SinkPool → SSE 实时推送 → React DataBus → 可视化`
 
 ### 技术栈概览
 
@@ -43,7 +43,7 @@ Illuminator 是一个 **高性能、插件化的全栈可观测性平台**。它
 | 配置 | yaml-cpp | 人类友好、结构化 |
 | 序列化 | nlohmann/json | Header-only、易用 |
 | HTTP | cpp-httplib | 单头文件、轻量 |
-| WebSocket | 自定义 RFC6455 实现 | 无外部依赖、Bearer Auth 集成 |
+| 实时推送 | SSE (Server-Sent Events) | 单连接多 Feature 订阅、自动重连 |
 | 存储 | SQLite (WAL) | 嵌入式、零运维 |
 | 前端框架 | React 18 + TypeScript | 现代 SPA、类型安全 |
 | 前端构建 | Vite 5 | 快速 HMR、ESM 原生 |
@@ -84,7 +84,7 @@ bazel test //src/...
 sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 
 # 另一个终端：启动前端开发服务器（Vite HMR 会自动代理 API 到 9527 端口）
-cd web && npm run dev    # → 访问 http://localhost:5173
+cd web && npm run dev    # → 访问 http://localhost:3000
 ```
 
 ### 2.3 验证
@@ -94,16 +94,18 @@ cd web && npm run dev    # → 访问 http://localhost:5173
 curl http://localhost:9527/healthz
 
 # 查看已注册的 Feature（Always-On 模式下 Tier 1-2 自动运行）
-curl http://localhost:9527/api/v1/features
+curl http://localhost:9527/api/v2/features
 # → 所有 tier<=2 的 feature 应为 "active" 状态
 
-# 获取实时数据（无需手动 start，daemon 已自动启动监控）
-curl http://localhost:9527/api/v1/features/cpu_utilization/collect | python3 -m json.tool
-
-# 按需启动 Tier 3 profiling（Session API）
-curl -X POST http://localhost:9527/api/v1/sessions \
+# 注册 SSE 订阅（数据面）
+curl -X POST http://localhost:9527/api/v1/events/subscribe \
   -H 'Content-Type: application/json' \
-  -d '{"type":"cpu_profile","target_pids":[1234],"duration_sec":30}'
+  -d '{"features":["cpu_utilization"]}'
+# → 返回 subscription_id 和 SSE 连接 URL
+
+# 按需启动 Tier 3 profiling（FeatureBus 控制面）
+curl -X POST http://localhost:9527/api/v2/features/cpu_profiler/start
+curl -X POST http://localhost:9527/api/v2/features/cpu_profiler/stop
 ```
 
 ### 2.4 访问界面
@@ -114,7 +116,8 @@ curl -X POST http://localhost:9527/api/v1/sessions \
 | `http://localhost:9527` | 后端直接访问（静态文件 + API） |
 | `http://localhost:9527/healthz` | 健康检查（无认证） |
 | `http://localhost:9527/metrics` | Prometheus 指标（无认证） |
-| `ws://localhost:9527/ws/features` | WebSocket 实时推送端点（与 HTTP 同端口） |
+| `POST /api/v1/events/subscribe` | SSE 订阅注册（返回 subscription_id） |
+| `GET /api/v1/events/{id}` | SSE 长连接，推送已订阅 Feature 的数据 |
 
 ---
 
@@ -135,11 +138,13 @@ Source (数据源) → AsyncChannel → Processor (处理器) → Aggregator (�
 
 **实验**：
 ```bash
-# daemon 启动后 Tier 1-2 自动运行，直接查看数据
-curl http://localhost:9527/api/v1/features/cpu_utilization/collect | python3 -m json.tool
+# daemon 启动后 Tier 1-2 自动运行，查看 Feature 列表
+curl http://localhost:9527/api/v2/features | python3 -m json.tool
 
-# 增量拉取（带 cursor，模拟前端 LiveDataSource 的行为）
-curl "http://localhost:9527/api/v1/features/cpu_utilization/stream?cursor=0"
+# 注册 SSE 订阅并建立长连接（前端 DataBus 的底层协议）
+curl -X POST http://localhost:9527/api/v1/events/subscribe \
+  -H 'Content-Type: application/json' \
+  -d '{"features":["cpu_utilization"]}'
 ```
 
 ### 阶段二：理解线程模型（Day 1-2）
@@ -161,10 +166,11 @@ SinkPool (K 线程)          — 并行执行 Sink::Write()
 
 **必读文件**：
 1. `docs/pipeline_v3_design.md` — 架构设计文档（重点看前 200 行）
-2. `src/core/engine/pipeline_controller.h` — `Pipeline` 类的 `Start()` 和 `ProcessLoop()`
-3. `src/core/engine/pipeline_controller.cc` — `BuildFromConfig()` 和 `StartAll()` 编排逻辑
+2. `src/core/engine/infrastructure_manager.h` — TimerWheel + CollectPool + SinkPool
+3. `src/core/engine/feature_driver.h` — 每个 Feature 自包含的 Pipeline 构建
+4. `src/core/engine/pipeline_controller.h` — `Pipeline` 类的 `Start()` 和 `ProcessLoop()`
 
-### 阶段三：理解 FeatureManager 与 Always-On 架构（Day 2）
+### 阶段三：理解 FeatureBus / FeatureDriver 与 Always-On 架构（Day 2）
 
 **目标**：理解 Feature 生命周期管理和数据推送到前端的完整路径
 
@@ -172,24 +178,32 @@ SinkPool (K 线程)          — 并行执行 Sink::Write()
 
 ```
 daemon 启动
-├── FeatureManager 注册所有 Feature 元数据
-├── 自动 Start Tier 1 (Monitoring) + Tier 2 (Tracing) features
+├── InfrastructureManager 启动（TimerWheel + CollectPool + SinkPool）
+├── FeatureRegistry::RegisterAll() 注册所有 FeatureDriver
+├── FeatureBus::ProbeAll() 自动 Start Tier 1 (Monitoring) + Tier 2 (Tracing)
 │   └── 无需用户干预，打开浏览器即有数据
-└── Tier 3 (Profiling) 通过 Session API 按需启动
+└── Tier 3 (Profiling) 通过 /api/v2/features/:name/start 按需启动
 ```
 
-#### FeatureManager 职责
+#### 架构组件职责
 
 ```
-FeatureManager (高层抽象)
-├── 接收 API 请求 (Session API for Tier 3, pause/resume for admin)
-├── 按需创建独立 Pipeline 实例
-├── 自动注入运行时 Sink:
-│   └── StreamSink → StreamSinkStore (统一环形数据缓冲区)
-│       ├── HTTP /collect 和 /stream API 增量拉取
-│       ├── WebSocketManager 直接从此 Store 拉取数据广播
-│       └── Export API 回溯导出
-└── 注册定时器到共享 TimerWheel
+InfrastructureManager (共享基础设施)
+├── TimerWheel — 全局定时调度
+├── CollectPool — 并行执行 Source::Collect()
+└── SinkPool — 并行执行 Sink::Write()（含 SseSink 推送）
+
+FeatureBus (注册与生命周期编排)
+├── 维护已注册 FeatureDriver 列表
+├── Probe / Remove / Pause / Resume 单个或全部 Driver
+├── 提供 /api/v2/features 控制面 API
+└── 状态变更通知（SSE 推送用）
+
+FeatureDriver (每个 Feature 自包含)
+├── 声明元数据（Name, DisplayName, Category, Tier）
+├── BuildPipeline() 构建 Source → Processor → SseSink 链
+├── Probe() 启动 Pipeline 并注册定时器
+└── Remove() 停止 Pipeline 并释放资源
 ```
 
 #### 数据推送到前端全路径
@@ -201,40 +215,38 @@ FeatureManager (高层抽象)
 │                         BACKEND (C++, port 9527)                         │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
+│  FeatureDriver::BuildPipeline()                                         │
 │  eBPF Source ─→ AsyncChannel ─→ Processor ─→ Aggregator                 │
 │                                                       │                 │
 │                                                       ▼                 │
-│                                              ┌─── SinkFanout ───┐       │
-│                                              │                  │       │
-│                                              ▼                  ▼       │
-│                                      StreamSink         LocalStorageSink│
-│                                          │                      │       │
-│                                          ▼                      ▼       │
-│                              StreamSinkStore (统一环形缓冲)    SQLite    │
-│                              ┌──── 60 batch/feature ────┐               │
-│                              │                          │               │
-│              ┌───────────────┼──────────────┐           │               │
-│              ▼               ▼              ▼           │               │
-│        HTTP /collect    HTTP /stream   WS broadcast     │               │
-│        (一次性拉取)     (cursor 增量)  (WebSocketManager)│               │
-│              │               │              │           │               │
-└──────────────┼───────────────┼──────────────┼───────────┼───────────────┘
-               │               │              │           │
-               ▼               ▼              ▼           │
+│                                              SseSink (per feature)      │
+│                                                       │                 │
+│                                                       ▼                 │
+│                              SseHandler::Push() (SinkPool 线程)         │
+│                              ┌ per-subscription outbox queue ──┐       │
+│                              │                                  │       │
+│              ┌───────────────┼──────────────┐                   │       │
+│              ▼               ▼              ▼                   │       │
+│   POST /events/subscribe  GET /events/{id}  POST /events/{id}/update    │
+│   (注册订阅)              (SSE 长连接)      (动态更新订阅)              │
+│              │               │                                          │
+└──────────────┼───────────────┼──────────────────────────────────────────┘
+               │               │
+               ▼               ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    FRONTEND (React, Link Chain)                           │
+│                    FRONTEND (React, DataBus)                              │
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  LiveDataSource (编排层, 单例)                                            │
-│  ├── WsLink: ws://host/ws/features (优先通道)                             │
-│  │   └── 收到数据 → 推断 modelType → DataBatch → 通知 subscriber          │
-│  ├── HttpLink: api.featureCollect() (降级通道, 1s 轮询)                   │
-│  │   └── WS 断开时激活 → 恢复后自动停止                                   │
-│  └── 可见性感知: 页面隐藏 → 停止 HttpLink；可见 → 恢复                    │
+│  DataBus (全局单例, 实现 DataSource 接口)                                 │
+│  ├── connect() → POST /api/v1/events/subscribe → 获取 subscription_id    │
+│  ├── SseLink: EventSource 连接 GET /api/v1/events/{id}                   │
+│  │   └── 收到 data/frame 事件 → 解析 JSON → 推断 modelType → DataBatch   │
+│  ├── subscribe(feature, cb) → 动态更新订阅列表                           │
+│  └── 本地 ringBuffer 缓存最近 N 条（前端导出 .ilr 用）                     │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
 │  │ useCpuData / useIoData / useGpuData / ... (各页面 hook)            │  │
-│  │   └── subscribe(featureName, replaySource?) → DataBatch → state    │  │
+│  │   └── getDataSource().subscribe(featureName) → DataBatch → state   │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
@@ -259,7 +271,7 @@ FeatureManager (高层抽象)
 ├─────────────────────────────────────────────────────┤
 │  On-Demand Profiling (Tier 3)                       │
 │  ────────────────────────────────────               │
-│  用户点击 "Start Profile" → Session API 创建会话    │
+│  用户点击 "Start Profile" → POST /api/v2/features/cpu_profiler/start    │
 │  → 数据采集 → 火焰图渲染 → 会话自动过期或手动停止   │
 │  例：On-CPU Flame Graph, Off-CPU Analysis           │
 ├─────────────────────────────────────────────────────┤
@@ -267,27 +279,33 @@ FeatureManager (高层抽象)
 │  ────────────────────────────────────               │
 │  用户上传 .ilr 文件 → ReplayEngine 流式解析         │
 │  → 同一 UI 组件渲染历史数据                         │
-│  Export API: ring buffer → .ilr → 可回放             │
+│  Export API: RecordingSink / DataBus ringBuffer → .ilr → 可回放          │
 └─────────────────────────────────────────────────────┘
 ```
 
 **必读文件**：
-1. `src/core/engine/feature_manager.h` — Feature 状态机、生命周期管理
-2. `src/sinks/stream_sink/stream_sink.h` — 统一环形数据缓冲区
-3. `src/server/websocket_manager.h` — WS 广播（从 StreamSinkStore 拉取）
-4. `src/server/api_routes.h` — REST API + Session API + Export API
-5. `web/src/services/liveDataSource.ts` — 前端 WS/HTTP 双通道 DataSource
+1. `src/core/engine/infrastructure_manager.h` — 共享基础设施（TimerWheel + CollectPool + SinkPool）
+2. `src/core/engine/feature_bus.h` — FeatureDriver 注册与生命周期编排
+3. `src/core/engine/feature_driver.h` — 自包含 Pipeline 构建与状态机
+4. `src/features/feature_registry.h` — `REGISTER_FEATURE` 宏自动注册
+5. `src/server/sse_handler.h` — SSE 订阅模型 + SseSink 推送
+6. `src/server/api_routes.h` — REST API + Recording API
+7. `web/src/services/dataBus.ts` — 前端 SSE 数据总线
+8. `web/src/services/sseLink.ts` — EventSource 封装与自动重连
 
 ### 阶段四：理解配置系统（Day 2）
 
-**目标**：理解 YAML 如何驱动整个系统
+**目标**：理解 YAML 如何驱动 daemon 的服务端配置
 
 ```
 illuminator.yaml.example / 内置 kDefaultConfigYaml
     └→ YamlConfigLoader::LoadFromString/File()
-        └→ GlobalConfig { engine, server{auth_token}, pipelines[] }
-            └→ PipelineController::BuildFromConfig(config)
-                └→ PluginRegistry::CreateSource/Processor/Aggregator/Sink
+        └→ GlobalConfig { engine, server{auth_token}, ... }
+            ├→ InfrastructureManager::Start(engine 线程池配置)
+            └→ FeatureRegistry::RegisterAll() + FeatureBus::ProbeAll()
+                （Feature 由 REGISTER_FEATURE 宏注册，非 YAML pipelines 驱动）
+
+注：`collect` CLI 子命令仍使用 PipelineController::BuildFromConfig() 一次性采集。
 ```
 
 **必读文件**：
@@ -329,12 +347,12 @@ web/src/
 │   ├── charts/                图表组件 (ECharts + FlameGraph)
 │   ├── shared/                共享组件 (SummaryCard/Sparkline/EmptyChart)
 │   └── Layout/                布局组件 (Sidebar/ExportControl/ConnectionIndicator)
-├── hooks/                     数据 hooks (LiveDataSource 驱动, 支持 replaySource)
 ├── services/
-│   ├── apiClient.ts           REST API 客户端
+│   ├── apiClient.ts           REST API 客户端（/api/v2/features 控制面）
 │   ├── dataSource.ts          DataSource 接口 + DataBatch (含 modelType)
-│   ├── liveDataSource.ts      Link Chain 编排层
-│   └── links/                 WsLink + HttpLink (独立可测试)
+│   ├── dataBus.ts             SSE 数据总线（全局单例）
+│   └── sseLink.ts             EventSource 封装（自动重连、分帧重组）
+├── hooks/                     数据 hooks（DataBus 驱动, 支持 replaySource）
 ├── utils/                     工具库 (TimeSeriesBuffer 等)
 ├── stores/                    Zustand 状态 (time/pipeline/annotation)
 ├── workers/                   Web Worker (火焰图异步计算)
@@ -342,10 +360,10 @@ web/src/
 ```
 
 **必读文件**：
-1. `web/src/App.tsx` — 路由、全局布局、键盘快捷键
+1. `web/src/App.tsx` — 路由、全局布局、DataBus 连接初始化
 2. `web/src/services/dataSource.ts` — `DataSource` 接口 + `DataModelType` 定义
-3. `web/src/services/liveDataSource.ts` — Link Chain 编排（WsLink + HttpLink 路由）
-4. `web/src/services/links/WsLink.ts` — WebSocket 连接管理、消息解析、重连
+3. `web/src/services/dataBus.ts` — SSE 订阅管理、分帧重组、ringBuffer
+4. `web/src/services/sseLink.ts` — EventSource 连接管理与自动重连
 5. `web/src/utils/timeSeriesBuffer.ts` — 滑动窗口时间序列缓冲
 
 ### 阶段二：数据流（1 小时）
@@ -353,13 +371,11 @@ web/src/
 **目标**：理解前端如何获取和消费后端数据
 
 ```
-                      ┌─ ws://host/ws/features ──────────┐
-getDataSource() ─────►│  subscribe:{feature}              │◄── WS 可用
-(全局单例)            │  ← JSON 实时推送 (1s)             │
-                      └──────────────────────────────────┘
-                      ┌─ api.featureCollect(feature) ────┐
-                      │  1s HTTP 轮询                     │◄── WS 断开（自动降级）
-                      └──────────────────────────────────┘
+                      ┌─ POST /api/v1/events/subscribe ───┐
+getDataSource() ─────►│  注册 features → subscription_id  │
+(全局 DataBus 单例)   │  GET /api/v1/events/{id} (SSE)    │
+                      │  ← JSON 实时推送                   │
+                      └───────────────────────────────────┘
 
 数据 Hook 使用方式:
   const source = replaySource ?? getDataSource()
@@ -379,7 +395,7 @@ getDataSource() ─────►│  subscribe:{feature}              │◄�
 
 ```
 ProfileSnapshot.tsx:
-  1. api.featureStream(name, cursor) → 增量拉取样本 (1.5s)
+  1. getDataSource().subscribe('cpu_profiler', cb) → SSE 接收 profile 数据
   2. 积累 StackSample[] (最多 5000)
   3. Worker.postMessage({type:'build', samples}) → 异步树构建
   4. Worker 返回 FlameNode 树 → 渲染为 flexbox div
@@ -416,54 +432,46 @@ DataBatch
     └── count: 42
 ```
 
-### 5.2 LiveDataSource — Link Chain 架构
+### 5.2 DataBus — SSE 数据总线
 
 ```typescript
-LiveDataSource (薄编排层，全局单例)
-├── WsLink (WebSocket 通道)
-│   ├── connect() → ws://host/ws/features
-│   ├── onopen → 通知 LiveDataSource 停止 HTTP 降级
-│   ├── onmessage → 解析 JSON + 自动推断 modelType → DataBatch
-│   ├── onclose → 通知 LiveDataSource 激活 HTTP 降级
-│   ├── subscribe(feature) → 发送 subscribe:{feature}
-│   └── scheduleReconnect() → 指数退避 (1s → 30s max)
-├── HttpLink (HTTP 轮询通道)
-│   ├── connect() → 标记 active
-│   ├── subscribe(feature) → setInterval(poll, 1s)
-│   ├── poll → api.featureCollect(feature) → DataBatch
-│   └── unsubscribe(feature) → clearInterval
-└── 编排逻辑
-    ├── WS connected → HttpLink.disconnect() (停止轮询)
-    ├── WS disconnected → activateHttpFallback() (恢复轮询)
-    └── Page hidden → HttpLink.disconnect(); Page visible → 恢复
+DataBus (全局单例, 实现 DataSource 接口)
+├── connect()
+│   ├── POST /api/v1/events/subscribe → 获取 subscription_id
+│   └── SseLink.connect() → EventSource GET /api/v1/events/{id}
+├── subscribe(feature, cb)
+│   ├── 维护 per-feature callbacks + ringBuffer
+│   └── syncSubscription() → POST /api/v1/events/{id}/update 动态更新
+├── handleData / handleFrame
+│   ├── 解析 SSE data 事件 → 推断 modelType → DataBatch
+│   └── 分帧重组（>64KB 数据自动分帧传输）
+└── SseLink 自动重连（指数退避 1s → 30s max）
 ```
 
-**关键设计：** 各 Link 职责单一、可独立单元测试。LiveDataSource 仅负责路由和可见性感知。
+**关键设计：** SseLink 负责传输层，DataBus 负责订阅管理和数据分发。现有页面 hooks 通过 `getDataSource()` 无缝接入。
 
 ### 5.3 Feature 生命周期（Always-On 模式）
 
 ```
 系统事件                   →   行为                      →   说明
 ───────────────────────────────────────────────────────────────────
-daemon 启动               →   Tier 1-2 全部自动 Start   →   无需前端干预
-                          →   数据流入 StreamSinkStore   →   前端打开即有数据
+daemon 启动               →   Tier 1-2 全部自动 Probe   →   FeatureBus::ProbeAll()
+                          →   数据经 SseSink 推送到 SSE  →   前端打开即有数据
 
 用户打开 CPU 页面         →   subscribe("cpu_utilization")
-                          →   LiveDataSource 从 WS/HTTP 接收数据
+                          →   DataBus 通过 SSE 接收数据
                           →   图表实时更新（无等待、无按钮）
 
-用户点击 "Start Profile"  →   POST /api/v1/sessions
-                          →   {type:"cpu_profile", target_pids:[1234]}
-                          →   FeatureManager::Start() → Tier 3 Pipeline 启动
+用户点击 "Start Profile"  →   POST /api/v2/features/cpu_profiler/start
+                          →   FeatureBus::Probe() → Tier 3 Pipeline 启动
                           →   Source 配置 BPF perf_event + PID 过滤
-                          →   数据流入 StreamSinkStore → 火焰图渲染
+                          →   数据经 SSE 推送 → 火焰图渲染
 
-Session 超时或手动 Stop   →   POST /api/v1/sessions/stop
-                          →   Pipeline 停止 → 资源释放
-                          →   已采集数据保留在 StreamSinkStore 中（环形缓冲）
+手动 Stop                 →   POST /api/v2/features/cpu_profiler/stop
+                          →   FeatureBus::Remove() → Pipeline 停止 → 资源释放
+                          →   DataBus ringBuffer 中已缓存数据仍可查看
 
-用户点击 "Export"         →   POST /api/v1/export
-                          →   从 StreamSinkStore 回溯最近 N batch
+用户点击 "Export"         →   Recording API 或 DataBus ringBuffer 导出
                           →   生成 .ilr 文件 → 前端下载
 ```
 
@@ -477,12 +485,13 @@ Session 超时或手动 Stop   →   POST /api/v1/sessions/stop
 **反压机制**：队列使用率 > 80% 触发反压，< 20% 解除。
 **丢弃策略**：`drop_newest`（保留历史）或 `drop_oldest`（保留最新）。
 
-### 5.5 WebSocket 认证
+### 5.5 SSE 认证
 
-后端 WS（与 HTTP 共享端口 9527，通过 `WsAwareServer` 的 `MSG_PEEK` 检测 Upgrade）在握手阶段验证 token：
-- `Authorization: Bearer <token>` 请求头
-- `?token=<token>` URL 查询参数（浏览器 WS API 备选）
+SSE 订阅和控制面 API 均走 `/api/` 路径，通过 `SetupAuthMiddleware` 验证 Bearer Token：
+- `Authorization: Bearer <token>` 请求头（POST subscribe 等 fetch 请求）
 - 配置中 `server.auth_token` 为空时跳过验证（开发模式）
+
+注：EventSource（GET SSE 长连接）无法自定义请求头；开发模式下通过 Vite proxy 同源访问即可。
 
 ---
 
@@ -513,132 +522,110 @@ Session 超时或手动 Stop   →   POST /api/v1/sessions/stop
 | 9 | `src/core/memory/arena.h` | bump-pointer 分块策略 |
 | 10 | `src/core/memory/lock_free_queue.h` | MPSC CAS 环形缓冲区 |
 | 11 | `src/core/engine/async_channel.h` | ChannelItem variant、反压水位线 |
-| 12 | `src/core/engine/timer_wheel.h` | timerfd + epoll + eventfd |
-| 13 | `src/core/engine/pipeline_controller.h` | Pipeline 生命周期 |
-| 14 | `src/core/engine/feature_manager.h` | Feature 状态机、Sink 注入 |
+| 12 | `src/core/engine/infrastructure_manager.h` | TimerWheel + CollectPool + SinkPool |
+| 13 | `src/core/engine/feature_driver.h` | FeatureDriver 状态机、BuildPipeline |
+| 14 | `src/core/engine/feature_bus.h` | 注册、Probe/Remove、ProbeAll |
 
 ### 第四轮：插件 & 服务层（2 小时）
 
 | 序号 | 文件 | 阅读重点 |
 |------|------|---------|
-| 15 | `src/plugin/manager/plugin_registry.h` | IL_REGISTER_* 宏注册 |
-| 16 | `src/sources/cpu/cpu_utilization/cpu_utilization.h` | 典型 Pull Source |
-| 17 | `src/sinks/stream_sink/stream_sink.h` | StreamSinkStore cursor 协议 |
-| 18 | `src/server/api_routes.h` | 39 个 REST 端点全景 |
-| 19 | `src/server/websocket_manager.h` | WS 订阅模型 + 认证 + 广播 |
+| 15 | `src/features/feature_registry.h` | REGISTER_FEATURE 宏注册 |
+| 16 | `src/features/cpu_utilization_driver.h` | 典型 Tier 1 FeatureDriver |
+| 17 | `src/server/sse_handler.h` | SSE 订阅模型 + SseSink 推送 |
+| 18 | `src/server/api_routes.h` | REST API 端点全景 |
 
 ### 第五轮：前端架构（2 小时）
 
 | 序号 | 文件 | 阅读重点 |
 |------|------|---------|
-| 20 | `web/src/App.tsx` | 路由、全局布局 |
-| 21 | `web/src/services/liveDataSource.ts` | WS/HTTP 双通道核心 |
-| 22 | `web/src/hooks/useDataSource.ts` | 全局单例 + 连接状态 + 页面激活 |
+| 20 | `web/src/App.tsx` | 路由、全局布局、SSE 连接 |
+| 21 | `web/src/services/dataBus.ts` | SSE 数据总线核心 |
+| 22 | `web/src/hooks/useDataSource.ts` | getDataSource() 全局单例 |
 | 23 | `web/src/hooks/useCpuData.ts` | 典型数据 hook（subscribe 模式） |
-| 24 | `web/src/services/apiClient.ts` | REST API 客户端全集 |
-| 25 | `web/src/components/charts/ProfileSnapshot.tsx` | 火焰图：数据获取+Worker+渲染 |
+| 24 | `web/src/services/apiClient.ts` | REST API 客户端（/api/v2/features） |
+| 25 | `web/src/components/charts/ProfileSnapshot.tsx` | 火焰图：SSE 订阅 + Worker + 渲染 |
 | 26 | `web/src/workers/flameGraphWorker.ts` | Worker 端：树构建算法 |
 
 ---
 
 ## 7. 如何新增一个插件（端到端示例）
 
-以添加一个 **MemoryUsageSource**（内存使用监控）为例：
+以添加一个 **MemoryUsageDriver**（内存使用监控 Feature）为例。RFC v3 架构下，每个 Feature 是一个自包含的 FeatureDriver，而非 YAML pipeline 配置。
 
-### Step 1: 创建源文件
+### Step 1: 创建 FeatureDriver
 
-`src/sources/memory/memory_usage/memory_usage.h`
+`src/features/memory_usage_driver.h`
 
 ```cpp
 #pragma once
-#include "plugin/api/source_plugin.h"
-#include "plugin/manager/plugin_registry.h"
+#include "core/engine/feature_driver.h"
+#include "features/feature_registry.h"
+#include "server/sse_handler.h"
+#include "sources/memory/memory_usage/memory_usage.h"
 
 namespace illuminator {
 
-class MemoryUsageSource : public SourcePlugin {
+class MemoryUsageDriver : public FeatureDriver {
 public:
     const char* Name() const override { return "memory_usage"; }
-    const char* Version() const override { return "0.1.0"; }
+    const char* DisplayName() const override { return "Memory Usage"; }
+    const char* Category() const override { return "memory"; }
+    DriverTier Tier() const override { return DriverTier::kMonitoring; }
 
-    Status Init(const ConfigValue& config) override {
-        interval_ms_ = config["interval_ms"].AsInt(2000);
-        return Status::Ok();
+protected:
+    std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
+        auto pipeline = std::make_unique<Pipeline>("memory_usage");
+
+        auto source = std::make_unique<MemoryUsageSource>();
+        ConfigValue cfg;
+        cfg["interval_ms"] = ConfigValue(static_cast<int64_t>(2000));
+        source->Init(cfg);
+
+        pipeline->SetSource(std::move(source));
+        pipeline->AddSink(std::make_unique<SseSink>("memory_usage"));
+        return pipeline;
     }
-
-    bool IsPushMode() const override { return false; }
-    int IntervalMs() const override { return interval_ms_; }
-
-    StatusOr<DataBatchPtr> Collect() override {
-        auto batch = std::make_shared<DataBatch>();
-        // 读取 /proc/meminfo 并填充 Record...
-        return batch;
-    }
-
-private:
-    int interval_ms_ = 2000;
 };
 
-IL_REGISTER_SOURCE("memory_usage", MemoryUsageSource);
+REGISTER_FEATURE(MemoryUsageDriver);
 
 }  // namespace illuminator
 ```
 
+> Source 插件（`MemoryUsageSource`）仍使用 `IL_REGISTER_SOURCE` 宏注册，由 Driver 的 `BuildPipeline()` 组装进 Pipeline。
+
 ### Step 2: 添加 BUILD 规则
 
-在 `src/sources/BUILD` 中添加：
+在 `src/features/BUILD` 中添加：
 
 ```python
 cc_library(
-    name = "memory_usage",
-    hdrs = ["memory/memory_usage/memory_usage.h"],
+    name = "memory_usage_driver",
+    hdrs = ["memory_usage_driver.h"],
     strip_include_prefix = "",
-    include_prefix = "sources",
+    include_prefix = "features",
     visibility = ["//visibility:public"],
-    alwayslink = True,  # 确保 IL_REGISTER_* 静态初始化器被链接
+    alwayslink = True,  # 确保 REGISTER_FEATURE 静态初始化器被链接
     deps = [
-        "//src/core:common",
-        "//src/plugin:api",
-        "//src/plugin:manager",
+        ":feature_registry",
+        "//src/core:engine",
+        "//src/server:sse_handler",
+        "//src/sources:memory_usage",
     ],
 )
 ```
 
-### Step 3: 注册到 builtin 列表
+并在 `all_drivers` target 的 deps 中添加 `"//src/features:memory_usage_driver"`（或直接 `:memory_usage_driver`）。
 
-在 `src/plugin/builtin/builtin_plugins.cc` 中添加 include：
-```cpp
-#include "sources/memory/memory_usage/memory_usage.h"
-```
-
-在 `src/plugin/BUILD` 的 `builtin` target deps 中添加：
-```python
-"//src/sources:memory_usage",
-```
-
-### Step 4: 添加配置
-
-在 `illuminator.yaml.example` 或 `main.cc` 的 `kDefaultConfigYaml` 中：
-```yaml
-pipelines:
-  memory_monitor:
-    source:
-      type: memory_usage
-      config:
-        interval_ms: 2000
-    sinks:
-      - type: local_storage
-        config:
-          backend: sqlite
-          path: /tmp/illuminator_data
-          pipeline: memory_monitor
-```
-
-### Step 5: 验证
+### Step 3: 验证
 
 ```bash
 bazel build //src/cli:illuminator
-sudo ./bazel-bin/src/cli/illuminator plugins  # 应能看到 memory_usage
+sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
+
+# 应能在 Feature 列表中看到 memory_usage
+curl http://localhost:9527/api/v2/features | python3 -m json.tool
 ```
 
 ---
@@ -701,8 +688,8 @@ const MemoryPage = lazy(() => import('./pages/MemoryPage'))
 
 ### 关键设计点
 
-- **Hook 使用 `getDataSource().subscribe()`**：自动获得 WS 推送 + HTTP 降级
-- **Always-On 模式**：Tier 1-2 Feature 由 daemon 自动启动，前端不需要 `usePageActivation`
+- **Hook 使用 `getDataSource().subscribe()`**：通过 DataBus SSE 单连接接收实时数据
+- **Always-On 模式**：Tier 1-2 Feature 由 daemon 启动时 `FeatureBus::ProbeAll()` 自动启动，前端不需要 `usePageActivation`
 - **Health 监控**：使用 `useFeatureHealth(name)` 检测数据可用性
 - **支持 Replay**：hook 接受可选 `replaySource` 参数
 - **暂停感知**：从 `useTimeStore` 读取 mode，paused 时取消订阅
@@ -755,7 +742,7 @@ npx vitest --watch
 | 模块 | 测试数 | 状态 |
 |------|--------|------|
 | Data Hooks (useCpuData, useGpuData, etc.) | ~30 | ✅ |
-| Services (apiClient, liveDataSource) | ~15 | ✅ |
+| Services (apiClient, dataBus) | ~15 | ✅ |
 | Workers (flameGraphWorker) | ~10 | ✅ |
 | 组件渲染测试 | 0 | ❌ 待补充 |
 | E2E (Playwright) | 0 | ❌ 待补充 |
@@ -764,9 +751,9 @@ npx vitest --watch
 
 ## 10. 常见问题与陷阱
 
-### Q1: 为什么插件必须设置 `alwayslink = True`？
+### Q1: 为什么 FeatureDriver 必须设置 `alwayslink = True`？
 
-`IL_REGISTER_*` 宏生成静态全局变量，在 `main()` 之前自动注册。没有 `alwayslink`，链接器会丢弃整个编译单元。
+`REGISTER_FEATURE` 宏生成静态全局变量，在 `main()` 之前自动注册到 FeatureRegistry。没有 `alwayslink`，链接器会丢弃整个编译单元。
 
 ### Q2: 为什么 LockFreeQueue 要求容量是 2 的幂？
 
@@ -782,15 +769,15 @@ npx vitest --watch
 
 ### Q4: 前端数据 hook 中的 intervalMs 参数有什么用？
 
-目前已是**遗留参数**。hooks 不再自己管理轮询定时器——由 `LiveDataSource` 统一管理（默认 1s）。该参数保留在签名中以保持向后兼容，但不影响实际行为。
+目前已是**遗留参数**。hooks 不再自己管理轮询定时器——由 DataBus 通过 SSE 推送数据。该参数保留在签名中以保持向后兼容，但不影响实际行为。
 
-### Q5: WebSocket 断开时前端会卡住吗？
+### Q5: SSE 连接断开时前端会卡住吗？
 
-不会。`LiveDataSource` 在 WS 断开时自动降级为 HTTP 轮询（`api.featureCollect()`），延迟从 ~50ms 增加到 ~1s，但用户无感知。重连使用指数退避（最大 30s）。
+不会。`SseLink` 在连接断开时自动重连，使用指数退避（1s → 30s max）。重连期间 DataBus ringBuffer 中已有数据仍可查看。
 
-### Q6: ProfileSnapshot 为什么不用 LiveDataSource？
+### Q6: ProfileSnapshot 如何使用 DataBus？
 
-火焰图需要 **cursor-based 增量拉取**（累积历史样本进行树构建），而 LiveDataSource 的 WS 推送只发送最新一批数据（latest-only）。二者语义不同。ProfileSnapshot 使用独立的 `api.featureStream(name, cursor)` 实现增量语义。
+火焰图通过 `getDataSource().subscribe('cpu_profiler', cb)` 订阅 SSE 推送的 profile 数据，在 hook 内累积 StackSample 后交给 Web Worker 构建火焰树。Tier 3 Feature 需先通过 `/api/v2/features/cpu_profiler/start` 启动。
 
 ### Q7: 如何给后端配置认证？
 
@@ -802,7 +789,7 @@ server:
   auth_token: "your-secret-token"
 ```
 
-前端需要通过 Vite proxy 或直连时携带 `Authorization: Bearer <token>` 头。WS 连接自动通过 URL 参数 `?token=<token>` 传递。
+前端需要通过 Vite proxy 或直连时在 fetch 请求中携带 `Authorization: Bearer <token>` 头。SSE 长连接在开发模式下通过同源 proxy 访问。
 
 ### Q8: 默认配置中为什么没有 auth_token？
 
@@ -814,11 +801,12 @@ server:
 
 ### ✅ 已完成
 
-- HTTP + WS 统一 Bearer Auth 认证
-- WS 实时推送 + HTTP 降级双通道
+- HTTP API Bearer Auth 认证
+- SSE 实时推送（SseHandler + DataBus，替代 WebSocket）
+- RFC v3 架构（InfrastructureManager + FeatureBus + FeatureDriver）
 - 火焰图 Web Worker 异步计算
 - 死代码清理 + 依赖精简
-- 前端 Vitest 测试 (56 tests)
+- 前端 Vitest 测试
 - SQLite WAL 存储 + 自动 Prune
 - .so 插件动态加载 (SoLoader + 热加载 API)
 
@@ -829,8 +817,8 @@ server:
 | ~~Replay 流式解析~~ | ✅ 已完成：`ReadableStream` + 进度回调 + bulk fallback |
 | ~~前端组件测试~~ | ✅ 已完成：Vitest + Testing Library，74 项测试 |
 | ~~E2E 测试~~ | ✅ 已完成：Playwright 配置 + smoke.spec.ts |
-| ~~WS 同端口~~ | ✅ 已完成：`WsAwareServer` 子类实现 HTTP+WS 共享 9527 |
-| ~~WS 广播去重~~ | ✅ 已完成：DataBatchPtr 指针比较 |
+| ~~SSE 数据面~~ | ✅ 已完成：SseHandler 订阅模型 + /api/v1/events/* |
+| ~~FeatureBus 控制面~~ | ✅ 已完成：/api/v2/features/* + FeatureDriver 自注册 |
 | ~~/pipelines API~~ | ✅ 已完成：新增 `active_features` 字段 |
 | mem_tracer 集成 | 将 `mem_tracer.bpf.c` 集成为 `heap_profiler` Source |
 | Hook 签名清理 | 移除 hooks 中无实际作用的 `intervalMs` 参数 |
@@ -862,11 +850,14 @@ server:
 |------------|--------|
 | 程序入口 | `src/cli/main.cc` |
 | 数据长什么样 | `src/core/engine/data_batch.h` |
-| 管道怎么工作 | `src/core/engine/pipeline_controller.h` + `.cc` |
-| Feature 管理 | `src/core/engine/feature_manager.h` |
+| 管道怎么工作 | `src/core/engine/feature_driver.h`（BuildPipeline） |
+| 共享基础设施 | `src/core/engine/infrastructure_manager.h` |
+| Feature 注册与生命周期 | `src/core/engine/feature_bus.h` |
+| Feature 自动注册 | `src/features/feature_registry.h` |
 | 配置怎么解析 | `src/core/config/yaml_config_loader.h` |
-| API 有哪些 | `src/server/api_routes.h` |
-| WS 推送怎么做 | `src/server/websocket_manager.h` |
+| API 有哪些 | `src/server/api_routes.h` + `/api/v2/features/*` |
+| SSE 推送怎么做 | `src/server/sse_handler.h` |
+| 如何写 FeatureDriver | `src/features/cpu_utilization_driver.h` |
 | 如何写 Source | `src/sources/cpu/cpu_utilization/cpu_utilization.h` |
 | 如何写 Processor | `src/processors/filter/filter_processor.h` |
 | 如何写 Sink | `src/sinks/console_output/console_sink.h` |
@@ -874,7 +865,8 @@ server:
 | 内存怎么管理 | `src/core/memory/arena.h` |
 | 线程怎么调度 | `src/core/engine/timer_wheel.h` |
 | eBPF 怎么加载 | `src/ebpf/loader/bpf_program_manager.h` |
-| 前端数据流 | `web/src/services/liveDataSource.ts` |
+| 前端数据流 | `web/src/services/dataBus.ts` |
+| 前端 SSE 传输层 | `web/src/services/sseLink.ts` |
 | 前端路由 | `web/src/App.tsx` |
 | 前端数据 hook | `web/src/hooks/useCpuData.ts` |
 | 火焰图实现 | `web/src/components/charts/ProfileSnapshot.tsx` |
@@ -890,11 +882,11 @@ server:
 ```
 ┌─────────────────────────────────────────────────────────┐
 │              Frontend (React 18 + TypeScript)             │
-│  Pages → Hooks → LiveDataSource (WS ↔ HTTP fallback)    │
+│  Pages → Hooks → DataBus (SSE via SseLink)              │
 │  ProfileSnapshot → Worker → FlameGraph div rendering    │
 │  ECharts 6 (tree-shaken) for time-series charts         │
 └──────────────────────────┬──────────────────────────────┘
-                           │ REST + WS :9527 (同端口)
+                           │ REST (/api/v2/*) + SSE (/api/v1/events/*)
 ┌──────────────────────────▼──────────────────────────────┐
 │                     CLI (main.cc)                        │
 │  daemon | collect | top | version | plugins | storage   │
@@ -902,23 +894,25 @@ server:
                │
 ┌──────────────▼──────────────────────────────────────────┐
 │              Server Layer                                │
-│  HttpServer (cpp-httplib) + API Routes (39 endpoints)   │
-│  WebSocketManager (custom RFC6455, Bearer Auth)         │
+│  HttpServer (cpp-httplib) + API Routes                   │
+│  SseHandler (SSE 订阅管理 + SseSink 推送)                │
 └──────────────┬──────────────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────────────┐
-│              Engine Layer                                │
-│  FeatureManager (lifecycle) + PipelineController (exec) │
-│    ├── TimerWheel (timerfd+epoll)                       │
-│    ├── CollectPool (ThreadPool)                         │
-│    ├── Pipeline[] (AsyncChannel + ProcessThread)        │
-│    └── SinkPool (ThreadPool)                            │
+│              Engine Layer (RFC v3)                       │
+│  FeatureBus (注册/生命周期) + FeatureDriver (自包含 Pipeline) │
+│    ├── InfrastructureManager                            │
+│    │     ├── TimerWheel (timerfd+epoll)                 │
+│    │     ├── CollectPool (ThreadPool)                   │
+│    │     └── SinkPool (ThreadPool)                      │
+│    └── FeatureDriver[] (Source → Channel → Sink)        │
 └──────────────┬──────────────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────────────┐
 │              Plugin Layer                                │
-│  Sources (9) | Processors (4) | Aggregators (1) | Sinks (9) │
-│  PluginRegistry (macro) | SoLoader (.so) | WASM (stub) │
+│  Sources | Processors | Aggregators | Sinks              │
+│  PluginRegistry (macro) | FeatureRegistry (REGISTER_FEATURE) │
+│  SoLoader (.so) | WASM (stub)                           │
 └──────────────┬──────────────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────────────┐
@@ -939,4 +933,4 @@ server:
 
 ---
 
-> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从配置解析、FeatureManager 注册、**Always-On 自动启动 Tier 1-2**、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 **StreamSinkStore → WebSocketManager 广播给前端**——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可通过 LiveDataSource（Link Chain: WsLink + HttpLink）订阅已在流动的数据。
+> **最后建议**：从 `main.cc` 的 `RunDaemon()` 开始，跟踪一次 CPU 采集的完整数据流——从 `InfrastructureManager` 启动、`FeatureRegistry::RegisterAll()`、`FeatureBus::ProbeAll()` 自动启动 Tier 1-2、TimerWheel 调度、CollectPool 执行、AsyncChannel 传输、ProcessThread 处理、到 **SseSink → SseHandler 推送给前端 DataBus**——就能理解整个系统的运转方式。前端是纯数据查看器，打开页面即可通过 `getDataSource().subscribe()` 订阅已在流动的数据。

@@ -1,10 +1,10 @@
 import { useState, useCallback, useEffect } from 'react'
-import { api, FeatureEntry } from '../services/apiClient'
+import { api, FeatureDescriptor } from '../services/apiClient'
 
 export { TimeSeriesBuffer } from '../utils/timeSeriesBuffer'
 
 export function useFeatureList() {
-  const [features, setFeatures] = useState<FeatureEntry[]>([])
+  const [features, setFeatures] = useState<FeatureDescriptor[]>([])
   const [loading, setLoading] = useState(true)
 
   const refresh = useCallback(async () => {
@@ -19,8 +19,8 @@ export function useFeatureList() {
   }, [])
 
   useEffect(() => {
-    refresh() // eslint-disable-line react-hooks/set-state-in-effect
-    const timer = setInterval(refresh, 3000)
+    refresh()
+    const timer = setInterval(refresh, 5000)
     return () => clearInterval(timer)
   }, [refresh])
 

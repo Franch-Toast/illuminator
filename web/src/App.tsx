@@ -5,8 +5,11 @@ import StatusBar from './components/Layout/StatusBar'
 import ResourceBudget from './components/Layout/ResourceBudget'
 import ConnectionIndicator from './components/Layout/ConnectionIndicator'
 import ExportControl from './components/Layout/ExportControl'
+import RecordingControls from './components/RecordingControls'
+import TimeWindowSelector from './components/TimeWindowSelector'
 import { usePipelinePolling } from './hooks/usePipelinePolling'
 import { useTimeStore } from './stores/useTimeStore'
+import { useDataBusConnection } from './hooks/useMetricsData'
 
 const OverviewPage = lazy(() => import('./pages/OverviewPage'))
 const CpuPage = lazy(() => import('./pages/CpuPage'))
@@ -64,6 +67,11 @@ export default function App() {
   const [version, setVersion] = useState('...')
   const [showShortcuts, setShowShortcuts] = useState(false)
   usePipelinePolling(3000)
+  const { connected: sseConnected, connect: sseConnect } = useDataBusConnection()
+
+  useEffect(() => {
+    sseConnect().catch(() => { /* SSE connection optional - falls back to WS/HTTP */ })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const togglePause = useTimeStore(s => s.togglePause)
   const setWindowMs = useTimeStore(s => s.setWindowMs)
@@ -139,8 +147,11 @@ export default function App() {
 
         <div style={{ flex: 1 }} />
         <div style={{ padding: '8px 12px', borderTop: '1px solid #2a2d35', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <TimeWindowSelector />
+          <RecordingControls featureName="cpu_utilization" compact />
           <ExportControl />
           <ConnectionIndicator />
+          {sseConnected && <span style={{ fontSize: 10, color: '#34d399' }}>SSE</span>}
           <ResourceBudget />
         </div>
       </nav>

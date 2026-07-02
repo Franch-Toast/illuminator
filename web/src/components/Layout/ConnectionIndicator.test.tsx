@@ -14,10 +14,10 @@ describe('ConnectionIndicator', () => {
     vi.clearAllMocks()
   })
 
-  it('shows "WS Connected" when status is connected', () => {
+  it('shows "SSE Connected" when status is connected', () => {
     mockUseConnectionStatus.mockReturnValue('connected')
     render(<ConnectionIndicator />)
-    expect(screen.getByText('WS Connected')).toBeInTheDocument()
+    expect(screen.getByText('SSE Connected')).toBeInTheDocument()
   })
 
   it('shows "Connecting..." when status is connecting', () => {
@@ -26,23 +26,23 @@ describe('ConnectionIndicator', () => {
     expect(screen.getByText('Connecting...')).toBeInTheDocument()
   })
 
-  it('shows "HTTP Polling" when status is disconnected', () => {
+  it('shows "Disconnected" when status is disconnected', () => {
     mockUseConnectionStatus.mockReturnValue('disconnected')
     render(<ConnectionIndicator />)
-    expect(screen.getByText('HTTP Polling')).toBeInTheDocument()
+    expect(screen.getByText('Disconnected')).toBeInTheDocument()
   })
 
   it('has correct title tooltip for connected state', () => {
     mockUseConnectionStatus.mockReturnValue('connected')
     const { container } = render(<ConnectionIndicator />)
     const wrapper = container.firstChild as HTMLElement
-    expect(wrapper.title).toContain('Real-time WebSocket connection active')
+    expect(wrapper.title).toContain('Real-time SSE connection active')
   })
 
   it('has correct title tooltip for disconnected state', () => {
     mockUseConnectionStatus.mockReturnValue('disconnected')
     const { container } = render(<ConnectionIndicator />)
     const wrapper = container.firstChild as HTMLElement
-    expect(wrapper.title).toContain('using HTTP polling fallback')
+    expect(wrapper.title).toContain('SSE connection lost')
   })
 })

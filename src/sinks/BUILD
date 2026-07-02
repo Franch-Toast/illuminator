@@ -82,18 +82,6 @@ cc_library(
     ],
 )
 
-cc_library(
-    name = "stream_sink",
-    hdrs = ["stream_sink/stream_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:manager",
-    ],
-)
 
 cc_library(
     name = "fanout",

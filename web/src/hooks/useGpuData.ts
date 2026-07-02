@@ -3,6 +3,7 @@ import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
 import { getDataSource } from './useDataSource'
 import type { DataBatch, DataSource } from '../services/dataSource'
+import { extractRecords } from '../utils/ssePayload'
 
 export interface GpuDataPoint {
   timestamp: number
@@ -30,13 +31,6 @@ export interface GpuProcess {
   history: number[]
 }
 
-interface GpuCollectResponse {
-  pipeline: string
-  records: Array<{
-    labels: Record<string, string>
-    fields: Record<string, number | string>
-  }>
-}
 
 export function useGpuMonitor(active = true, replaySource?: DataSource) {
   const [data, setData] = useState<GpuDataPoint[]>([])
@@ -49,14 +43,14 @@ export function useGpuMonitor(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('gpu_monitor', (batch: DataBatch) => {
-      const resp = batch.data as GpuCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const now = batch.timestamp
       let computePct = 0, memoryPct = 0, memUsedMb = 0, memTotalMb = 0
       let tempC = 0, powerW = 0
 
-      for (const rec of resp.records) {
+      for (const rec of records) {
         const type = rec.labels?.type
         if (type === 'gpu_utilization') {
           computePct = (rec.fields?.compute_pct as number) ?? 0
@@ -101,11 +95,11 @@ export function useGpuProcesses(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('gpu_monitor', (batch: DataBatch) => {
-      const resp = batch.data as GpuCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const result: GpuProcess[] = []
-      for (const rec of resp.records) {
+      for (const rec of records) {
         if (rec.labels?.type !== 'process_gpu') continue
         const pid = parseInt(rec.labels?.pid ?? '0', 10)
         const gpuPct = (rec.fields?.gpu_pct as number) ?? 0

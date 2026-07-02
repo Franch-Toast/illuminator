@@ -1,30 +1,53 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useMemoryUtilization, useMemoryProcesses } from './useMemoryData'
+import type { DataBatch } from '../services/dataSource'
+import { dataBus } from '../services/dataBus'
 
-vi.mock('../services/apiClient', () => ({
-  api: {
-    featureCollect: vi.fn(),
-  },
-}))
+vi.mock('../services/dataBus', () => {
+  const subscribers = new Map<string, Set<(batch: DataBatch) => void>>()
+
+  return {
+    dataBus: {
+      subscribe: vi.fn((feature: string, cb: (batch: DataBatch) => void) => {
+        if (!subscribers.has(feature)) subscribers.set(feature, new Set())
+        subscribers.get(feature)!.add(cb)
+        return () => { subscribers.get(feature)!.delete(cb) }
+      }),
+      getLatest: vi.fn(() => null),
+      getAvailableFeatures: vi.fn(() => []),
+      destroy: vi.fn(),
+      onConnectionChange: vi.fn(() => () => {}),
+      getStatus: vi.fn(() => 'disconnected' as const),
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      __emit: (feature: string, data: unknown, timestamp = Date.now()) => {
+        const batch: DataBatch = { feature, timestamp, data }
+        subscribers.get(feature)?.forEach(cb => cb(batch))
+      },
+      __subscribers: subscribers,
+    },
+  }
+})
 
 vi.mock('../stores/useTimeStore', () => ({
   useTimeStore: (selector: (s: { mode: string }) => string) => selector({ mode: 'live' }),
 }))
 
-import { api } from '../services/apiClient'
+type MockDataBus = typeof dataBus & {
+  __emit: (feature: string, data: unknown, timestamp?: number) => void
+  __subscribers: Map<string, Set<(batch: DataBatch) => void>>
+}
+
+const mockBus = dataBus as MockDataBus
 
 describe('useMemoryUtilization', () => {
   beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
     vi.clearAllMocks()
+    mockBus.__subscribers.clear()
   })
 
-  it('should fetch and parse memory data', async () => {
+  it('should fetch and parse memory data', () => {
     const mockResponse = {
       pipeline: 'memory_utilization',
       records: [
@@ -43,11 +66,11 @@ describe('useMemoryUtilization', () => {
       ],
     }
 
-    vi.mocked(api.featureCollect).mockResolvedValue(mockResponse)
-
     const { result } = renderHook(() => useMemoryUtilization(true))
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('memory_utilization', mockResponse)
+    })
 
     expect(result.current.summary).toBeTruthy()
     expect(result.current.summary!.totalMb).toBe(16384)
@@ -61,21 +84,20 @@ describe('useMemoryUtilization', () => {
     expect(point.free_mb).toBe(3584)
   })
 
-  it('should not poll when inactive', async () => {
+  it('should not poll when inactive', () => {
     renderHook(() => useMemoryUtilization(false))
-    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
-    expect(api.featureCollect).not.toHaveBeenCalled()
+    expect(dataBus.subscribe).not.toHaveBeenCalled()
   })
 
-  it('should clear data on clear()', async () => {
-    vi.mocked(api.featureCollect).mockResolvedValue({
-      pipeline: 'memory_utilization',
-      records: [{ labels: { type: 'memory_total' }, fields: { total_mb: 100, used_mb: 50, cached_mb: 20, buffers_mb: 5, free_mb: 25 } }],
-    })
-
+  it('should clear data on clear()', () => {
     const { result } = renderHook(() => useMemoryUtilization(true))
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('memory_utilization', {
+        pipeline: 'memory_utilization',
+        records: [{ labels: { type: 'memory_total' }, fields: { total_mb: 100, used_mb: 50, cached_mb: 20, buffers_mb: 5, free_mb: 25 } }],
+      })
+    })
     expect(result.current.data.length).toBeGreaterThan(0)
 
     act(() => { result.current.clear() })
@@ -86,15 +108,11 @@ describe('useMemoryUtilization', () => {
 
 describe('useMemoryProcesses', () => {
   beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
     vi.clearAllMocks()
+    mockBus.__subscribers.clear()
   })
 
-  it('should fetch and sort processes by RSS', async () => {
+  it('should fetch and sort processes by RSS', () => {
     const mockResponse = {
       pipeline: 'memory_processes',
       records: [
@@ -103,11 +121,11 @@ describe('useMemoryProcesses', () => {
       ],
     }
 
-    vi.mocked(api.featureCollect).mockResolvedValue(mockResponse)
-
     const { result } = renderHook(() => useMemoryProcesses(true))
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('memory_processes', mockResponse)
+    })
 
     expect(result.current.processes.length).toBe(2)
     expect(result.current.processes[0].comm).toBe('big')

@@ -3,6 +3,7 @@ import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
 import { getDataSource } from './useDataSource'
 import type { DataBatch, DataSource } from '../services/dataSource'
+import { extractRecords } from '../utils/ssePayload'
 
 export interface IoDataPoint {
   timestamp: number
@@ -30,13 +31,6 @@ export interface IoProcess {
   history: number[]
 }
 
-interface IoCollectResponse {
-  pipeline: string
-  records: Array<{
-    labels: Record<string, string>
-    fields: Record<string, number | string>
-  }>
-}
 
 export function useIoMonitor(active = true, replaySource?: DataSource) {
   const [data, setData] = useState<IoDataPoint[]>([])
@@ -49,15 +43,15 @@ export function useIoMonitor(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('io_monitor', (batch: DataBatch) => {
-      const resp = batch.data as IoCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const now = batch.timestamp
       let readIops = 0, writeIops = 0
       let readThroughput = 0, writeThroughput = 0
       let avgLatency = 0, p99Latency = 0
 
-      for (const rec of resp.records) {
+      for (const rec of records) {
         const type = rec.labels?.type
         if (type === 'io_total') {
           readIops = (rec.fields?.read_iops as number) ?? 0
@@ -101,11 +95,11 @@ export function useIoProcesses(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('io_monitor', (batch: DataBatch) => {
-      const resp = batch.data as IoCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const result: IoProcess[] = []
-      for (const rec of resp.records) {
+      for (const rec of records) {
         if (rec.labels?.type !== 'process_io') continue
         const pid = parseInt(rec.labels?.pid ?? '0', 10)
         const iops = (rec.fields?.iops as number) ?? 0

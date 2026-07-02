@@ -1,8 +1,8 @@
 # Illuminator 前端架构设计文档
 
-> **版本**: 2.0  
-> **日期**: 2026-06-12  
-> **状态**: 已确认
+> **版本**: 3.0  
+> **日期**: 2026-07-02  
+> **状态**: 已确认（RFC v3 架构）
 
 ---
 
@@ -181,6 +181,12 @@
 - 硬限制：单次录制最大 500MB（可配置），超出自动停止
 - 录制不改变任何 Feature 的运行状态（纯旁路写入）
 
+**实现方式（RFC v3）**：
+- **后端录制**：`useRecording()` hook 调用 REST API 控制后端 RecordingSink 落盘
+  - `POST /api/v1/features/:name/record/start` — 开始写入 .ilr 文件
+  - `POST /api/v1/features/:name/record/stop` — 停止录制
+- **前端保存**：`useSaveBuffer()` hook 将 DataBus 内存 ringBuffer 序列化为 .ilr 文件并下载（无需后端 I/O）
+
 ---
 
 ## 三、Replay 模式设计
@@ -204,8 +210,9 @@ Replay 和 Live 共享完全相同的图表组件和数据处理 hooks，区别�
 │                    ┌────────────────────┼────────────────────┐     │
 │                    │                                         │     │
 │            ┌───────┴────────┐                     ┌─────────┴───┐ │
-│            │ LiveDataSource │                     │ReplaySource │ │
-│            │ (HTTP 轮询)    │                     │ (文件解析)   │ │
+│            │    DataBus     │                     │ReplaySource │ │
+│            │ (SSE via       │                     │ (文件解析)   │ │
+│            │  SseLink)      │                     │             │ │
 │            └────────────────┘                     └─────────────┘ │
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
@@ -380,7 +387,7 @@ class ReplayEngine implements DataSource {
 |---------|------|
 | 性能 | Canvas 渲染，100k+ 数据点流畅；实际场景 60-2000 点 |
 | 图表种类 | 面积图、热力图、折线图、直方图、饼图原生支持 |
-| 实时流 | `setOption` 增量更新，适配 1-2s 轮询 |
+| 实时流 | `setOption` 增量更新，适配 SSE 推送 |
 | 交互 | Tooltip、DataZoom、Brush、Legend 开箱即用 |
 | 暗色主题 | 内置 dark 主题 |
 | Bundle | 按需引入 ~80KB gzip |
@@ -416,29 +423,43 @@ echarts.use([LineChart, HeatmapChart, BarChart,
 
 ### 6.1 DataSource 统一模型
 
-图表组件通过 `useDataSource` hook 消费数据，不感知来源：
+图表组件通过数据 hooks 消费数据，不感知来源。Live 模式下 hooks 通过 `getDataSource()` 获取全局 `dataBus` 单例并订阅 Feature：
 
 ```typescript
 // 页面组件中的使用方式（Live/Replay 完全相同）
 function SystemSubTab() {
-  const data = useDataSource('cpu_utilization')
-  return <EChartsAreaChart option={buildOption(data)} />
+  const { areaData } = useCpuUtilization(true)  // 内部 getDataSource().subscribe(...)
+  return <EChartsAreaChart option={buildOption(areaData)} />
 }
 ```
+
+Feature 列表由 `useFeatureList()` hook 获取，调用 `GET /api/v2/features` 返回 `{"features": [...descriptors]}`。
 
 ### 6.2 Live 模式实现
 
 ```
-用户进入标签页
+App 启动 → dataBus.connect()
     ↓
-usePageActivation('cpu') → 自动 POST /features/cpu_utilization/start
+POST /api/v1/events/subscribe  { features: [...] }
+    ↓ 返回 { subscription_id, url }
+GET /api/v1/events/{id}  (SSE 长连接，SseLink 封装 EventSource)
     ↓
-LiveDataSource.subscribe('cpu_utilization')
-    ↓ (内部 setInterval 1s)
-GET /api/v1/features/cpu_utilization/collect
+SSE event "data" → DataBus.handleData(feature, payload)
+SSE event "frame" → DataBus.handleFrame()  (大 payload 分片重组)
     ↓
-callback(batch) → hook 更新 state → ECharts 重绘
+hook: getDataSource().subscribe('cpu_utilization', cb)
+    ↓
+extractRecords(batch.data) → 解析 metrics/records 数组
+    ↓
+callback → hook 更新 state → ECharts 重绘
 ```
+
+动态增删 Feature 订阅：`POST /api/v1/events/{id}/update`（DataBus.syncSubscription）。
+
+**SSE payload 格式**：
+- `time_series` 模型：`metrics` 数组，元素为 `{ labels, fields, timestamp }`
+- `trace` / `generic` 模型：`records` 数组
+- 前端 `extractRecords()`（`web/src/utils/ssePayload.ts`）统一处理两种格式
 
 ### 6.3 Replay 模式实现
 
@@ -456,13 +477,14 @@ ReplayEngine.play()
 
 | 操作 | API | 模式 |
 |------|-----|------|
-| 启动 Feature | `POST /api/v1/features/:name/start` | Live |
-| 停止 Feature | `POST /api/v1/features/:name/stop` | Live |
-| 获取数据 | `GET /api/v1/features/:name/collect` | Live |
-| 查询 Feature 列表 | `GET /api/v1/features` | Live |
-| 开始录制 | `POST /api/v1/recording/start` | Live |
-| 停止录制 | `POST /api/v1/recording/stop` | Live |
-| 录制状态 | `GET /api/v1/recording/status` | Live |
+| 订阅 SSE 流 | `POST /api/v1/events/subscribe` → `GET /api/v1/events/{id}` | Live |
+| 更新订阅列表 | `POST /api/v1/events/{id}/update` | Live |
+| 启动 Feature | `POST /api/v2/features/:name/start` | Live |
+| 停止 Feature | `POST /api/v2/features/:name/stop` | Live |
+| 查询 Feature 列表 | `GET /api/v2/features` → `{"features": [...]}` | Live |
+| 开始后端录制 | `POST /api/v1/features/:name/record/start` | Live |
+| 停止后端录制 | `POST /api/v1/features/:name/record/stop` | Live |
+| 前端保存 buffer | (无 API，`useSaveBuffer()` 导出 DataBus ringBuffer) | Live |
 | — | (无后端 API) | Replay |
 
 ---
@@ -510,42 +532,44 @@ resource_budget:
 
 ---
 
-## 九、通信策略：WebSocket + HTTP 双通道
+## 九、通信策略：SSE + HTTP 双通道
 
 ### 9.1 策略
 
 ```
 ┌─ 前端通信层 ──────────────────────────────────────────────────────┐
 │                                                                    │
-│  ┌─ WebSocket (主通道) ────────────────────────────────────────┐   │
-│  │  连接: ws://host:9527/ws                                    │   │
-│  │  用途: 服务端推送实时数据帧（无需轮询）                       │   │
-│  │  帧格式: {"feature":"cpu_utilization","data":{...}}          │   │
-│  │  优势: 零延迟、无无效请求                                    │   │
+│  ┌─ SSE (主通道) ──────────────────────────────────────────────┐   │
+│  │  订阅: POST /api/v1/events/subscribe                         │   │
+│  │  连接: GET /api/v1/events/{id}  (EventSource)                │   │
+│  │  封装: SseLink — EventSource wrapper + 自动重连               │   │
+│  │  路由: DataBus — 管理订阅、ringBuffer、分片重组               │   │
+│  │  事件: "data" (完整 payload) / "frame" (大 payload 分片)     │   │
+│  │  优势: 单向推送、浏览器原生支持、无需轮询                     │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 │  ┌─ HTTP REST (辅通道) ────────────────────────────────────────┐   │
-│  │  用途: Feature 控制 (start/stop)、状态查询、录制控制          │   │
-│  │  Fallback: WS 断开时临时轮询 /collect                        │   │
+│  │  用途: Feature 控制 (start/stop)、Feature 发现、录制控制      │   │
+│  │  订阅管理: POST /api/v1/events/{id}/update 动态增删 Feature   │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.2 自动降级
+### 9.2 自动重连
 
 ```
-WebSocket 连接成功 → 使用 WS 推送（0 延迟）
-WebSocket 断开     → 自动切换到 HTTP 轮询（1s 间隔）+ 显示 "连接中断" 提示
-WebSocket 重连成功 → 自动恢复 WS 推送 + 隐藏提示
+SSE 连接成功 → SseLink.onOpen → DataBus 状态 "connected"
+SSE 断开     → SseLink 指数退避重连 (1s → 2s → 4s → ... → 30s max)
+重连成功     → 自动恢复 SSE 推送 + 隐藏 "连接中断" 提示
 ```
 
 ### 9.3 Page Visibility 感知
 
 | 页面状态 | 行为 |
 |---------|------|
-| 前台可见 | WS 正常接收 / HTTP 正常轮询 |
-| 后台标签（不可见） | WS 暂停订阅 / HTTP 轮询降频至 5s |
+| 前台可见 | SSE 正常接收 |
+| 后台标签（不可见） | SSE 暂停订阅 / 降频消费 |
 | 浏览器最小化 | 完全暂停前端数据消费（后端继续运行不受影响） |
 | 回到前台 | 自动恢复 + 拉取最近数据补充 gap |
 
@@ -755,7 +779,7 @@ URL 编码内容:
 
 | 场景 | 行为 |
 |------|------|
-| WS 断开 | 自动切换 HTTP 轮询 + 显示提示 |
+| SSE 断开 | SseLink 自动重连 + 显示 "连接中断" 提示 |
 | 后端未响应 | 图表冻结在最后一帧 + "无数据" 水印 |
 | Feature 启动失败 | 显示错误原因 + "重试" 按钮 |
 | eBPF 不可用 | Tier 3 按钮禁用 + tooltip 说明原因 |
@@ -764,8 +788,8 @@ URL 编码内容:
 ### 12.3 自动重连
 
 ```
-断开 → 1s 重试 → 2s → 4s → 8s → 16s → 30s (max)
-重连成功 → 拉取 Feature 状态 → 恢复订阅 → 补充 gap 数据
+断开 → SseLink 指数退避: 1s → 2s → 4s → 8s → 16s → 30s (max)
+重连成功 → EventSource 重新建立 → DataBus 恢复接收 SSE 事件
 ```
 
 ---
@@ -780,7 +804,7 @@ URL 编码内容:
 | 火焰图渲染 (2000 samples) | < 50ms | console.time |
 | 单页 JS bundle | < 150KB gzip | vite-bundle-visualizer |
 | 前端内存峰值 | < 100MB (长时间运行) | Memory DevTools |
-| WS → 图表延迟 | < 100ms | 端到端计时 |
+| SSE → 图表延迟 | < 100ms | 端到端计时 |
 | Replay 文件加载 (50MB) | < 3s | Worker 计时 |
 
 ---
@@ -790,7 +814,7 @@ URL 编码内容:
 | Phase | 内容 | 优先级 |
 |-------|------|--------|
 | **Phase 1** | Overview + CPU 标签页 (自定义 SVG) | ✅ 完成 |
-| **Phase 2** | ECharts 迁移 + WS 推送 + 分层自动激活 + Page Visibility + 资源预算 | ✅ 完成 |
+| **Phase 2** | ECharts 迁移 + SSE 推送 + 分层自动激活 + Page Visibility + 资源预算 | ✅ 完成 |
 | **Phase 3** | 火焰图增强 (搜索 + Zoom + Diff) + Web Worker | ✅ 完成 |
 | **Phase 4** | Memory 标签页 | ✅ 完成 |
 | **Phase 5** | IO + Network 标签页 | ✅ 完成 |
@@ -809,7 +833,7 @@ URL 编码内容:
 |------|------|--------|
 | Replay 标签页完善 | IO/Network/GPU 的 Replay 视图实现（当前为 placeholder） | P1 |
 | Brush 时间范围 → 火焰图过滤 | 拖拽选择后联动火焰图聚合已实现，需更多端到端验证 | P1 |
-| WebSocket 服务端推送优化 | 目前降级为 HTTP 轮询，WS 通道需压缩传输优化 | P2 |
+| SSE 大 payload 分片优化 | frame 分片重组已实现，需更多端到端验证 | P2 |
 | 前端性能优化 | React.memo + requestIdleCallback + ECharts appendData | P2 |
 | System 页面完善 | 调度延迟直方图 + 中断统计 + 运行队列详细分析 | P2 |
 | 告警规则系统 | CPU/内存超阈值自动触发 Annotation + 浏览器通知 | P3 |
@@ -876,10 +900,10 @@ BridgeDescriptorToRegistry → 注册到 PluginRegistry
 |------|-----|------|
 | 查询已注册插件 | `GET /api/v1/plugins` | 列出所有 source/processor/aggregator/sink 插件 |
 | 热加载插件 | `POST /api/v1/plugins/reload` | 重新扫描 plugin_dirs 并加载新 .so |
-| Feature 启动 | `POST /api/v1/features/:name/start` | 创建并启动对应 pipeline |
-| Feature 停止 | `POST /api/v1/features/:name/stop` | 销毁 pipeline 释放资源 |
-| Feature 暂停 | `POST /api/v1/features/:name/pause` | 暂停采集但保留 pipeline |
-| Feature 恢复 | `POST /api/v1/features/:name/resume` | 从暂停恢复采集 |
+| Feature 启动 | `POST /api/v2/features/:name/start` | 创建并启动对应 pipeline |
+| Feature 停止 | `POST /api/v2/features/:name/stop` | 销毁 pipeline 释放资源 |
+| Feature 暂停 | `POST /api/v2/features/:name/pause` | 暂停采集但保留 pipeline |
+| Feature 恢复 | `POST /api/v2/features/:name/resume` | 从暂停恢复采集 |
 
 ### 15.4 导出功能
 
@@ -901,32 +925,39 @@ BridgeDescriptorToRegistry → 注册到 PluginRegistry
 > 实际采用的是 `getDataSource()` 全局单例模式，无 Provider 嵌套开销。
 
 ```
-┌─ getDataSource() → LiveDataSource 单例 ────────────────────────┐
+┌─ getDataSource() → dataBus 单例 (DataBus) ──────────────────────┐
 │                                                                  │
-│  WS 主通道: ws://host:9527/ws/features                          │
-│  HTTP 降级: api.featureCollect(feature) 1s 轮询                  │
-│  WS 连接/断开时自动切换                                           │
+│  SSE 主通道: POST /api/v1/events/subscribe                       │
+│              → GET /api/v1/events/{id} (SseLink / EventSource)   │
+│  数据路由: DataBus.subscribe(feature, cb) → ringBuffer + 回调    │
+│  自动重连: SseLink 指数退避 (1s → 30s)                           │
 │                                                                  │
 │  Replay: 各 hook 通过可选 replaySource?: DataSource 参数覆盖     │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+核心类：
+- **`DataBus`**（`web/src/services/dataBus.ts`）— SSE 订阅管理、数据路由、ringBuffer
+- **`SseLink`**（`web/src/services/sseLink.ts`）— EventSource 封装，自动重连
+
 ### 16.2 Hook 双模式设计
 
 数据 hooks 支持两种工作方式：
 
 ```typescript
-// Live 模式（默认）— 直接 HTTP 轮询
+// Live 模式（默认）— 通过 DataBus SSE 订阅
 useCpuUtilization(true)
 
 // Replay 模式 — 通过 DataSource 订阅
-useCpuUtilization(true, 1000, replayEngine)
+useCpuUtilization(true, replayEngine)
 ```
 
 通过可选的 `replaySource` 参数，hooks 内部切换数据获取逻辑：
-- 有 `replaySource`：订阅 DataSource 的 feature 频道
-- 无 `replaySource`：使用 `api.featureCollect()` 轮询
+- 有 `replaySource`：订阅 ReplayEngine 的 feature 频道
+- 无 `replaySource`：`getDataSource().subscribe('cpu_utilization', cb)` → DataBus SSE 推送
+
+SSE payload 经 `extractRecords(batch.data)` 解析后供各 hook 消费。
 
 ### 16.3 Replay 页面功能
 

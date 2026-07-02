@@ -5,9 +5,9 @@ export default function ConnectionIndicator() {
   const status = useConnectionStatus()
 
   const config = {
-    connected: { color: colors.success, label: 'WS Connected', icon: '●' },
+    connected: { color: colors.success, label: 'SSE Connected', icon: '●' },
     connecting: { color: colors.warnText, label: 'Connecting...', icon: '○' },
-    disconnected: { color: '#6b7280', label: 'HTTP Polling', icon: '↻' },
+    disconnected: { color: '#6b7280', label: 'Disconnected', icon: '○' },
   }[status]
 
   return (
@@ -18,10 +18,10 @@ export default function ConnectionIndicator() {
       fontSize: 11,
       color: config.color,
     }} title={status === 'disconnected'
-      ? 'WebSocket unavailable, using HTTP polling fallback (data still flowing)'
+      ? 'SSE connection lost. Attempting reconnection...'
       : status === 'connected'
-        ? 'Real-time WebSocket connection active'
-        : 'Attempting WebSocket connection...'
+        ? 'Real-time SSE connection active'
+        : 'Establishing SSE connection...'
     }>
       <span>{config.icon}</span>
       <span>{config.label}</span>

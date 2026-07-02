@@ -11,7 +11,7 @@ export default defineConfig({
   },
   webServer: {
     command: 'echo "Using external daemon on port 9527"',
-    url: 'http://127.0.0.1:9527/api/v1/features',
+    url: 'http://127.0.0.1:9527/healthz',
     reuseExistingServer: true,
     timeout: 5000,
   },

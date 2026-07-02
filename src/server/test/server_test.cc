@@ -2,7 +2,6 @@
 #include "httplib.h"
 #include "core/common/version_generated.h"
 #include "server/api_routes.h"
-#include "core/engine/pipeline_controller.h"
 
 #include <thread>
 #include <chrono>
@@ -14,11 +13,13 @@ class ServerApiTest : public ::testing::Test {
 protected:
     void SetUp() override {
         srv_ = std::make_unique<httplib::Server>();
-        RegisterApiRoutes(*srv_, controller_);
+        RegisterApiRoutes(*srv_);
         server_thread_ = std::thread([this]() {
             srv_->listen("127.0.0.1", 19527);
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (!srv_->is_running()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     }
     void TearDown() override {
         srv_->stop();
@@ -26,7 +27,6 @@ protected:
     }
 
     std::unique_ptr<httplib::Server> srv_;
-    PipelineController controller_;
     std::thread server_thread_;
 };
 
@@ -56,11 +56,13 @@ protected:
     void SetUp() override {
         srv_ = std::make_unique<httplib::Server>();
         SetupAuthMiddleware(*srv_, "test-secret-token");
-        RegisterApiRoutes(*srv_, controller_);
+        RegisterApiRoutes(*srv_);
         server_thread_ = std::thread([this]() {
             srv_->listen("127.0.0.1", 19528);
         });
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (!srv_->is_running()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     }
     void TearDown() override {
         srv_->stop();
@@ -68,7 +70,6 @@ protected:
     }
 
     std::unique_ptr<httplib::Server> srv_;
-    PipelineController controller_;
     std::thread server_thread_;
 };
 

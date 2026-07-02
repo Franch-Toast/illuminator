@@ -15,3 +15,17 @@ cc_test(
     ],
     linkopts = ["-pthread"],
 )
+
+cc_test(
+    name = "sse_handler_test",
+    srcs = ["sse_handler_test.cc"],
+    deps = [
+        "//src/server:sse_handler",
+        "//src/core:common",
+        "//src/core:data",
+        "//src/plugin:api",
+        "@nlohmann_json//:json",
+        "@googletest//:gtest_main",
+    ],
+    linkopts = ["-pthread"],
+)

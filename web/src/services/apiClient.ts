@@ -22,6 +22,24 @@ async function post<T = unknown>(path: string, body: unknown): Promise<T> {
 interface PipelineEntry { name: string; running?: boolean; stub?: boolean; batches?: number; records?: number; errors?: number; channel?: { capacity: number; size: number; enqueued: number; dequeued: number; dropped: number; backpressure_events: number; backpressured: boolean } }
 interface ChannelEntry { name: string; pipeline: string; capacity: number; size: number; utilization: number; enqueued: number; dropped: number }
 
+export interface FeatureDescriptor {
+  name: string
+  version: string
+  display_name: string
+  category: string
+  tier: number
+  state: string
+  data_model: string
+  capabilities: string[]
+  parameters: Array<{
+    name: string
+    type: string
+    description: string
+    default_value?: string
+    required?: boolean
+  }>
+}
+
 export interface FeatureEntry {
   name: string
   display_name: string
@@ -48,28 +66,34 @@ export const api = {
   internalMetrics: () => get('/api/v1/internal_metrics'),
   query: (sql: string) => post<{ rows?: Record<string, unknown>[] }>('/api/v1/query', { query: sql }),
 
-  // Feature query API
-  features: () => get<{ features: FeatureEntry[] }>('/api/v1/features'),
-  featureCollect: (name: string) => get(`/api/v1/features/${name}/collect`),
-  featureStream: (name: string, cursor: number, signal?: AbortSignal) =>
-    fetch(`/api/v1/features/${name}/stream?cursor=${cursor}`, { signal })
-      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() as Promise<{ cursor: number; batches: Array<Record<string, unknown>> }> }),
+  // ─── v2 Feature API (RFC v3 FeatureBus) ──────────────────────────────
+  features: () => get<{ features: FeatureDescriptor[] }>('/api/v2/features'),
+  getConfigSchema: (name: string) => get<Record<string, unknown>>(`/api/v2/features/${name}/config/schema`),
+  getFeatureConfig: (name: string) => get<Record<string, unknown>>(`/api/v2/features/${name}/config`),
+  setFeatureConfig: (name: string, config: Record<string, unknown>) =>
+    post<{ status: string }>(`/api/v2/features/${name}/config`, config),
 
-  // Feature lifecycle (admin-only, prefer Session API for Tier 3)
-  featurePause: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/pause`, {}),
-  featureResume: (name: string) => post<{ status: string; feature: string; state: string }>(`/api/v1/features/${name}/resume`, {}),
+  featureStart: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/start`, {}),
+  featureStop: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/stop`, {}),
+  featurePause: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/pause`, {}),
+  featureResume: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/resume`, {}),
+  featureStats: (name: string) => get<Record<string, unknown>>(`/api/v2/features/${name}/stats`),
 
-  // Resource Budget
+  // ─── Recording API ────────────────────────────────────────────────────
+  startRecording: (name: string, filePath: string) =>
+    post<{ status: string }>(`/api/v1/features/${name}/record/start`, { file_path: filePath }),
+  stopRecording: (name: string) =>
+    post<{ status: string }>(`/api/v1/features/${name}/record/stop`, {}),
+  recordingStatus: (name: string) =>
+    get<{ recording: boolean; file_path?: string }>(`/api/v1/features/${name}/record/status`),
+
+  // ─── Resource Budget ──────────────────────────────────────────────────
   budget: () => get<BudgetResponse>('/api/v1/budget'),
 
-  // Plugin Hot-reload
+  // ─── Plugin Hot-reload ────────────────────────────────────────────────
   pluginsReload: () => post<{ status: string; loaded: number; plugins: string[] }>('/api/v1/plugins/reload', {}),
 
-  // Export API (Always-On: export from ring buffer with lookback)
-  exportData: (opts: { features?: string[]; lookback_batches?: number }) =>
-    post<{ status: string; file: string; features_exported: number; batches_exported: number }>('/api/v1/export', opts),
-
-  // Session API (Tier 3 profiling with auto-expiry)
+  // ─── Session API (Tier 3 profiling with auto-expiry) ──────────────────
   createSession: (opts: { type: string; target_pids?: number[]; target_comms?: string[]; duration_sec?: number }) =>
     post<{ session_id: string; type: string; status: string; started_at: number; expires_at?: number; duration_sec?: number }>('/api/v1/sessions', opts),
   stopSession: (opts: { type: string }) =>

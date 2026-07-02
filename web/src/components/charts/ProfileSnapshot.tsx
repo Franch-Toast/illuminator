@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useTimeStore } from '../../stores/useTimeStore'
 import { colors } from '../../styles/theme'
-import { api } from '../../services/apiClient'
 import { getDataSource } from '../../hooks/useDataSource'
 import type { FlameNode, StackSample as WorkerSample } from '../../workers/flameGraphWorker'
 
@@ -141,17 +140,9 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
   }, [totalSamples, timeSelection])
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional reset before async fetch
     setRoot(null); setTopFunctions([]); setTotalSamples(0)
     setFilteredSamples(0); setPollCount(0); setError(null)
     accumulatedRef.current = []
-
-    const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
-    api.featureStream(featureName, 999999999)
-      .then(data => {
-        cursorRef.current = data?.cursor ?? 0
-      })
-      .catch(() => { cursorRef.current = 0 })
   }, [pid, profileType])
 
   useEffect(() => {
@@ -161,48 +152,16 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
     }
 
     const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
-    let fetchInFlight = false
 
-    const poll = async () => {
-      if (fetchInFlight) return
-      fetchInFlight = true
-      abortRef.current?.abort()
-      abortRef.current = new AbortController()
-
-      try {
-        const data = await api.featureStream(featureName, cursorRef.current, abortRef.current.signal)
-        if (data.cursor) cursorRef.current = data.cursor
-        const batches = data.batches ?? []
-        for (const batch of batches) {
-          const rawSamples = (batch as Record<string, unknown>).stack_samples as Array<Record<string, unknown>> ?? []
-          processCollectedData(rawSamples)
-        }
-        if (batches.length === 0) {
-          const fdata = await api.featureCollect(featureName) as Record<string, unknown>
-          const rawSamples = (fdata.stack_samples as Array<Record<string, unknown>>) ?? []
-          processCollectedData(rawSamples)
-        }
-      } catch (e) {
-        if (e instanceof Error && e.name === 'AbortError') return
-        setError(e instanceof Error ? e.message : 'Fetch failed')
-      } finally {
-        fetchInFlight = false
-      }
-    }
-
-    // WS-driven fetch: subscribe to notifications, pull on notify
     const ds = getDataSource()
     const unsub = ds.subscribe(featureName, (batch) => {
       const data = batch.data as Record<string, unknown> | undefined
-      if (data?.type === 'notify') {
-        poll()
+      if (!data) return
+      const rawSamples = (data.stack_samples as Array<Record<string, unknown>>) ?? []
+      if (rawSamples.length > 0) {
+        processCollectedData(rawSamples)
       }
     })
-
-    // Fallback polling: slower interval when WS is connected (5s), fast when not (1.5s)
-    const fallbackMs = ds.getStatus() === 'connected' ? 5000 : 1500
-    poll()
-    timerRef.current = setInterval(poll, fallbackMs)
 
     return () => {
       unsub()

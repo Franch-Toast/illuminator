@@ -15,16 +15,25 @@
 #include "core/common/config.h"
 #include "core/common/version_generated.h"
 #include "core/config/yaml_config_loader.h"
-#include "core/engine/feature_manager.h"
+#include "core/engine/feature_bus.h"
+#include "core/engine/feature_driver.h"
+#include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline_controller.h"
+#include "features/feature_registry.h"
+#include "features/cpu_utilization_driver.h"
+#include "features/process_cpu_driver.h"
+#include "features/cpu_profiler_driver.h"
+#include "features/io_monitor_driver.h"
+#include "features/net_tracer_driver.h"
+#include "features/sched_analyzer_driver.h"
+#include "features/offcpu_profiler_driver.h"
 #include "plugin/builtin/builtin_plugins.h"
 #include "plugin/manager/plugin_manager.h"
 #include "server/http_server.h"
 #include "server/api_routes.h"
-#include "server/websocket_manager.h"
-#include "storage/storage_backend.h"
-#include "sinks/local_storage/local_storage_sink.h"
+#include "server/sse_handler.h"
 #include "serialization/json_serializer.h"
+#include "storage/storage_backend.h"
 
 static std::atomic<bool> g_running{true};
 
@@ -169,7 +178,7 @@ static bool ParseListenAddr(const std::string& listen,
 }
 
 static int RunDaemon(const std::string& config_path, const std::string& log_level,
-                     int port_override, int ws_port_override) {
+                     int port_override, int /*ws_port_override*/) {
     SetLogLevel(log_level);
     IL_INFO("Illuminator v{} starting...", illuminator::kIlluminatorVersion);
 
@@ -193,7 +202,6 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         config = BuildDemoConfig();
     }
 
-    // 加载 .so 外部插件（如果配置了 plugin_dirs）
     if (!config.plugin_dirs.empty()) {
         auto pm_status = illuminator::PluginManager::Instance()
             .LoadPluginsFromDirs(config.plugin_dirs);
@@ -203,156 +211,184 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     }
     illuminator::PluginManager::Instance().PrintRegisteredPlugins();
 
-    // Parse HTTP address from config (default "127.0.0.1:9527")
-    // WebSocket now shares the same port via HTTP Upgrade mechanism.
     std::string http_host = "127.0.0.1";
     int http_port = 9527;
     ParseListenAddr(config.server.http_listen, http_host, http_port);
-
     if (port_override > 0) http_port = port_override;
-    (void)ws_port_override; // deprecated: WS now uses same port as HTTP
 
-    illuminator::PipelineController controller;
-    auto status = controller.BuildFromConfig(config);
-    if (!status.ok()) {
-        IL_ERROR("Failed to build pipelines: {}", status.message());
-        return 1;
-    }
-
-    // 按需启动模式：pipeline 由 FeatureManager API 控制启停
-    // 仅当配置 auto_start=true 时才全量自启（兼容旧行为）
-    if (config.auto_start) {
-        status = controller.StartAll();
+    // ---- RFC v3: FeatureBus is the ONLY pipeline management path ----
+    // Start InfrastructureManager (TimerWheel + CollectPool + SinkPool)
+    {
+        illuminator::InfrastructureConfig infra_cfg;
+        infra_cfg.collect_pool_threads = config.engine.collect_pool_threads > 0
+            ? config.engine.collect_pool_threads : 2;
+        infra_cfg.sink_pool_threads = config.engine.sink_pool_threads;
+        auto status = illuminator::InfrastructureManager::Instance().Start(infra_cfg);
         if (!status.ok()) {
-            IL_ERROR("Failed to start pipelines: {}", status.message());
+            IL_ERROR("Failed to start InfrastructureManager: {}", status.message());
             return 1;
         }
-        IL_INFO("Auto-start: all pipelines running");
-    } else {
-        controller.GetTimerWheel().Start();
-        IL_INFO("On-demand mode: pipelines await Feature API start commands");
     }
 
-    // Expose the first storage backend for the query API
-    for (auto& p : controller.Pipelines()) {
-        for (auto& sink : p->GetSinks()) {
-            if (auto* ls = dynamic_cast<illuminator::LocalStorageSink*>(sink.get())) {
-                if (ls->GetBackend()) {
-                    controller.SetStorageBackend(ls->GetBackend());
-                    IL_INFO("Query API using storage from pipeline '{}'", p->name());
-                    goto storage_found;
-                }
-            }
-        }
-    }
-    storage_found:
-
-    illuminator::WebSocketManager ws_manager;
-    ws_manager.SetBroadcastInterval(1000);
-    ws_manager.SetAuthToken(config.server.auth_token);
-    ws_manager.SetSerializer([](const std::string& pipeline_key,
-                                illuminator::DataBatchPtr batch) -> std::string {
-        // Profiling features: send lightweight notification (data is large)
-        // Frontend will pull incremental data via featureStream API
-        if (pipeline_key.find("profile") != std::string::npos) {
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            return "{\"type\":\"notify\",\"feature\":\"" + pipeline_key +
-                   "\",\"records\":" + std::to_string(batch->records().size()) +
-                   ",\"ts\":" + std::to_string(now_ms) + "}";
-        }
-        // Tier 1-2 monitoring: send full batch via WS
-        return illuminator::BatchToJson(*batch, pipeline_key);
-    });
-
-    // FeatureManager: register all configured pipelines as features
-    illuminator::FeatureManager feature_manager(controller);
-
-    auto resolve_category = [](const std::string& name) -> std::string {
-        if (name.find("cpu") != std::string::npos ||
-            name.find("sched") != std::string::npos ||
-            name.find("offcpu") != std::string::npos) return "cpu";
-        if (name.find("mem") != std::string::npos ||
-            name.find("heap") != std::string::npos) return "memory";
-        if (name.find("io") != std::string::npos ||
-            name.find("disk") != std::string::npos) return "io";
-        if (name.find("net") != std::string::npos ||
-            name.find("tcp") != std::string::npos) return "network";
-        if (name.find("gpu") != std::string::npos) return "gpu";
-        return "system";
-    };
-
-    auto resolve_display_name = [](const std::string& name) -> std::string {
-        if (name == "cpu_utilization") return "CPU Utilization";
-        if (name == "cpu_processes") return "Process CPU (Top-N)";
-        if (name == "cpu_profile") return "CPU Profile (On-CPU)";
-        if (name == "offcpu_profile") return "Off-CPU Analysis";
-        if (name == "sched_analysis") return "Scheduler Analysis";
-        return name;
-    };
-
-    auto resolve_tier = [](const std::string& name) -> illuminator::FeatureTier {
-        if (name == "cpu_utilization" || name == "cpu_processes" ||
-            name == "memory_utilization" || name == "memory_processes" ||
-            name == "gpu_monitor")
-            return illuminator::FeatureTier::kMonitoring;
-        if (name == "sched_analysis" || name == "io_monitor" ||
-            name == "net_tracer")
-            return illuminator::FeatureTier::kTracing;
-        if (name == "cpu_profile" || name == "offcpu_profile" ||
-            name == "heap_profiler")
-            return illuminator::FeatureTier::kProfiling;
-        return illuminator::FeatureTier::kMonitoring;
-    };
-
-    for (const auto& pc : config.pipelines) {
-        illuminator::FeatureConfig fc;
-        fc.name = pc.name;
-        fc.display_name = resolve_display_name(pc.name);
-        fc.category = resolve_category(pc.name);
-        fc.tier = resolve_tier(pc.name);
-        fc.pipeline = pc;
-        feature_manager.RegisterFeature(std::move(fc));
-    }
-    IL_INFO("FeatureManager: {} features registered", config.pipelines.size());
-
-    // Always-On: auto-start Tier 1-2 features (monitoring + tracing)
-    {
-        int auto_started = 0;
-        for (const auto& f : feature_manager.ListFeatures()) {
-            if (static_cast<int>(f.tier) <= 2 && f.state == illuminator::FeatureState::kInactive) {
-                illuminator::FeatureManager::StartParams auto_params;
-                auto status = feature_manager.Start(f.name, auto_params);
-                if (status.ok()) {
-                    ++auto_started;
-                } else {
-                    IL_WARN("Auto-start failed for '{}': {}", f.name, status.message());
-                }
-            }
-        }
-        IL_INFO("Always-On: {}/{} features auto-started (Tier 1-2)",
-                auto_started, config.pipelines.size());
-    }
+    // Register all FeatureDrivers and probe Tier 1/2 (always-on)
+    illuminator::FeatureRegistry::RegisterAll();
+    illuminator::FeatureBus::Instance().ProbeAll();
+    IL_INFO("FeatureBus: all registered drivers probed");
 
     if (!config.server.http_enabled) {
-        IL_WARN("HTTP server disabled by config (server.http.enabled=false). "
-                "No REST API or frontend will be served.");
+        IL_WARN("HTTP server disabled by config. No REST API or frontend will be served.");
     }
 
     illuminator::HttpServer http_server;
     illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
-    illuminator::RegisterApiRoutes(http_server.server(), controller, &feature_manager);
-    illuminator::RegisterFeatureRoutes(http_server.server(), feature_manager);
+    illuminator::RegisterApiRoutes(http_server.server());
 
-    if (config.server.ws_enabled) {
-        http_server.SetWebSocketUpgradeHandler(
-            [&ws_manager](int fd, const std::string& raw_request) -> bool {
-                return ws_manager.HandleUpgrade(fd, raw_request);
+    // SSE data plane
+    illuminator::SseHandler::Instance().RegisterRoutes(http_server.server());
+
+    // ---- FeatureBus REST API routes (/api/v2/features/*) ----
+    {
+        auto& svr = http_server.server();
+        auto& bus = illuminator::FeatureBus::Instance();
+
+        svr.Get("/api/v2/features", [&bus](const httplib::Request&, httplib::Response& res) {
+            auto descriptors = bus.ListDescriptors();
+            nlohmann::json arr = nlohmann::json::array();
+            for (auto& d : descriptors) {
+                nlohmann::json j;
+                j["name"] = d.name;
+                j["display_name"] = d.display_name;
+                j["description"] = d.description;
+                j["category"] = d.category;
+                j["version"] = d.version;
+                j["tier"] = static_cast<int>(d.tier);
+                j["model"] = static_cast<int>(d.model);
+                j["supports_pull"] = d.supports_pull;
+                j["supports_push"] = d.supports_push;
+                j["supports_pause"] = d.supports_pause;
+                j["supports_configure"] = d.supports_configure;
+                j["has_bpf_probe"] = d.has_bpf_probe;
+                j["session_required"] = d.session_required;
+                auto* drv = bus.GetDriver(d.name);
+                if (drv) {
+                    j["state"] = illuminator::DriverStateToString(drv->State());
+                }
+                arr.push_back(std::move(j));
+            }
+            nlohmann::json resp;
+            resp["features"] = std::move(arr);
+            res.set_content(resp.dump(), "application/json");
+        });
+
+        svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/config/schema)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto schema = bus.GetConfigSchema(name);
+                if (schema.empty()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"feature not found"})", "application/json");
+                    return;
+                }
+                res.set_content(schema, "application/json");
             });
-        ws_manager.Start();
-    } else {
-        IL_WARN("WebSocket disabled by config (server.websocket.enabled=false). "
-                "Frontend will fall back to HTTP polling.");
+
+        svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/config)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto cfg = bus.GetConfig(name);
+                if (cfg.empty()) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"feature not found"})", "application/json");
+                    return;
+                }
+                res.set_content(cfg, "application/json");
+            });
+
+        svr.Post(R"(/api/v2/features/([a-zA-Z0-9_-]+)/config)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto status = bus.SetConfig(name, req.body);
+                if (!status.ok()) {
+                    res.status = (status.code() == illuminator::StatusCode::kNotFound) ? 404 : 400;
+                    nlohmann::json err = {{"error", status.message()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                res.set_content(R"({"ok":true})", "application/json");
+            });
+
+        svr.Post(R"(/api/v2/features/([a-zA-Z0-9_-]+)/start)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto status = bus.Probe(name);
+                if (!status.ok()) {
+                    res.status = 400;
+                    nlohmann::json err = {{"error", status.message()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                res.set_content(R"({"ok":true})", "application/json");
+            });
+
+        svr.Post(R"(/api/v2/features/([a-zA-Z0-9_-]+)/stop)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto status = bus.Remove(name);
+                if (!status.ok()) {
+                    res.status = 400;
+                    nlohmann::json err = {{"error", status.message()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                res.set_content(R"({"ok":true})", "application/json");
+            });
+
+        svr.Post(R"(/api/v2/features/([a-zA-Z0-9_-]+)/pause)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto status = bus.Pause(name);
+                if (!status.ok()) {
+                    res.status = 400;
+                    nlohmann::json err = {{"error", status.message()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                res.set_content(R"({"ok":true})", "application/json");
+            });
+
+        svr.Post(R"(/api/v2/features/([a-zA-Z0-9_-]+)/resume)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto status = bus.Resume(name);
+                if (!status.ok()) {
+                    res.status = 400;
+                    nlohmann::json err = {{"error", status.message()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                res.set_content(R"({"ok":true})", "application/json");
+            });
+
+        svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/stats)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                auto* drv = bus.GetDriver(name);
+                if (!drv) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"feature not found"})", "application/json");
+                    return;
+                }
+                auto stats = drv->GetStats();
+                nlohmann::json j = {
+                    {"batches_processed", stats.batches_processed},
+                    {"records_processed", stats.records_processed},
+                    {"errors", stats.errors},
+                    {"uptime_ms", stats.uptime_ms}
+                };
+                res.set_content(j.dump(), "application/json");
+            });
+
+        IL_INFO("FeatureBus REST routes registered under /api/v2/features/*");
     }
 
     http_server.SetStaticDir("web/dist");
@@ -360,10 +396,8 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         http_server.Start(http_host, http_port);
     }
 
-    IL_INFO("Illuminator daemon running on {}:{} (HTTP{} + WS{}). Ctrl+C to stop.",
-            http_host, http_port,
-            config.server.http_enabled ? "" : " [disabled]",
-            config.server.ws_enabled ? "" : " [disabled]");
+    IL_INFO("Illuminator daemon running on {}:{} (HTTP + SSE). Ctrl+C to stop.",
+            http_host, http_port);
 
     signal(SIGINT, SignalHandler);
     signal(SIGTERM, SignalHandler);
@@ -373,10 +407,9 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     }
 
     IL_INFO("Shutting down...");
-    feature_manager.StopAll();
-    if (config.server.ws_enabled) ws_manager.Stop();
+    illuminator::FeatureBus::Instance().RemoveAll();
+    illuminator::InfrastructureManager::Instance().Stop();
     if (config.server.http_enabled) http_server.Stop();
-    controller.StopAll();
     IL_INFO("Illuminator stopped.");
     return 0;
 }

@@ -212,6 +212,16 @@ public:
             it->second, [](RecordingSink*) {});
     }
 
+    std::vector<std::string> ListNames() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        std::vector<std::string> names;
+        names.reserve(sinks_.size());
+        for (const auto& [name, sink] : sinks_) {
+            if (sink) names.push_back(name);
+        }
+        return names;
+    }
+
 private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, RecordingSink*> sinks_;

@@ -56,6 +56,7 @@
 #include "core/common/status.h"
 #include "core/engine/async_channel.h"
 #include "core/engine/data_batch.h"
+#include "core/engine/infrastructure_manager.h"
 #include "core/engine/timer_wheel.h"
 #include "core/threading/thread_pool.h"
 #include "core/threading/thread_util.h"
@@ -518,6 +519,9 @@ private:
 //   - SinkPool: 写入线程池（K 个线程，所有管道共享）
 //   - Pipelines[]: 所有管道实例
 //
+// 基础设施管理已委托给 InfrastructureManager（单例），PipelineController
+// 保持对外 API 不变，内部通过 InfrastructureManager 访问线程池和定时器。
+//
 // 职责：
 //   1. 从配置构建所有 Pipeline（BuildFromConfig）
 //   2. 管理共享基础设施的初始化（线程池、TimerWheel）
@@ -559,31 +563,38 @@ public:
         pipelines_.push_back(std::move(pipeline));
     }
 
-    // ---- 共享基础设施初始化 ----
-    // SinkPool：写入线程池，num_threads=0 时自动设为 CPU 核数/2（至少 2）
+    // ---- 共享基础设施初始化（委托给 InfrastructureManager） ----
     void InitSinkPool(size_t num_threads = 0) {
-        if (num_threads == 0) {
-            num_threads = std::max(2u, std::thread::hardware_concurrency() / 2);
+        if (!InfrastructureManager::Instance().IsStarted()) {
+            InfrastructureManager::Instance().Start(
+                {.collect_pool_threads = 2, .sink_pool_threads = num_threads});
         }
-        sink_pool_ = std::make_unique<ThreadPool>(num_threads, "sink-write");
         for (auto& p : pipelines_) {
-            p->SetSinkPool(sink_pool_.get());
+            p->SetSinkPool(InfrastructureManager::Instance().GetSinkPool());
         }
-        IL_INFO("SinkPool initialized ({} threads)", num_threads);
+        IL_INFO("SinkPool initialized (delegated to InfrastructureManager)");
     }
 
-    // CollectPool：采集线程池，num_threads=0 时默认 2 线程
     void InitCollectPool(size_t num_threads = 0) {
-        if (num_threads == 0) num_threads = 2;
-        collect_pool_ = std::make_unique<ThreadPool>(num_threads, "collecter");
-        IL_INFO("CollectPool initialized ({} threads)", num_threads);
+        if (!InfrastructureManager::Instance().IsStarted()) {
+            InfrastructureManager::Instance().Start(
+                {.collect_pool_threads = num_threads == 0 ? 2 : num_threads,
+                 .sink_pool_threads = 0});
+        }
+        IL_INFO("CollectPool initialized (delegated to InfrastructureManager)");
     }
 
     // ---- 基础设施访问器（供 FeatureManager 使用） ----
-    TimerWheel& GetTimerWheel() { return timer_; }
+    TimerWheel& GetTimerWheel() {
+        return InfrastructureManager::Instance().GetTimerWheel();
+    }
 
-    ThreadPool* GetSinkPool() { return sink_pool_.get(); }
-    ThreadPool* GetCollectPool() { return collect_pool_.get(); }
+    ThreadPool* GetSinkPool() {
+        return InfrastructureManager::Instance().GetSinkPool();
+    }
+    ThreadPool* GetCollectPool() {
+        return InfrastructureManager::Instance().GetCollectPool();
+    }
 
     void SetStorageBackend(StorageBackend* backend) {
         storage_backend_ = backend;
@@ -596,9 +607,6 @@ public:
 private:
     StorageBackend* storage_backend_ = nullptr;
     std::vector<std::unique_ptr<Pipeline>> pipelines_;
-    std::unique_ptr<ThreadPool> sink_pool_;
-    std::unique_ptr<ThreadPool> collect_pool_;
-    TimerWheel timer_;
 };
 
 }  // namespace illuminator

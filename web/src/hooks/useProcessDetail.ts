@@ -3,19 +3,12 @@ import { useTimeStore } from '../stores/useTimeStore'
 import { getDataSource } from './useDataSource'
 import type { DataBatch } from '../services/dataSource'
 import type { ThreadEntry } from '../components/charts/ThreadBreakdown'
+import { extractRecords } from '../utils/ssePayload'
 
 interface ProcessTimelinePoint {
   timestamp: number
   cpu_user_pct: number
   cpu_sys_pct: number
-}
-
-interface CpuCollectResponse {
-  pipeline: string
-  records: Array<{
-    labels: Record<string, string>
-    fields: Record<string, number | string>
-  }>
 }
 
 export function useProcessDetail(pid: number, active: boolean) {
@@ -30,15 +23,15 @@ export function useProcessDetail(pid: number, active: boolean) {
     if (!active || !pid || mode === 'paused') return
 
     const source = getDataSource()
-    const unsub = source.subscribe('cpu_processes', (batch: DataBatch) => {
-      const data = batch.data as CpuCollectResponse
-      if (!data?.records) return
+    const unsub = source.subscribe('process_cpu', (batch: DataBatch) => {
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const now = Date.now()
       let foundProcess = false
       const threadList: ThreadEntry[] = []
 
-      for (const rec of data.records) {
+      for (const rec of records) {
         const recPid = parseInt(rec.labels?.pid ?? '0', 10)
         if (recPid !== pid) continue
 

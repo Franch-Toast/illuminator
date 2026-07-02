@@ -1,19 +1,39 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useCpuUtilization, useCpuProcesses } from './useCpuData'
+import type { DataBatch } from '../services/dataSource'
+import { dataBus } from '../services/dataBus'
 
-vi.mock('../services/apiClient', () => ({
-  api: {
-    featureCollect: vi.fn(),
-  },
-}))
+vi.mock('../services/dataBus', () => {
+  const subscribers = new Map<string, Set<(batch: DataBatch) => void>>()
+
+  return {
+    dataBus: {
+      subscribe: vi.fn((feature: string, cb: (batch: DataBatch) => void) => {
+        if (!subscribers.has(feature)) subscribers.set(feature, new Set())
+        subscribers.get(feature)!.add(cb)
+        return () => { subscribers.get(feature)!.delete(cb) }
+      }),
+      getLatest: vi.fn(() => null),
+      getAvailableFeatures: vi.fn(() => []),
+      destroy: vi.fn(),
+      onConnectionChange: vi.fn(() => () => {}),
+      getStatus: vi.fn(() => 'disconnected' as const),
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      __emit: (feature: string, data: unknown, timestamp = Date.now()) => {
+        const batch: DataBatch = { feature, timestamp, data }
+        subscribers.get(feature)?.forEach(cb => cb(batch))
+      },
+      __subscribers: subscribers,
+    },
+  }
+})
 
 vi.mock('../stores/useTimeStore', () => ({
   useTimeStore: (selector: (s: { mode: string }) => string) =>
     selector({ mode: 'live' }),
 }))
-
-import { api } from '../services/apiClient'
 
 const mockCpuUtilResponse = {
   pipeline: 'cpu_utilization',
@@ -34,21 +54,25 @@ const mockCpuProcessesResponse = {
   ],
 }
 
+type MockDataBus = typeof dataBus & {
+  __emit: (feature: string, data: unknown, timestamp?: number) => void
+  __subscribers: Map<string, Set<(batch: DataBatch) => void>>
+}
+
+const mockBus = dataBus as MockDataBus
+
 describe('useCpuUtilization', () => {
   beforeEach(() => {
-    vi.useFakeTimers()
-    vi.mocked(api.featureCollect).mockResolvedValue(mockCpuUtilResponse)
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
     vi.clearAllMocks()
+    mockBus.__subscribers.clear()
   })
 
-  it('should fetch and parse CPU utilization data', async () => {
+  it('should fetch and parse CPU utilization data', () => {
     const { result } = renderHook(() => useCpuUtilization(true))
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('cpu_utilization', mockCpuUtilResponse)
+    })
 
     expect(result.current.areaData.length).toBe(1)
     expect(result.current.areaData[0].user_pct).toBe(10)
@@ -64,27 +88,32 @@ describe('useCpuUtilization', () => {
     expect(result.current.summary!.maxCore.name).toBe('cpu0')
   })
 
-  it('should accumulate data points over time', async () => {
+  it('should accumulate data points over time', () => {
     const { result } = renderHook(() => useCpuUtilization(true))
+    const t1 = Date.now()
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('cpu_utilization', mockCpuUtilResponse, t1)
+    })
     expect(result.current.areaData.length).toBe(1)
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    act(() => {
+      mockBus.__emit('cpu_utilization', mockCpuUtilResponse, t1 + 1000)
+    })
     expect(result.current.areaData.length).toBe(2)
   })
 
-  it('should not poll when inactive', async () => {
+  it('should not poll when inactive', () => {
     renderHook(() => useCpuUtilization(false))
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
-    expect(api.featureCollect).not.toHaveBeenCalled()
+    expect(dataBus.subscribe).not.toHaveBeenCalled()
   })
 
-  it('should clear data when clear() is called', async () => {
+  it('should clear data when clear() is called', () => {
     const { result } = renderHook(() => useCpuUtilization(true))
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('cpu_utilization', mockCpuUtilResponse)
+    })
     expect(result.current.areaData.length).toBe(1)
 
     act(() => { result.current.clear() })
@@ -94,7 +123,8 @@ describe('useCpuUtilization', () => {
   })
 
   it('should work with replaySource', async () => {
-    const mockSubscribe = vi.fn((_feature: string, cb: (batch: unknown) => void) => {
+    vi.useFakeTimers()
+    const mockSubscribe = vi.fn((_feature: string, cb: (batch: DataBatch) => void) => {
       setTimeout(() => {
         cb({ feature: 'cpu_utilization', timestamp: Date.now(), data: mockCpuUtilResponse })
       }, 50)
@@ -108,25 +138,23 @@ describe('useCpuUtilization', () => {
 
     expect(mockSubscribe).toHaveBeenCalledWith('cpu_utilization', expect.any(Function))
     expect(result.current.areaData.length).toBe(1)
-    expect(api.featureCollect).not.toHaveBeenCalled()
+    expect(dataBus.subscribe).not.toHaveBeenCalled()
+    vi.useRealTimers()
   })
 })
 
 describe('useCpuProcesses', () => {
   beforeEach(() => {
-    vi.useFakeTimers()
-    vi.mocked(api.featureCollect).mockResolvedValue(mockCpuProcessesResponse)
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
     vi.clearAllMocks()
+    mockBus.__subscribers.clear()
   })
 
-  it('should fetch and parse process data', async () => {
+  it('should fetch and parse process data', () => {
     const { result } = renderHook(() => useCpuProcesses(true))
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('process_cpu', mockCpuProcessesResponse)
+    })
 
     expect(result.current.processes.length).toBe(2)
     expect(result.current.processes[0].pid).toBe(1234)
@@ -135,20 +163,23 @@ describe('useCpuProcesses', () => {
     expect(result.current.processes[0].num_threads).toBe(8)
   })
 
-  it('should build history over multiple polls', async () => {
+  it('should build history over multiple polls', () => {
     const { result } = renderHook(() => useCpuProcesses(true))
+    const t1 = Date.now()
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+    act(() => {
+      mockBus.__emit('process_cpu', mockCpuProcessesResponse, t1)
+    })
     expect(result.current.processes[0].history!.length).toBe(1)
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+    act(() => {
+      mockBus.__emit('process_cpu', mockCpuProcessesResponse, t1 + 1000)
+    })
     expect(result.current.processes[0].history!.length).toBe(2)
   })
 
-  it('should not poll when inactive', async () => {
+  it('should not poll when inactive', () => {
     renderHook(() => useCpuProcesses(false))
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
-    expect(api.featureCollect).not.toHaveBeenCalled()
+    expect(dataBus.subscribe).not.toHaveBeenCalled()
   })
 })

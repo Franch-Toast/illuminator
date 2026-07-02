@@ -1,8 +1,8 @@
 # Illuminator 全栈代码架构审查报告
 
-> **审查日期**: 2026-06-24 (第八版，高/中优先级路线图全部落地)  
+> **审查日期**: 2026-07-01 (第九版，新增数据契约 v2 RFC)  
 > **审查范围**: 后端 C++20 + 前端 React/TypeScript + eBPF 探针 + 前后端交互  
-> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现 + UX 批判性分析 + Link Chain 重构  
+> **审查方法**: 逐文件源码审读 + curl/Python 实测 API + WS 实时推送验证 + 前端代码审计 + Bazel 编译验证 + 并行架构审计 + Always-On RFC 实现 + UX 批判性分析 + Link Chain 重构 + 数据契约设计  
 
 ---
 
@@ -16,6 +16,26 @@
 6. [已修复的 Bug](#六已修复的-bug)
 7. [优化建议](#七优化建议)
 8. [质量评分卡](#八质量评分卡)
+
+---
+
+## ⚠️ 架构状态更新 (2026-07-02)
+
+> 本报告基于 2026-07-01 的代码审查。审查中识别的核心架构问题已在 **RFC v3 架构重设计**中全部解决：
+>
+> | 原报告识别的问题 | 解决方案 | 状态 |
+> |-----------------|---------|------|
+> | FeatureManager 上帝类 (1200 行) | 拆分为 FeatureBus + FeatureDriver | ✅ 已移除 |
+> | PipelineController 职责过重 | 提取 InfrastructureManager；Daemon 模式不使用 PipelineController | ✅ 已实现 |
+> | WebSocket 轮询冒充推送 | 替换为 SSE (Server-Sent Events) 直推 | ✅ 已移除 WebSocket |
+> | StreamSinkStore Buffer 多余 | 移除；SseSink 直接 push 到 SseHandler | ✅ 已移除 |
+> | main.cc 硬编码 Feature 元数据 | FeatureDriver::Describe() 自描述 | ✅ 已实现 |
+> | 前端无法自动发现 Feature 能力 | /api/v2/features 返回 FeatureDescriptor | ✅ 已实现 |
+> | api_routes.h 上帝文件 (1200 行) | 拆分为 v2 REST + SSE routes | ⚠️ 部分完成 (~550 行) |
+>
+> **详见**: `docs/rfc_data_contract_v2.md` (RFC v3 设计与实现偏差记录)
+>
+> 以下审查内容保留作为**历史参考**，反映重构前的架构状态。
 
 ---
 
@@ -115,6 +135,16 @@
 > - **Replay 全 hook**: IO/Network/GPU hooks 全部添加 `replaySource` 参数，支持离线回放
 > - **配置标志**: `server.http.enabled` 和 `server.websocket.enabled` 在 `main.cc` 中条件性启动
 > - **后端清理**: 删除 `Listen()`/`AcceptLoop()` 死代码和相关成员变量
+>
+> **v9 变更 (RFC 阶段)**:
+> - **数据契约 v2 RFC**: 新增 `docs/rfc_data_contract_v2.md`，定义统一的前后端数据契约
+>   - 控制面 REST + 数据面 SSE 的前后端分离架构
+>   - 统一 Schema 定义 (`illuminator-schema.ts`)，前后端共享
+>   - 统一 DataSerializer，所有 Sink 和传输层使用同一套序列化逻辑
+>   - SSE 替代 WebSocket (860→200 行)，DataBus 替代 Link Chain (550→60 行)
+>   - 条件变量通知替代轮询，推送延迟 0-1000ms→0-100ms
+>   - 后端模块拆分: api_routes.h (1200→6×150 行), feature_manager.h (1200→3×250 行)
+>   - .ilr 格式升级到 v2 (多 Feature 单文件 + seq 断线检测)
 >
 > **v7 变更**:
 > - 数据通路统一 + UX 认知矛盾消除 + API 表面积收窄 + UI 分层边界 + 诊断链路

@@ -17,14 +17,29 @@ vi.mock('./hooks/useDataSource', () => ({
   }),
 }))
 
+vi.mock('./services/dataBus', () => ({
+  dataBus: {
+    subscribe: vi.fn(() => () => {}),
+    getAvailableFeatures: vi.fn(() => []),
+    getRecent: vi.fn(() => []),
+    getWindowSize: vi.fn(() => 60),
+    setWindowSize: vi.fn(),
+    onConnectionChange: vi.fn(() => () => {}),
+    connect: vi.fn().mockRejectedValue(new Error('test')),
+    disconnect: vi.fn(),
+    getStatus: vi.fn(() => 'disconnected'),
+    getBuffer: vi.fn(() => []),
+  },
+}))
+
 vi.mock('./services/apiClient', () => ({
   api: {
-    featureCollect: vi.fn().mockResolvedValue({ records: [] }),
     features: vi.fn().mockResolvedValue({ features: [] }),
-    createSession: vi.fn().mockResolvedValue({ status: 'ok' }),
-    stopSession: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featureStart: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featureStop: vi.fn().mockResolvedValue({ status: 'ok' }),
     budget: vi.fn().mockResolvedValue(null),
-    exportData: vi.fn().mockResolvedValue({ status: 'ok', file: '/tmp/test.ilr', features_exported: 0, batches_exported: 0 }),
+    startRecording: vi.fn().mockResolvedValue({ status: 'ok' }),
+    stopRecording: vi.fn().mockResolvedValue({ status: 'ok' }),
   },
 }))
 
@@ -76,6 +91,6 @@ describe('App', () => {
 
   it('shows connection indicator', () => {
     renderApp()
-    expect(screen.getByText('HTTP Polling')).toBeInTheDocument()
+    expect(screen.getByText('Disconnected')).toBeInTheDocument()
   })
 })

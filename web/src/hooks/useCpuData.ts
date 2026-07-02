@@ -8,21 +8,15 @@ import type { CoreDataPoint } from '../components/charts/CoreHeatmap'
 import type { ProcessEntry } from '../components/charts/ProcessTable'
 import type { CpuSummary } from '../components/charts/SummaryCards'
 
-interface CpuCollectResponse {
-  pipeline: string
-  records: Array<{
-    labels: Record<string, string>
-    fields: Record<string, number | string>
-  }>
-}
+import { extractRecords, type SseRecord } from '../utils/ssePayload'
 
-function parseCpuUtilization(resp: CpuCollectResponse, now: number) {
+function parseCpuUtilization(records: SseRecord[], now: number) {
   let totalRec: Record<string, number> | null = null
   const cores: { name: string; busy_pct: number }[] = []
   let ctxSwitches = 0
   let runQueue = 0
 
-  for (const rec of resp.records) {
+  for (const rec of records) {
     const type = rec.labels?.type
     if (type === 'cpu_total') {
       totalRec = rec.fields as Record<string, number>
@@ -77,8 +71,8 @@ export function useCpuUtilization(active = true, replaySource?: DataSource) {
   const coreBuffer = useRef(new TimeSeriesBuffer<CoreDataPoint>(120))
   const mode = useTimeStore(s => s.mode)
 
-  const ingestBatch = useCallback((resp: CpuCollectResponse, ts: number) => {
-    const parsed = parseCpuUtilization(resp, ts)
+  const ingestBatch = useCallback((records: SseRecord[], ts: number) => {
+    const parsed = parseCpuUtilization(records, ts)
     if (parsed.point) {
       areaBuffer.current.push(parsed.point)
       setAreaData([...areaBuffer.current.getAll()])
@@ -96,8 +90,8 @@ export function useCpuUtilization(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('cpu_utilization', (batch: DataBatch) => {
-      const data = batch.data as CpuCollectResponse
-      if (data?.records) ingestBatch(data, batch.timestamp)
+      const records = extractRecords(batch.data)
+      if (records.length > 0) ingestBatch(records, batch.timestamp)
     })
     return unsub
   }, [active, mode, replaySource, ingestBatch])
@@ -113,9 +107,9 @@ export function useCpuUtilization(active = true, replaySource?: DataSource) {
   return { areaData, coreData, summary, clear }
 }
 
-function parseCpuProcesses(resp: CpuCollectResponse, historyMap: Map<number, number[]>): ProcessEntry[] {
+function parseCpuProcesses(records: SseRecord[], historyMap: Map<number, number[]>): ProcessEntry[] {
   const result: ProcessEntry[] = []
-  for (const rec of resp.records) {
+  for (const rec of records) {
     if (rec.labels?.type !== 'process') continue
     const pid = parseInt(rec.labels?.pid ?? '0', 10)
     const cpuTotal = (rec.fields?.cpu_total_pct as number) ?? 0
@@ -150,10 +144,10 @@ export function useCpuProcesses(active = true, replaySource?: DataSource) {
 
     if (!active || mode === 'paused') return
 
-    const unsub = source.subscribe('cpu_processes', (batch: DataBatch) => {
-      const data = batch.data as CpuCollectResponse
-      if (data?.records) {
-        setProcesses(parseCpuProcesses(data, historyMap.current))
+    const unsub = source.subscribe('process_cpu', (batch: DataBatch) => {
+      const records = extractRecords(batch.data)
+      if (records.length > 0) {
+        setProcesses(parseCpuProcesses(records, historyMap.current))
       }
     })
     return unsub

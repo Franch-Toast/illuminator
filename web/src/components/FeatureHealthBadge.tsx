@@ -6,7 +6,7 @@ import { colors } from '../styles/theme'
 const statusConfig: Record<FeatureHealthStatus, { color: string; icon: string; label: string; hint: string }> = {
   active: { color: colors.success, icon: '●', label: 'Data flowing', hint: 'Data is being received normally.' },
   degraded: { color: colors.warnText, icon: '◐', label: 'No data (>5s)', hint: 'No data received for >5s. Backend may be under heavy load or eBPF probe encountered a transient error.' },
-  unavailable: { color: '#ef4444', icon: '○', label: 'Unavailable (>15s)', hint: 'No data for >15s. Check: (1) daemon is running, (2) WebSocket connection, (3) eBPF probe loaded correctly.' },
+  unavailable: { color: '#ef4444', icon: '○', label: 'Unavailable (>15s)', hint: 'No data for >15s. Check: (1) daemon is running, (2) SSE connection, (3) eBPF probe loaded correctly.' },
 }
 
 interface Props {
@@ -105,7 +105,7 @@ export default function FeatureHealthBadge({ featureName, showLabel = false }: P
             }}>
               Suggested actions:<br />
               {health === 'degraded' && '• Wait a few seconds — may be transient\n• Check Feature Health Dashboard for errors'}
-              {health === 'unavailable' && '• Verify daemon is running (curl /healthz)\n• Check WebSocket connection in browser DevTools\n• Review daemon logs for eBPF errors'}
+              {health === 'unavailable' && '• Verify daemon is running (curl /healthz)\n• Check SSE connection in browser DevTools\n• Review daemon logs for eBPF errors'}
             </div>
           )}
         </div>

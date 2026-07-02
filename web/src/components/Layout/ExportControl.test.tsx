@@ -1,59 +1,43 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
 import ExportControl from './ExportControl'
 
-const mockNavigate = vi.fn()
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual('react-router-dom')
-  return { ...actual, useNavigate: () => mockNavigate }
-})
-
-vi.mock('../../services/apiClient', () => ({
-  api: {
-    exportData: vi.fn().mockResolvedValue({
-      file: 'export_2026.ilr',
-      features_exported: 3,
-      batches_exported: 42,
-    }),
+vi.mock('../../services/dataBus', () => ({
+  dataBus: {
+    getAvailableFeatures: vi.fn(() => ['cpu_utilization', 'memory']),
+    getRecent: vi.fn(() => [
+      { feature: 'cpu_utilization', timestamp: 1000, data: { value: 1 } },
+      { feature: 'cpu_utilization', timestamp: 2000, data: { value: 2 } },
+    ]),
   },
 }))
 
 describe('ExportControl', () => {
-  beforeEach(() => { mockNavigate.mockClear() })
+  beforeEach(() => { vi.clearAllMocks() })
 
-  const renderControl = () => render(
-    <MemoryRouter><ExportControl /></MemoryRouter>
-  )
+  const renderControl = () => render(<ExportControl />)
 
   it('renders export button and lookback select', () => {
     renderControl()
-    expect(screen.getByText('Export .ilr')).toBeDefined()
+    expect(screen.getByText('Export')).toBeDefined()
     expect(screen.getByRole('combobox')).toBeDefined()
   })
 
-  it('shows Replay and Download buttons after successful export', async () => {
+  it('shows Saved! after click', () => {
+    const createObjectURL = vi.fn(() => 'blob:url')
+    const revokeObjectURL = vi.fn()
+    globalThis.URL.createObjectURL = createObjectURL
+    globalThis.URL.revokeObjectURL = revokeObjectURL
+
     renderControl()
-    fireEvent.click(screen.getByText('Export .ilr'))
-    await waitFor(() => {
-      expect(screen.getByText('Replay')).toBeDefined()
-      expect(screen.getByText('Download')).toBeDefined()
-    })
+    fireEvent.click(screen.getByText('Export'))
+    expect(screen.getByText('Saved!')).toBeDefined()
+    expect(createObjectURL).toHaveBeenCalled()
   })
 
-  it('navigates to replay page on Replay click', async () => {
+  it('has lookback options', () => {
     renderControl()
-    fireEvent.click(screen.getByText('Export .ilr'))
-    await waitFor(() => screen.getByText('Replay'))
-    fireEvent.click(screen.getByText('Replay'))
-    expect(mockNavigate).toHaveBeenCalledWith('/replay?file=export_2026.ilr')
-  })
-
-  it('shows feature and batch count after export', async () => {
-    renderControl()
-    fireEvent.click(screen.getByText('Export .ilr'))
-    await waitFor(() => {
-      expect(screen.getByText('3 features, 42 batches')).toBeDefined()
-    })
+    const select = screen.getByRole('combobox') as HTMLSelectElement
+    expect(select.options.length).toBe(3)
   })
 })

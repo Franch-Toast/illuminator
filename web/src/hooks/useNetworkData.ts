@@ -3,6 +3,7 @@ import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
 import { getDataSource } from './useDataSource'
 import type { DataBatch, DataSource } from '../services/dataSource'
+import { extractRecords } from '../utils/ssePayload'
 
 export interface NetworkDataPoint {
   timestamp: number
@@ -30,13 +31,6 @@ export interface NetworkProcess {
   history: number[]
 }
 
-interface NetworkCollectResponse {
-  pipeline: string
-  records: Array<{
-    labels: Record<string, string>
-    fields: Record<string, number | string>
-  }>
-}
 
 export function useNetworkMonitor(active = true, replaySource?: DataSource) {
   const [data, setData] = useState<NetworkDataPoint[]>([])
@@ -49,14 +43,14 @@ export function useNetworkMonitor(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('net_tracer', (batch: DataBatch) => {
-      const resp = batch.data as NetworkCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const now = batch.timestamp
       let rxBytes = 0, txBytes = 0, rxPackets = 0, txPackets = 0
       let connections = 0, retransmits = 0
 
-      for (const rec of resp.records) {
+      for (const rec of records) {
         const type = rec.labels?.type
         if (type === 'net_total') {
           rxBytes = (rec.fields?.rx_bytes_per_sec as number) ?? 0
@@ -100,11 +94,11 @@ export function useNetworkProcesses(active = true, replaySource?: DataSource) {
     if (!active || mode === 'paused') return
 
     const unsub = source.subscribe('net_tracer', (batch: DataBatch) => {
-      const resp = batch.data as NetworkCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const result: NetworkProcess[] = []
-      for (const rec of resp.records) {
+      for (const rec of records) {
         if (rec.labels?.type !== 'process_net') continue
         const pid = parseInt(rec.labels?.pid ?? '0', 10)
         const total = ((rec.fields?.rx_mb as number) ?? 0) + ((rec.fields?.tx_mb as number) ?? 0)

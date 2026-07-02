@@ -1,32 +1,64 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useNetworkMonitor, useNetworkProcesses, formatBytes } from './useNetworkData'
+import type { DataBatch } from '../services/dataSource'
+import { dataBus } from '../services/dataBus'
 
-vi.mock('../services/apiClient', () => ({
-  api: { featureCollect: vi.fn() },
-}))
+vi.mock('../services/dataBus', () => {
+  const subscribers = new Map<string, Set<(batch: DataBatch) => void>>()
+
+  return {
+    dataBus: {
+      subscribe: vi.fn((feature: string, cb: (batch: DataBatch) => void) => {
+        if (!subscribers.has(feature)) subscribers.set(feature, new Set())
+        subscribers.get(feature)!.add(cb)
+        return () => { subscribers.get(feature)!.delete(cb) }
+      }),
+      getLatest: vi.fn(() => null),
+      getAvailableFeatures: vi.fn(() => []),
+      destroy: vi.fn(),
+      onConnectionChange: vi.fn(() => () => {}),
+      getStatus: vi.fn(() => 'disconnected' as const),
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      __emit: (feature: string, data: unknown, timestamp = Date.now()) => {
+        const batch: DataBatch = { feature, timestamp, data }
+        subscribers.get(feature)?.forEach(cb => cb(batch))
+      },
+      __subscribers: subscribers,
+    },
+  }
+})
 
 vi.mock('../stores/useTimeStore', () => ({
   useTimeStore: (selector: (s: { mode: string }) => string) => selector({ mode: 'live' }),
 }))
 
-import { api } from '../services/apiClient'
+type MockDataBus = typeof dataBus & {
+  __emit: (feature: string, data: unknown, timestamp?: number) => void
+  __subscribers: Map<string, Set<(batch: DataBatch) => void>>
+}
+
+const mockBus = dataBus as MockDataBus
 
 describe('useNetworkMonitor', () => {
-  beforeEach(() => { vi.useFakeTimers() })
-  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks() })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBus.__subscribers.clear()
+  })
 
-  it('should fetch and parse network data', async () => {
-    vi.mocked(api.featureCollect).mockResolvedValue({
-      pipeline: 'net_tracer',
-      records: [
-        { labels: { type: 'net_total' }, fields: { rx_bytes_per_sec: 1048576, tx_bytes_per_sec: 524288, rx_packets_per_sec: 800, tx_packets_per_sec: 400 } },
-        { labels: { type: 'tcp_stats' }, fields: { active_connections: 42, retransmits_per_sec: 3 } },
-      ],
-    })
-
+  it('should fetch and parse network data', () => {
     const { result } = renderHook(() => useNetworkMonitor(true))
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+
+    act(() => {
+      mockBus.__emit('net_tracer', {
+        pipeline: 'net_tracer',
+        records: [
+          { labels: { type: 'net_total' }, fields: { rx_bytes_per_sec: 1048576, tx_bytes_per_sec: 524288, rx_packets_per_sec: 800, tx_packets_per_sec: 400 } },
+          { labels: { type: 'tcp_stats' }, fields: { active_connections: 42, retransmits_per_sec: 3 } },
+        ],
+      })
+    })
 
     expect(result.current.data.length).toBe(1)
     expect(result.current.summary).toBeTruthy()
@@ -40,22 +72,22 @@ describe('useNetworkMonitor', () => {
     expect(point.tcp_connections).toBe(42)
   })
 
-  it('should not poll when inactive', async () => {
+  it('should not poll when inactive', () => {
     renderHook(() => useNetworkMonitor(false))
-    await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
-    expect(api.featureCollect).not.toHaveBeenCalled()
+    expect(dataBus.subscribe).not.toHaveBeenCalled()
   })
 
-  it('should clear data', async () => {
-    vi.mocked(api.featureCollect).mockResolvedValue({
-      pipeline: 'net_tracer',
-      records: [
-        { labels: { type: 'net_total' }, fields: { rx_bytes_per_sec: 100, tx_bytes_per_sec: 50, rx_packets_per_sec: 10, tx_packets_per_sec: 5 } },
-      ],
-    })
-
+  it('should clear data', () => {
     const { result } = renderHook(() => useNetworkMonitor(true))
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+
+    act(() => {
+      mockBus.__emit('net_tracer', {
+        pipeline: 'net_tracer',
+        records: [
+          { labels: { type: 'net_total' }, fields: { rx_bytes_per_sec: 100, tx_bytes_per_sec: 50, rx_packets_per_sec: 10, tx_packets_per_sec: 5 } },
+        ],
+      })
+    })
     expect(result.current.data.length).toBeGreaterThan(0)
 
     act(() => { result.current.clear() })
@@ -65,20 +97,23 @@ describe('useNetworkMonitor', () => {
 })
 
 describe('useNetworkProcesses', () => {
-  beforeEach(() => { vi.useFakeTimers() })
-  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks() })
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockBus.__subscribers.clear()
+  })
 
-  it('should fetch and sort processes by total traffic', async () => {
-    vi.mocked(api.featureCollect).mockResolvedValue({
-      pipeline: 'net_tracer',
-      records: [
-        { labels: { type: 'process_net', pid: '100', comm: 'low-net' }, fields: { rx_mb: 1, tx_mb: 2, connections: 3 } },
-        { labels: { type: 'process_net', pid: '200', comm: 'high-net' }, fields: { rx_mb: 100, tx_mb: 50, connections: 12 } },
-      ],
-    })
-
+  it('should fetch and sort processes by total traffic', () => {
     const { result } = renderHook(() => useNetworkProcesses(true))
-    await act(async () => { await vi.advanceTimersByTimeAsync(100) })
+
+    act(() => {
+      mockBus.__emit('net_tracer', {
+        pipeline: 'net_tracer',
+        records: [
+          { labels: { type: 'process_net', pid: '100', comm: 'low-net' }, fields: { rx_mb: 1, tx_mb: 2, connections: 3 } },
+          { labels: { type: 'process_net', pid: '200', comm: 'high-net' }, fields: { rx_mb: 100, tx_mb: 50, connections: 12 } },
+        ],
+      })
+    })
 
     expect(result.current.processes.length).toBe(2)
     expect(result.current.processes[0].comm).toBe('high-net')

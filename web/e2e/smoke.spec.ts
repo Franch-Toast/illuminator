@@ -9,25 +9,21 @@ test.describe('Illuminator E2E Smoke Tests', () => {
   })
 
   test('features API returns data', async ({ request }) => {
-    const resp = await request.get('/api/v1/features')
+    const resp = await request.get('/api/v2/features')
     expect(resp.ok()).toBeTruthy()
     const data = await resp.json()
     expect(data.features).toBeDefined()
     expect(data.features.length).toBeGreaterThan(0)
   })
 
-  test('WebSocket upgrade on same port succeeds', async ({ request }) => {
-    const resp = await request.fetch('/ws/features', {
-      headers: {
-        'Upgrade': 'websocket',
-        'Connection': 'Upgrade',
-        'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
-        'Sec-WebSocket-Version': '13',
-      },
+  test('SSE subscription flow works', async ({ request }) => {
+    const subResp = await request.post('/api/v1/events/subscribe', {
+      data: { features: ['cpu_utilization'] },
     })
-    // Should get 101 Switching Protocols (or the fetch API may not support it)
-    // At minimum, it should NOT be a 404 or 400
-    expect([101, 200, 426].includes(resp.status()) || resp.status() < 500).toBeTruthy()
+    expect(subResp.ok()).toBeTruthy()
+    const sub = await subResp.json()
+    expect(sub.subscription_id).toBeDefined()
+    expect(sub.url).toContain('/api/v1/events/')
   })
 
   test('CPU page renders when navigating', async ({ page }) => {
@@ -35,17 +31,32 @@ test.describe('Illuminator E2E Smoke Tests', () => {
     await expect(page.locator('text=CPU')).toBeVisible({ timeout: 5000 })
   })
 
-  test('feature start/stop lifecycle works via API', async ({ request }) => {
-    const startResp = await request.post('/api/v1/features/cpu_utilization/start')
+  test('feature start/stop lifecycle works via v2 API', async ({ request }) => {
+    const featResp = await request.get('/api/v2/features')
+    expect(featResp.ok()).toBeTruthy()
+    const { features } = await featResp.json()
+    const cpuFeature = features.find((f: { name: string }) => f.name === 'cpu_utilization')
+    expect(cpuFeature).toBeDefined()
+    expect(cpuFeature.state).toBe('active')
+  })
+
+  test('recording API lifecycle works', async ({ request }) => {
+    const startResp = await request.post('/api/v1/features/cpu_utilization/record/start', {
+      data: {},
+    })
     expect(startResp.ok()).toBeTruthy()
 
-    const collectResp = await request.get('/api/v1/features/cpu_utilization/collect')
-    expect(collectResp.ok()).toBeTruthy()
-    const data = await collectResp.json()
-    expect(data.pipeline).toBe('cpu_utilization')
+    const statusResp = await request.get('/api/v1/features/cpu_utilization/record/status')
+    expect(statusResp.ok()).toBeTruthy()
+    const status = await statusResp.json()
+    expect(status.recording).toBe(true)
 
-    const stopResp = await request.post('/api/v1/features/cpu_utilization/stop')
+    const stopResp = await request.post('/api/v1/features/cpu_utilization/record/stop', {
+      data: {},
+    })
     expect(stopResp.ok()).toBeTruthy()
+    const stopped = await stopResp.json()
+    expect(stopped.status).toBe('ok')
   })
 
   test('deprecated API routes return deprecation headers', async ({ request }) => {
@@ -53,5 +64,13 @@ test.describe('Illuminator E2E Smoke Tests', () => {
     const headers = resp.headers()
     expect(headers['deprecation']).toBe('true')
     expect(headers['sunset']).toBeDefined()
+  })
+
+  test('healthz endpoint returns version info', async ({ request }) => {
+    const resp = await request.get('/healthz')
+    expect(resp.ok()).toBeTruthy()
+    const data = await resp.json()
+    expect(data.status).toBe('ok')
+    expect(data.version).toBeDefined()
   })
 })

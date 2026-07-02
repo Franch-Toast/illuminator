@@ -3,6 +3,7 @@ import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
 import { getDataSource } from './useDataSource'
 import type { DataBatch } from '../services/dataSource'
+import { extractRecords } from '../utils/ssePayload'
 
 export interface MemoryDataPoint {
   timestamp: number
@@ -32,13 +33,6 @@ export interface MemoryProcess {
   history: number[]
 }
 
-interface MemoryCollectResponse {
-  pipeline: string
-  records: Array<{
-    labels: Record<string, string>
-    fields: Record<string, number | string>
-  }>
-}
 
 export function useMemoryUtilization(active = true) {
   const [data, setData] = useState<MemoryDataPoint[]>([])
@@ -51,14 +45,14 @@ export function useMemoryUtilization(active = true) {
 
     const source = getDataSource()
     const unsub = source.subscribe('memory_utilization', (batch: DataBatch) => {
-      const resp = batch.data as MemoryCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const now = batch.timestamp
       let totalMb = 0, usedMb = 0, cachedMb = 0, buffersMb = 0, freeMb = 0
       let swapUsedMb = 0, swapTotalMb = 0, pageFaults = 0
 
-      for (const rec of resp.records) {
+      for (const rec of records) {
         const type = rec.labels?.type
         if (type === 'memory_total') {
           totalMb = (rec.fields?.total_mb as number) ?? 0
@@ -110,11 +104,11 @@ export function useMemoryProcesses(active = true) {
 
     const source = getDataSource()
     const unsub = source.subscribe('memory_processes', (batch: DataBatch) => {
-      const resp = batch.data as MemoryCollectResponse
-      if (!resp?.records) return
+      const records = extractRecords(batch.data)
+      if (records.length === 0) return
 
       const result: MemoryProcess[] = []
-      for (const rec of resp.records) {
+      for (const rec of records) {
         if (rec.labels?.type !== 'process') continue
         const pid = parseInt(rec.labels?.pid ?? '0', 10)
         const rssMb = (rec.fields?.rss_mb as number) ?? 0

@@ -3,7 +3,12 @@
 > **版本**: 3.0  
 > **状态**: ✅ 已实现（2026-05 完成）  
 > **设计理念**: 调度与执行分离 · 单一职责线程 · Actor 式状态隔离  
-> **实现文件**: `src/core/engine/pipeline_controller.h/.cc` + `timer_wheel.h`
+> **实现文件**: `src/core/engine/pipeline_controller.h` + `timer_wheel.h` + `feature_driver.h` (Pipeline 生命周期由 FeatureDriver::Probe/Remove 管理)
+
+> **架构位置说明** (2026-07-02 更新): Pipeline v3 机制仍是 Illuminator 数据处理的核心引擎。  
+> 在 RFC v3 三层架构中，每个 `FeatureDriver` 通过 `BuildPipeline()` 方法创建自己的 Pipeline 实例。  
+> `InfrastructureManager` 提供 TimerWheel、CollectPool、SinkPool 等共享基础设施。  
+> `PipelineController` 仍用于 CLI 一次性采集命令；Daemon 模式下由 FeatureBus 管理所有 Pipeline 生命周期。
 
 ---
 

@@ -140,8 +140,9 @@ Status PipelineController::StartAll() {
         }
     }
 
+    auto& infra = InfrastructureManager::Instance();
+
     // Phase 2: 注册 Pull Source 定时采集事件
-    // Register Pull-mode sources as TimerWheel collect events
     for (auto& p : pipelines_) {
         auto* src = p->GetSource();
         if (src && !src->IsPushMode()) {
@@ -149,18 +150,20 @@ Status PipelineController::StartAll() {
             Pipeline* pipeline_ptr = p.get();
             SourcePlugin* source_ptr = src;
 
-            // 定时器回调：提交到 CollectPool 异步执行采集
-            timer_.AddRepeating(interval,
-                [this, pipeline_ptr, source_ptr] {
+            infra.GetTimerWheel().AddRepeating(interval,
+                [pipeline_ptr, source_ptr] {
                     if (!pipeline_ptr->IsRunning()) return;
-                    collect_pool_->Submit(
-                        [pipeline_ptr, source_ptr] {
-                            auto result = source_ptr->Collect();
-                            if (result.ok() && *result && !(*result)->Empty()) {
-                                pipeline_ptr->Enqueue(std::move(*result));
+                    auto* pool = InfrastructureManager::Instance().GetCollectPool();
+                    if (pool) {
+                        pool->Submit(
+                            [pipeline_ptr, source_ptr] {
+                                auto result = source_ptr->Collect();
+                                if (result.ok() && *result && !(*result)->Empty()) {
+                                    pipeline_ptr->Enqueue(std::move(*result));
+                                }
                             }
-                        }
-                    );
+                        );
+                    }
                 }
             );
             IL_INFO("Registered Pull source for pipeline '{}' (interval={}ms)",
@@ -169,14 +172,12 @@ Status PipelineController::StartAll() {
     }
 
     // Phase 3: 注册 Aggregator 定时刷盘事件
-    // Register Aggregator flush events as TimerWheel sentinel injections
     for (auto& p : pipelines_) {
         if (p->HasAggregator()) {
             auto interval = std::chrono::milliseconds(p->FlushIntervalMs());
             Pipeline* pipeline_ptr = p.get();
 
-            // 定时器回调：直接注入 FlushSentinel（不需要 CollectPool）
-            timer_.AddRepeating(interval,
+            infra.GetTimerWheel().AddRepeating(interval,
                 [pipeline_ptr] {
                     if (pipeline_ptr->IsRunning()) {
                         pipeline_ptr->InjectFlush();
@@ -189,23 +190,25 @@ Status PipelineController::StartAll() {
     }
 
     // Phase 4: 注册定期指标同步（每 10 秒）
-    // Register periodic metrics sync
-    timer_.AddRepeating(std::chrono::seconds(10),
-        [this] {
-            if (collect_pool_) {
-                collect_pool_->Submit([this] {
+    infra.GetTimerWheel().AddRepeating(std::chrono::seconds(10),
+        [] {
+            auto& im = InfrastructureManager::Instance();
+            auto* collect_pool = im.GetCollectPool();
+            if (collect_pool) {
+                collect_pool->Submit([] {
+                    auto& im2 = InfrastructureManager::Instance();
                     auto& m = InternalMetrics::Instance();
                     m.SetGauge("timer_wheel_fires_total",
-                               static_cast<double>(timer_.FiresTotal()));
+                               static_cast<double>(im2.GetTimerWheel().FiresTotal()));
                     m.SetGauge("timer_wheel_timers_active",
-                               static_cast<double>(timer_.ActiveTimers()));
-                    if (collect_pool_) {
+                               static_cast<double>(im2.GetTimerWheel().ActiveTimers()));
+                    if (auto* cp = im2.GetCollectPool()) {
                         m.SetGauge("collect_pool_pending_tasks",
-                                   static_cast<double>(collect_pool_->PendingTasks()));
+                                   static_cast<double>(cp->PendingTasks()));
                     }
-                    if (sink_pool_) {
+                    if (auto* sp = im2.GetSinkPool()) {
                         m.SetGauge("sink_pool_pending_tasks",
-                                   static_cast<double>(sink_pool_->PendingTasks()));
+                                   static_cast<double>(sp->PendingTasks()));
                     }
                 });
             }
@@ -213,23 +216,21 @@ Status PipelineController::StartAll() {
     );
 
     // Phase 5: 注册定期数据清理（每 60 秒，保留最近 30 分钟）
-    // Register periodic data pruning (every 60s, keep last 30 minutes)
     if (storage_backend_) {
         static constexpr uint64_t kRetentionNs = 30ULL * 60 * 1000000000ULL;
-        timer_.AddRepeating(std::chrono::seconds(60),
-            [this] {
-                if (sink_pool_) {
-                    sink_pool_->Submit([this] {
-                        storage_backend_->Prune(kRetentionNs);
+        auto* backend = storage_backend_;
+        infra.GetTimerWheel().AddRepeating(std::chrono::seconds(60),
+            [backend] {
+                auto* sp = InfrastructureManager::Instance().GetSinkPool();
+                if (sp) {
+                    sp->Submit([backend] {
+                        backend->Prune(kRetentionNs);
                     });
                 }
             }
         );
         IL_INFO("Registered storage data pruning (retention=30min, interval=60s)");
     }
-
-    // Phase 6: 启动 TimerWheel 调度线程
-    timer_.Start();
 
     IL_INFO("All {} pipelines started (v3: TimerWheel + CollectPool + SinkPool)",
             pipelines_.size());
@@ -245,19 +246,13 @@ Status PipelineController::StartAll() {
 //   Phase 3: 逐个 Pipeline::Stop() — ProcessThread 排空 channel 后退出
 //   Phase 4: SinkPool 销毁（析构函数中） — 等待所有 Write 任务完成
 Status PipelineController::StopAll() {
-    // Phase 1: 停止 TimerWheel — 不再触发新的 Collect/Flush 事件
-    timer_.Stop();
+    // Phase 1: 停止 InfrastructureManager（包括 TimerWheel 和线程池）
+    InfrastructureManager::Instance().Stop();
 
-    // Phase 2: 停止 CollectPool — 等待正在执行中的 Collect 完成
-    collect_pool_.reset();
-
-    // Phase 3: 停止每个 Pipeline（ProcessThread 排空 channel 后退出）
+    // Phase 2: 停止每个 Pipeline（ProcessThread 排空 channel 后退出）
     for (auto& pipeline : pipelines_) {
         pipeline->Stop();
     }
-
-    // Phase 4: SinkPool 最后销毁（确保最后的写入完成）
-    // sink_pool_ destroyed in destructor
 
     IL_INFO("All pipelines stopped");
     return Status::Ok();

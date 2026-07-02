@@ -14,17 +14,6 @@ cc_library(
 )
 
 cc_library(
-    name = "websocket_server",
-    hdrs = ["websocket_server.h"],
-    strip_include_prefix = "",
-    include_prefix = "server",
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/core:common",
-    ],
-)
-
-cc_library(
     name = "api_routes",
     hdrs = ["api_routes.h"],
     strip_include_prefix = "",
@@ -36,22 +25,21 @@ cc_library(
         "//src/core:version",
         "//src/serialization:json_serializer",
         "//src/sinks:recording_sink",
-        "//src/sinks:stream_sink",
-        "//src/storage:storage",
         "//third_party/cpp-httplib",
     ],
 )
 
 cc_library(
-    name = "websocket_manager",
-    hdrs = ["websocket_manager.h"],
+    name = "sse_handler",
+    hdrs = ["sse_handler.h"],
     strip_include_prefix = "",
     include_prefix = "server",
     visibility = ["//visibility:public"],
     deps = [
-        ":websocket_server",
         "//src/core:common",
-        "//src/core:threading",
-        "//src/sinks:stream_sink",
+        "//src/core:data",
+        "//src/plugin:api",
+        "//third_party/cpp-httplib",
+        "@nlohmann_json//:json",
     ],
 )

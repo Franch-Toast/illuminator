@@ -1,5 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { api, FeatureEntry, BudgetResponse } from '../services/apiClient'
+import { api, FeatureDescriptor, BudgetResponse } from '../services/apiClient'
+
+type FeatureEntry = FeatureDescriptor & {
+  is_recording?: boolean
+  batches_processed?: number
+  records_processed?: number
+  errors?: number
+  uptime_ms?: number
+}
 import { colors } from '../styles/theme'
 
 const TIER_LABELS: Record<number, { label: string; color: string; desc: string }> = {
@@ -51,12 +59,8 @@ export default function PluginManagerPage() {
     setPendingActions(prev => new Set(prev).add(feature))
     try {
       switch (action) {
-        case 'start':
-          await api.createSession({ type: feature })
-          break
-        case 'stop':
-          await api.stopSession({ type: feature })
-          break
+        case 'start': await api.featureStart(feature); break
+        case 'stop': await api.featureStop(feature); break
         case 'pause': await api.featurePause(feature); break
         case 'resume': await api.featureResume(feature); break
       }
@@ -299,17 +303,17 @@ function FeatureCard({ feature, isPending, onAction }: {
         </div>
       </div>
 
-      {(isActive || isPaused) && (
+      {(isActive || isPaused) && (feature.batches_processed != null || feature.records_processed != null) && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginTop: 12, paddingTop: 12, borderTop: `1px solid ${colors.cardBorder}` }}>
-          <MiniStat label="Batches" value={feature.batches_processed.toLocaleString()} />
-          <MiniStat label="Records" value={feature.records_processed.toLocaleString()} />
-          <MiniStat label="Errors" value={String(feature.errors)} danger={feature.errors > 0} />
+          <MiniStat label="Batches" value={(feature.batches_processed ?? 0).toLocaleString()} />
+          <MiniStat label="Records" value={(feature.records_processed ?? 0).toLocaleString()} />
+          <MiniStat label="Errors" value={String(feature.errors ?? 0)} danger={(feature.errors ?? 0) > 0} />
         </div>
       )}
 
-      {(isActive || isPaused) && feature.uptime_ms > 0 && (
+      {(isActive || isPaused) && (feature.uptime_ms ?? 0) > 0 && (
         <div style={{ fontSize: 10, color: colors.textMuted, marginTop: 6 }}>
-          Uptime: {formatUptime(feature.uptime_ms)}
+          Uptime: {formatUptime(feature.uptime_ms ?? 0)}
         </div>
       )}
 
