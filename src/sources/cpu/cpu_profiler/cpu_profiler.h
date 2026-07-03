@@ -279,11 +279,6 @@ public:
         stacks_fd_ = stacks_fd;
         counts_fd_ = counts_fd;
 
-        // 始终使用 per-CPU 模式 + BPF 内核态 tgid 过滤
-        // per-PID perf_event 在某些内核版本/容器环境下不可靠，
-        // 而 BPF 侧 tgid 过滤始终可用且无额外开销（丢弃发生在内核态）
-        per_pid_mode_ = false;
-
         ApplyFilterMaps();
 
         // 获取 eBPF 程序的文件描述符（perf_event 回调入口）
@@ -420,7 +415,6 @@ public:
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
         target_comms_.clear();
         ParseCommaSeparatedStrings(comm_str, &target_comms_);
-        host_to_local_pid_.clear();
 
         // Clear existing PID map entries
         int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
@@ -543,7 +537,6 @@ private:
         }
         perf_fds_.clear();
 
-        per_pid_mode_ = false;
         {
             auto cpus = ParseOnlineCpuIds();
             if (cpus.empty()) cpus.push_back(0);
@@ -676,10 +669,7 @@ private:
                 continue;
 
             auto& sample = batch->AddStackSample();
-            // Per-PID 模式下 bpf_get_current_pid_tgid() 返回 host namespace PID，
-            // 但 symbolizer 需要 container-local PID 才能读取 /proc/<pid>/maps。
-            // 通过 host→container PID 映射表将 PID 转换为本地可见的 PID。
-            sample.pid = ResolveLocalPid(key.pid, key.comm);
+            sample.pid = key.pid;
             sample.tid = key.tid;
             sample.comm = batch->InternString(std::string_view(
                 key.comm, strnlen(key.comm, TASK_COMM_LEN)));
@@ -788,7 +778,7 @@ private:
 
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
         auto& sample = batch->AddStackSample();
-        sample.pid = self->ResolveLocalPid(ev->pid, ev->comm);
+        sample.pid = ev->pid;
         sample.tid = ev->tid;
         sample.cpu = ev->cpu;
         sample.comm = batch->InternString(std::string_view(
@@ -809,65 +799,7 @@ private:
         return 0;
     }
 
-    // ========================================================================
-    // ResolveLocalPid — 将 host namespace PID 映射为 container-local PID
-    // ========================================================================
-    // 在容器环境中，bpf_get_current_pid_tgid() 返回的是 host namespace 的 PID，
-    // 但 /proc 文件系统只能通过 container-local PID 访问进程信息。
-    // 本函数维护一个 host→local PID 映射缓存，确保 symbolizer 能正确读取
-    // /proc/<pid>/maps 进行符号解析。
-    uint32_t ResolveLocalPid(uint32_t host_pid, const char* comm) {
-        if (!per_pid_mode_)
-            return host_pid;
-
-        // 检查 /proc/<host_pid>/maps 是否可直接访问（非容器或 host ns）
-        auto it = host_to_local_pid_.find(host_pid);
-        if (it != host_to_local_pid_.end())
-            return it->second;
-
-        // 尝试直接访问 /proc/<host_pid>/maps
-        {
-            char path[64];
-            std::snprintf(path, sizeof(path), "/proc/%u/maps", host_pid);
-            std::ifstream f(path);
-            if (f.good()) {
-                host_to_local_pid_[host_pid] = host_pid;
-                return host_pid;
-            }
-        }
-
-        // 容器环境：通过 comm 匹配找到对应的 container-local PID
-        std::string_view target_comm(comm, strnlen(comm, TASK_COMM_LEN));
-        for (uint32_t local_pid : target_pids_) {
-            char path[64];
-            std::snprintf(path, sizeof(path), "/proc/%u/comm", local_pid);
-            std::ifstream f(path);
-            if (!f) continue;
-            std::string proc_comm;
-            std::getline(f, proc_comm);
-            while (!proc_comm.empty() && proc_comm.back() == '\n')
-                proc_comm.pop_back();
-            if (proc_comm == target_comm) {
-                host_to_local_pid_[host_pid] = local_pid;
-                IL_INFO("cpu_profiler: PID namespace mapping: host {} -> local {} (comm={})",
-                        host_pid, local_pid, proc_comm);
-                return local_pid;
-            }
-        }
-
-        // 回退：使用第一个存在的 target_pid
-        for (uint32_t local_pid : target_pids_) {
-            char path[64];
-            std::snprintf(path, sizeof(path), "/proc/%u/maps", local_pid);
-            std::ifstream f(path);
-            if (f.good()) {
-                host_to_local_pid_[host_pid] = local_pid;
-                return local_pid;
-            }
-        }
-
-        return host_pid;
-    }
+    // PID 映射预留点（容器环境如需 PID namespace 转换可在此扩展）
 
     // ---- 反压响应 ----
     // 反压激活时降低采样频率至原始值的 1/4，解除时恢复。
@@ -893,12 +825,10 @@ private:
     bool kernel_stacks_ = true;               // 是否采集内核态堆栈
     bool stream_mode_ = false;
     bool stub_mode_ = false;
-    bool per_pid_mode_ = false;            // per-PID perf event 模式（无需 BPF PID 过滤）
 
     std::string bpf_obj_path_;                // eBPF 目标文件路径
-    std::vector<uint32_t> target_pids_;       // 目标 PID 列表
+    std::vector<uint32_t> target_pids_;       // 目标 PID 列表（BPF 内核态过滤）
     std::vector<std::string> target_comms_;   // 目标进程名列表
-    std::unordered_map<uint32_t, uint32_t> host_to_local_pid_;  // host PID → container PID 映射缓存
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};        // 运行中标志（线程安全）
