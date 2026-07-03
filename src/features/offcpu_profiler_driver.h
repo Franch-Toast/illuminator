@@ -4,6 +4,7 @@
 
 #include "core/engine/feature_driver.h"
 #include "features/feature_registry.h"
+#include "processors/stack_symbolizer/stack_symbolizer.h"
 #include "server/sse_handler.h"
 #include "sources/sched/offcpu_profiler/offcpu_profiler.h"
 
@@ -54,6 +55,14 @@ protected:
         ConfigValue cfg;
         source->Init(cfg);
         pipeline->SetSource(std::move(source));
+
+        auto symbolizer = std::make_unique<StackSymbolizerProcessor>();
+        ConfigValue sym_cfg;
+        sym_cfg.Set("demangle", "true");
+        sym_cfg.Set("kernel_symbols", "true");
+        symbolizer->Init(sym_cfg);
+        pipeline->AddProcessor(std::move(symbolizer));
+
         pipeline->AddSink(std::make_unique<SseSink>("offcpu_profiler"));
         return pipeline;
     }

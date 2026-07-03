@@ -98,6 +98,16 @@ public:
         }
     }
 
+    // 关闭所有 SSE 连接（用于优雅退出）
+    void ShutdownAll() {
+        std::lock_guard lock(mu_);
+        for (auto& [id, sub] : subscriptions_) {
+            sub->active.store(false);
+            sub->cv.notify_all();
+        }
+        subscriptions_.clear();
+    }
+
     // 向订阅了指定 feature 的所有连接推送数据（由 SseSink 从 SinkPool 线程调用）
     void Publish(const std::string& feature, const std::string& json_data) {
         std::lock_guard lock(mu_);

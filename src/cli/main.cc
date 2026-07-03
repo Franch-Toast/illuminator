@@ -444,6 +444,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     IL_INFO("Shutting down...");
     illuminator::FeatureBus::Instance().RemoveAll();
     illuminator::InfrastructureManager::Instance().Stop();
+    illuminator::SseHandler::Instance().ShutdownAll();
     if (config.server.http_enabled) http_server.Stop();
     IL_INFO("Illuminator stopped.");
     return 0;

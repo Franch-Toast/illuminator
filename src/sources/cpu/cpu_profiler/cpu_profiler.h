@@ -70,6 +70,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <sys/ioctl.h>
@@ -193,8 +194,9 @@ public:
     // 线程安全：通过 last_batch_mu_ 保护 last_batch_ 的读写。
     StatusOr<DataBatchPtr> Collect() override {
         std::lock_guard<std::mutex> lock(last_batch_mu_);
-        if (last_batch_ && !last_batch_->Empty())
+        if (last_batch_ && !last_batch_->Empty()) {
             return last_batch_;
+        }
         if (counts_fd_ < 0 || stacks_fd_ < 0)
             return Status::Error(StatusCode::kUnavailable, "BPF not loaded");
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
@@ -413,6 +415,19 @@ public:
         auto comm_str = params["target_comms"].AsString("");
 
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
+        ResolveNsPids(target_pids_);
+        // 读取各目标进程的 comm 用于 PID namespace 下的动态匹配
+        target_comm_set_.clear();
+        for (uint32_t p : target_pids_) {
+            std::string comm_path = "/proc/" + std::to_string(p) + "/comm";
+            std::ifstream cf(comm_path);
+            if (cf.good()) {
+                std::string comm;
+                std::getline(cf, comm);
+                while (!comm.empty() && comm.back() == '\n') comm.pop_back();
+                if (!comm.empty()) target_comm_set_.insert(comm);
+            }
+        }
         target_comms_.clear();
         ParseCommaSeparatedStrings(comm_str, &target_comms_);
 
@@ -573,6 +588,35 @@ private:
     // ========================================================================
     // 将 PID 列表和进程名列表写入对应的 eBPF map（target_pids / target_comms），
     // 同时设置 cpu_profiler_cfg 配置 map 中的标志位，告知 eBPF 程序是否启用过滤。
+    // ========================================================================
+    // ResolveNsPids — 从 NStgid 解析所有命名空间层级的 PID
+    // ========================================================================
+    void ResolveNsPids(std::vector<uint32_t>& pids) {
+        std::vector<uint32_t> extra;
+        for (uint32_t pid : pids) {
+            std::string status_path = "/proc/" + std::to_string(pid) + "/status";
+            std::ifstream f(status_path);
+            if (!f.good()) continue;
+            std::string line;
+            while (std::getline(f, line)) {
+                if (line.compare(0, 7, "NStgid:") == 0) {
+                    std::istringstream iss(line.substr(7));
+                    uint32_t ns_pid;
+                    while (iss >> ns_pid) {
+                        if (ns_pid != pid) {
+                            extra.push_back(ns_pid);
+                            IL_INFO("cpu_profiler: added NStgid={} for pid={} "
+                                    "(PID namespace translation)", ns_pid, pid);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        for (uint32_t p : extra)
+            pids.push_back(p);
+    }
+
     //
     // 标志位含义：
     //   位 0 (1): stream 模式
@@ -580,19 +624,21 @@ private:
     //   位 2 (4): 启用进程名过滤
     void ApplyFilterMaps() {
         int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
-        // 始终使用 BPF 内核态 tgid 过滤：当 target_pids 非空时在 eBPF 程序中
-        // 通过 bpf_get_current_pid_tgid() >> 32 检查白名单，丢弃不匹配的采样。
-        bool use_bpf_pid_filter = !target_pids_.empty();
+        // 禁用 BPF 侧 PID 过滤（bit1），改为用户态过滤
+        // 原因：诊断发现 BPF bpf_map_lookup_elem 在 sched context 中
+        //       可能因 PID namespace 差异导致匹配失败
         uint32_t flags =
             (stream_mode_ ? 1u : 0u) |
-            (use_bpf_pid_filter ? 2u : 0u) |
+            // bit1 (PID filter) 不设置 — 由 SnapshotAggregatedCounts 用户态过滤
             (!target_comms_.empty() ? 4u : 0u);
         if (cfg_fd >= 0) {
             uint32_t k = 0;
             bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
+            IL_INFO("cpu_profiler: BPF cfg_flags=0x{:x} (userspace PID filter)",
+                    flags);
         }
 
-        // 写入 PID 白名单
+        // 仍然写入 PID 白名单（保留用于诊断和未来恢复 BPF 过滤）
         int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
         if (pid_fd >= 0 && !target_pids_.empty()) {
             uint8_t one = 1;
@@ -668,6 +714,23 @@ private:
             if (bpf_map_lookup_elem(counts_fd_, &key, &count) != 0)
                 continue;
 
+            // 用户态 PID 过滤（BPF 侧已禁用以避免 namespace 问题）
+            if (!target_pids_.empty()) {
+                bool pid_match = std::find(target_pids_.begin(),
+                    target_pids_.end(), key.pid) != target_pids_.end();
+                if (!pid_match && !target_comm_set_.empty()) {
+                    // PID namespace: 按 comm 动态匹配并学习 root ns PID
+                    std::string_view sv(key.comm, strnlen(key.comm, TASK_COMM_LEN));
+                    if (target_comm_set_.count(std::string(sv))) {
+                        target_pids_.push_back(key.pid);
+                        IL_INFO("cpu_profiler: learned root-ns pid={} via "
+                                "comm '{}' (PID namespace)", key.pid, sv);
+                        pid_match = true;
+                    }
+                }
+                if (!pid_match) continue;
+            }
+
             auto& sample = batch->AddStackSample();
             sample.pid = key.pid;
             sample.tid = key.tid;
@@ -678,7 +741,6 @@ private:
             sample.kernel_stack_id = key.kernel_stack_id;
             sample.user_stack_id = key.user_stack_id;
 
-            // 解析内核态和用户态的完整调用栈
             sample.kernel_stack = LookupBpfStackTrace(
                 stacks_fd_, key.kernel_stack_id,
                 static_cast<size_t>(stack_depth_));
@@ -700,8 +762,6 @@ private:
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
         SnapshotAggregatedCounts(batch.get());
 
-        // 删除已读取的条目（eBPF map 遍历删除技巧：
-        // 在 while 循环中始终删除 cur，然后向 next 推进）
         il_stack_key cur{};
         il_stack_key next{};
         int err = bpf_map_get_next_key(counts_fd_, nullptr, &cur);
@@ -712,13 +772,21 @@ private:
             bpf_map_delete_elem(counts_fd_, &to_delete);
         }
 
-        if (!batch->stack_samples().empty()) {
+        size_t n = batch->stack_samples().size();
+        if (n > 0) {
+            IL_DEBUG("cpu_profiler: flush {} samples", n);
             {
                 std::lock_guard<std::mutex> lock(last_batch_mu_);
                 last_batch_ = batch;
                 BuildJsonSnapshot(*batch);
             }
             if (callback_) callback_(std::move(batch));
+        } else {
+            static uint64_t empty_count = 0;
+            if (++empty_count % 10 == 1) {
+                IL_DEBUG("cpu_profiler: no samples (empty_count={}, "
+                         "target_pids={})", empty_count, target_pids_.size());
+            }
         }
     }
 
@@ -827,7 +895,8 @@ private:
     bool stub_mode_ = false;
 
     std::string bpf_obj_path_;                // eBPF 目标文件路径
-    std::vector<uint32_t> target_pids_;       // 目标 PID 列表（BPF 内核态过滤）
+    std::vector<uint32_t> target_pids_;       // 目标 PID 列表
+    std::unordered_set<std::string> target_comm_set_;  // 目标 comm（PID ns 自动匹配）
     std::vector<std::string> target_comms_;   // 目标进程名列表
 
     // ---- 运行时状态 ----

@@ -64,6 +64,7 @@
 #include <elf.h>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <sys/stat.h>
@@ -103,6 +104,19 @@ public:
     bool IsStub() const override { return stub_mode_; }
 
     StatusOr<DataBatchPtr> Collect() override {
+        // 双通道保障：ring buffer 信号可能丢失，主动拉取 BPF stats map
+        if (!stub_mode_) {
+            bool need_fallback = false;
+            {
+                std::lock_guard<std::mutex> lk(cache_mu_);
+                need_fallback = !cached_batch_ ||
+                                cached_batch_->stack_samples().empty();
+            }
+            if (need_fallback) {
+                ReadAndClearStats();
+            }
+        }
+
         std::lock_guard<std::mutex> lk(cache_mu_);
         auto result = cached_batch_
             ? cached_batch_
@@ -174,13 +188,10 @@ public:
         if (cfg_fd_ >= 0) {
             // 启动时先写 flags 但 bit4=0（禁用），等延迟后再启用
             uint32_t k0 = 0;
-            // 在 PID namespace 环境中，BPF 看到的 TGID 是宿主机 PID，
-            // 与容器内 PID 不同。当有 target_comms 时，优先使用 comm 过滤
-            // （进程名不受 namespace 影响），跳过 PID 过滤以避免错误匹配。
-            bool use_pid_filter = !target_pid_allow_.empty() && target_comms_.empty();
+            // PID 过滤完全在用户态 AllowPid() 中完成，BPF 侧不设 bit2
+            // 原因：避免 PID namespace 差异导致 BPF lookup 失败
             uint32_t cfg_flags = (user_stacks_ ? 1u : 0u)
                                | (kernel_stacks_ ? 2u : 0u)
-                               | (use_pid_filter ? 4u : 0u)
                                | (!target_comms_.empty() ? 8u : 0u);
             cfg_flags_base_ = cfg_flags;
             bpf_map_update_elem(cfg_fd_, &k0, &cfg_flags, BPF_ANY);
@@ -311,9 +322,21 @@ public:
 
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
         target_pid_allow_.clear();
+        target_comm_names_.clear();
         host_to_local_pid_.clear();
-        for (uint32_t p : target_pids_)
+        for (uint32_t p : target_pids_) {
             target_pid_allow_.insert(p);
+            ResolveNsPids(p);
+            // 读取 comm 用于 PID namespace 下的动态匹配
+            std::string comm_path = "/proc/" + std::to_string(p) + "/comm";
+            std::ifstream cf(comm_path);
+            if (cf.good()) {
+                std::string comm;
+                std::getline(cf, comm);
+                while (!comm.empty() && comm.back() == '\n') comm.pop_back();
+                if (!comm.empty()) target_comm_names_.insert(comm);
+            }
+        }
 
         target_comms_.clear();
         if (!comm_str.empty()) {
@@ -366,17 +389,22 @@ public:
             }
         }
 
-        // Update cfg flags to reflect new filter state
+        // Update cfg flags — 禁用 BPF 侧 PID 过滤（bit2），改用用户态 AllowPid 过滤
+        // 原因：在某些环境下 bpf_get_current_pid_tgid() 返回的 tgid 与 userspace
+        //       看到的 PID 不一致（PID namespace、容器等），导致 BPF lookup 失败。
+        //       offcpu 是事件驱动（非采样），禁用 BPF 过滤不会带来性能问题，
+        //       因为 ReadAndClearStats 中的 AllowPid() 仍会正确过滤。
         if (cfg_fd_ >= 0) {
             uint32_t k0 = 0;
-            bool use_pid_filter = !target_pid_allow_.empty() && target_comms_.empty();
             uint32_t new_flags = (user_stacks_ ? 1u : 0u)
                                | (kernel_stacks_ ? 2u : 0u)
-                               | (use_pid_filter ? 4u : 0u)
+                               // bit2 (PID filter) 不设置 — 由用户态过滤
                                | (!target_comms_.empty() ? 8u : 0u)
                                | 16u;  // keep enabled (bit4)
             cfg_flags_base_ = new_flags & ~16u;
             bpf_map_update_elem(cfg_fd_, &k0, &new_flags, BPF_ANY);
+            IL_INFO("offcpu_profiler: BPF flags=0x{:x} (userspace PID filter, "
+                    "no BPF-side PID filter)", new_flags);
         }
 
         // 清空内部数据缓存，避免旧目标的样本残留
@@ -389,8 +417,9 @@ public:
             latest_json_snapshot_ = "{\"stack_samples\":[]}";
         }
 
-        IL_INFO("offcpu_profiler: reconfigured filters (pids={}, comms={})",
-                target_pid_allow_.size(), target_comms_.size());
+        IL_INFO("offcpu_profiler: reconfigured (pids={}, allow_size={}, comms={})",
+                target_pids_.size(), target_pid_allow_.size(),
+                target_comms_.size());
         return Status::Ok();
     }
 
@@ -432,16 +461,61 @@ private:
     }
 
     // ========================================================================
-    // AllowPid — 检查 PID 是否在采集白名单中
+    // ResolveNsPids — 从 /proc/<pid>/status 的 NStgid 行解析所有 namespace PID
     // ========================================================================
-    // 当 BPF 侧已通过 comm 过滤（target_comms_ 非空）时，跳过用户态 PID 检查。
-    // 原因：BPF 中 bpf_get_current_pid_tgid() 返回 host namespace PID，
-    // 与容器内 target_pid_allow_ 中的 container PID 不匹配。
-    // BPF comm 过滤已确保只有目标进程的数据通过。
+    // BPF bpf_get_current_pid_tgid() 返回根命名空间 PID。当目标进程运行在
+    // PID namespace（容器/systemd）中时，用户态可见 PID 与 BPF 可见 PID 不同。
+    // 通过解析 NStgid 行，将所有层级的 PID 都加入白名单。
+    void ResolveNsPids(uint32_t pid) {
+        std::string status_path = "/proc/" + std::to_string(pid) + "/status";
+        std::ifstream f(status_path);
+        if (!f.good()) return;
+
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.compare(0, 7, "NStgid:") == 0) {
+                std::istringstream iss(line.substr(7));
+                uint32_t ns_pid;
+                while (iss >> ns_pid) {
+                    if (ns_pid != pid) {
+                        target_pid_allow_.insert(ns_pid);
+                        IL_INFO("offcpu_profiler: added NStgid={} for pid={} "
+                                "(PID namespace translation)", ns_pid, pid);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // ========================================================================
+    // AllowPid — 检查 PID 是否在采集白名单中（支持 comm 动态匹配）
+    // ========================================================================
     bool AllowPid(uint32_t pid) const {
         if (target_pid_allow_.empty() || !target_comms_.empty())
             return true;
         return target_pid_allow_.find(pid) != target_pid_allow_.end();
+    }
+
+    // 带 comm 的版本：支持 PID namespace 下的动态 PID 学习
+    bool AllowPidWithComm(uint32_t tgid, const char* comm) {
+        if (target_pid_allow_.empty() || !target_comms_.empty())
+            return true;
+        if (target_pid_allow_.find(tgid) != target_pid_allow_.end())
+            return true;
+        // PID 不匹配时，尝试 comm 匹配（处理 PID namespace 差异）
+        if (!target_comm_names_.empty()) {
+            std::string_view sv(comm, strnlen(comm, 16));
+            if (target_comm_names_.find(std::string(sv)) !=
+                target_comm_names_.end()) {
+                // 动态学习：将此 root ns TGID 加入白名单
+                target_pid_allow_.insert(tgid);
+                IL_INFO("offcpu_profiler: learned root-ns tgid={} via comm '{}' "
+                        "(PID namespace auto-discovery)", tgid, sv);
+                return true;
+            }
+        }
+        return false;
     }
 
     // ========================================================================
@@ -538,10 +612,15 @@ private:
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
         offcpu_stat_key key = {}, next_key = {};
         offcpu_stat_val val = {};
+        uint32_t total_entries = 0, allowed_entries = 0;
+        uint32_t first_seen_tgid = 0;
 
         while (bpf_map_get_next_key(stats_fd, &key, &next_key) == 0) {
             if (bpf_map_lookup_elem(stats_fd, &next_key, &val) == 0) {
-                if (AllowPid(next_key.tgid)) {
+                ++total_entries;
+                if (total_entries == 1) first_seen_tgid = next_key.tgid;
+                if (AllowPidWithComm(next_key.tgid, val.comm)) {
+                    ++allowed_entries;
                     auto kernel_stack =
                         LookupBpfStackTrace(stacks_fd_, next_key.kernel_stack_id);
                     auto user_stack =
@@ -566,9 +645,22 @@ private:
             key = next_key;
         }
 
-        if (batch->stack_samples().empty()) return;
+        if (total_entries > 0 && allowed_entries == 0) {
+            static uint64_t filter_miss = 0;
+            if (++filter_miss % 10 == 1) {
+                IL_DEBUG("offcpu_profiler: {} BPF entries filtered "
+                         "(first_tgid={}, target_pids={})",
+                         total_entries, first_seen_tgid,
+                         target_pid_allow_.size());
+            }
+        }
 
-        // 生成符号化 JSON 快照供 HTTP API 使用
+        if (batch->stack_samples().empty())
+            return;
+
+        IL_DEBUG("offcpu_profiler: flush {} samples",
+                 batch->stack_samples().size());
+
         GenerateSymbolizedSnapshot(batch);
 
         // Pull 模式：累积到 cached_batch_ 供 Collect() 取用
@@ -915,6 +1007,7 @@ private:
     std::string bpf_obj_path_;
     std::vector<uint32_t> target_pids_;
     std::unordered_set<uint32_t> target_pid_allow_;
+    std::unordered_set<std::string> target_comm_names_;
     std::vector<std::string> target_comms_;
     std::unordered_map<uint32_t, uint32_t> host_to_local_pid_;
 

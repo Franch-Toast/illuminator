@@ -4,6 +4,7 @@
 
 #include "core/engine/feature_driver.h"
 #include "features/feature_registry.h"
+#include "processors/stack_symbolizer/stack_symbolizer.h"
 #include "server/sse_handler.h"
 #include "sources/cpu/cpu_profiler/cpu_profiler.h"
 
@@ -52,9 +53,17 @@ protected:
         auto pipeline = std::make_unique<Pipeline>("cpu_profiler");
         auto source = std::make_unique<CpuProfilerSource>();
         ConfigValue cfg;
-        cfg["sample_freq"] = ConfigValue(static_cast<int64_t>(49));
+        cfg.Set("frequency_hz", int64_t{49});
         source->Init(cfg);
         pipeline->SetSource(std::move(source));
+
+        auto symbolizer = std::make_unique<StackSymbolizerProcessor>();
+        ConfigValue sym_cfg;
+        sym_cfg.Set("demangle", "true");
+        sym_cfg.Set("kernel_symbols", "true");
+        symbolizer->Init(sym_cfg);
+        pipeline->AddProcessor(std::move(symbolizer));
+
         pipeline->AddSink(std::make_unique<SseSink>("cpu_profiler"));
         return pipeline;
     }
