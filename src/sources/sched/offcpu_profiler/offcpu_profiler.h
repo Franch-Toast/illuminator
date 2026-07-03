@@ -324,6 +324,7 @@ public:
         target_pid_allow_.clear();
         target_comm_names_.clear();
         host_to_local_pid_.clear();
+        bpf_filter_upgraded_ = false;
         for (uint32_t p : target_pids_) {
             target_pid_allow_.insert(p);
             ResolveNsPids(p);
@@ -508,14 +509,39 @@ private:
             std::string_view sv(comm, strnlen(comm, 16));
             if (target_comm_names_.find(std::string(sv)) !=
                 target_comm_names_.end()) {
-                // 动态学习：将此 root ns TGID 加入白名单
                 target_pid_allow_.insert(tgid);
                 IL_INFO("offcpu_profiler: learned root-ns tgid={} via comm '{}' "
                         "(PID namespace auto-discovery)", tgid, sv);
+                UpgradeToBpfFilter(tgid);
                 return true;
             }
         }
         return false;
+    }
+
+    // ========================================================================
+    // UpgradeToBpfFilter — 学习到 root ns PID 后重新启用 BPF 侧过滤
+    // ========================================================================
+    void UpgradeToBpfFilter(uint32_t root_ns_tgid) {
+        if (bpf_filter_upgraded_) return;
+
+        int pids_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_target_pids");
+        if (pids_fd < 0) return;
+
+        // 写入 root ns PID 到 BPF map
+        uint8_t val = 1;
+        bpf_map_update_elem(pids_fd, &root_ns_tgid, &val, BPF_ANY);
+
+        // 重新启用 BPF 侧 PID 过滤（设置 bit2）
+        if (cfg_fd_ >= 0) {
+            uint32_t k0 = 0;
+            uint32_t new_flags = cfg_flags_base_ | 4u | 16u;  // +bit2(pid) +bit4(enabled)
+            bpf_map_update_elem(cfg_fd_, &k0, &new_flags, BPF_ANY);
+            IL_INFO("offcpu_profiler: upgraded to BPF-side PID filter "
+                    "(root_tgid={}, flags=0x{:x})", root_ns_tgid, new_flags);
+        }
+
+        bpf_filter_upgraded_ = true;
     }
 
     // ========================================================================
@@ -1010,6 +1036,7 @@ private:
     std::unordered_set<std::string> target_comm_names_;
     std::vector<std::string> target_comms_;
     std::unordered_map<uint32_t, uint32_t> host_to_local_pid_;
+    bool bpf_filter_upgraded_ = false;
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};

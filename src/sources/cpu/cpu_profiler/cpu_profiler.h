@@ -416,7 +416,7 @@ public:
 
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
         ResolveNsPids(target_pids_);
-        // 读取各目标进程的 comm 用于 PID namespace 下的动态匹配
+        bpf_filter_upgraded_ = false;
         target_comm_set_.clear();
         for (uint32_t p : target_pids_) {
             std::string comm_path = "/proc/" + std::to_string(p) + "/comm";
@@ -617,6 +617,41 @@ private:
             pids.push_back(p);
     }
 
+    // ========================================================================
+    // UpgradeToBpfPidFilter — 学习到 root ns PID 后重新启用 BPF 过滤
+    // ========================================================================
+    void UpgradeToBpfPidFilter(uint32_t root_ns_pid) {
+        if (bpf_filter_upgraded_) return;
+
+        int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
+        if (pid_fd < 0) return;
+
+        // 清空旧 map 并写入 root ns PID
+        uint32_t cur{}, next{};
+        int err = bpf_map_get_next_key(pid_fd, nullptr, &cur);
+        while (err == 0) {
+            uint32_t del = cur;
+            err = bpf_map_get_next_key(pid_fd, &cur, &next);
+            cur = next;
+            bpf_map_delete_elem(pid_fd, &del);
+        }
+
+        uint8_t one = 1;
+        bpf_map_update_elem(pid_fd, &root_ns_pid, &one, BPF_ANY);
+
+        // 启用 BPF PID 过滤 (bit1)
+        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        if (cfg_fd >= 0) {
+            uint32_t k = 0;
+            uint32_t flags = (stream_mode_ ? 1u : 0u) | 2u;  // +bit1(PID filter)
+            bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
+            IL_INFO("cpu_profiler: upgraded to BPF-side PID filter "
+                    "(root_pid={}, flags=0x{:x})", root_ns_pid, flags);
+        }
+
+        bpf_filter_upgraded_ = true;
+    }
+
     //
     // 标志位含义：
     //   位 0 (1): stream 模式
@@ -714,17 +749,17 @@ private:
             if (bpf_map_lookup_elem(counts_fd_, &key, &count) != 0)
                 continue;
 
-            // 用户态 PID 过滤（BPF 侧已禁用以避免 namespace 问题）
+            // 用户态 PID 过滤（启动时 BPF 侧禁用以学习 root ns PID）
             if (!target_pids_.empty()) {
                 bool pid_match = std::find(target_pids_.begin(),
                     target_pids_.end(), key.pid) != target_pids_.end();
                 if (!pid_match && !target_comm_set_.empty()) {
-                    // PID namespace: 按 comm 动态匹配并学习 root ns PID
                     std::string_view sv(key.comm, strnlen(key.comm, TASK_COMM_LEN));
                     if (target_comm_set_.count(std::string(sv))) {
                         target_pids_.push_back(key.pid);
                         IL_INFO("cpu_profiler: learned root-ns pid={} via "
                                 "comm '{}' (PID namespace)", key.pid, sv);
+                        UpgradeToBpfPidFilter(key.pid);
                         pid_match = true;
                     }
                 }
@@ -898,6 +933,7 @@ private:
     std::vector<uint32_t> target_pids_;       // 目标 PID 列表
     std::unordered_set<std::string> target_comm_set_;  // 目标 comm（PID ns 自动匹配）
     std::vector<std::string> target_comms_;   // 目标进程名列表
+    bool bpf_filter_upgraded_ = false;
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};        // 运行中标志（线程安全）
