@@ -1,5 +1,5 @@
 # Core dumps
-# /core
+/core
 
 # Bazel
 /bazel-*
