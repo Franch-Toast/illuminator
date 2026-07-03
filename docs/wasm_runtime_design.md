@@ -127,5 +127,5 @@ pipelines:
           fuel_limit: 5000000
           memory_limit_mb: 32
     sinks:
-      - type: websocket_sink
+      - type: sse_sink
 ```

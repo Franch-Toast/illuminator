@@ -3,12 +3,12 @@
 > **版本**: 3.0  
 > **状态**: ✅ 已实现（2026-05 完成）  
 > **设计理念**: 调度与执行分离 · 单一职责线程 · Actor 式状态隔离  
-> **实现文件**: `src/core/engine/pipeline_controller.h` + `timer_wheel.h` + `feature_driver.h` (Pipeline 生命周期由 FeatureDriver::Probe/Remove 管理)
+> **实现文件**: `src/core/engine/pipeline.h` + `timer_wheel.h` + `feature_driver.h` (Pipeline 生命周期由 FeatureDriver::Probe/Remove 管理)
 
 > **架构位置说明** (2026-07-02 更新): Pipeline v3 机制仍是 Illuminator 数据处理的核心引擎。  
 > 在 RFC v3 三层架构中，每个 `FeatureDriver` 通过 `BuildPipeline()` 方法创建自己的 Pipeline 实例。  
 > `InfrastructureManager` 提供 TimerWheel、CollectPool、SinkPool 等共享基础设施。  
-> `PipelineController` 仍用于 CLI 一次性采集命令；Daemon 模式下由 FeatureBus 管理所有 Pipeline 生命周期。
+> `PipelineController` 已删除。Daemon 和 CLI collect 均通过 FeatureBus → FeatureDriver → Pipeline 管理生命周期。
 
 ---
 
@@ -98,13 +98,14 @@
 │  └─────────────────────────────────────────────────────────────────────┘  │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────────┐ │
-│  │ FeatureManager — 面向用户的功能级生命周期管理（1 Feature = 1 Pipeline）│ │
+│  │ FeatureBus + FeatureDriver — 功能级生命周期管理（1 Feature = 1 Pipeline）│ │
 │  │                                                                      │ │
-│  │ 状态机: Inactive → Starting → Active ⇄ Paused → Stopping [→ Inactive]│ │
-│  │ 分级:    Tier1(监控) 自动启动 | Tier2(追踪) 自动启动 | Tier3(剖析) 手动│ │
-│  │ 自动注入: StreamSink(数据拉取) + WebSocketSink(实时推送) + RecordingSink│ │
-│  │ 运行时重配置: 切换 target_pids 无需重启 Pipeline                        │ │
+│  │ 状态机 (FeatureDriver): Inactive → Probe() → Active ⇄ Paused → Remove()  │
+│  │ 分级:   Tier 1 (Monitoring) 自动 Probe | Tier 2 (Tracing) 自动 Probe  │ │
+│  │        Tier 3 (Profiling) 手动触发                                    │ │
+│  │ 自动注入: SseSink (SSE 实时推送) + RecordingSink (录制回放)           │ │
 │  │ Supported: 按需启停 / 暂停恢复 / 录制 / 重配过滤 / 状态回调 / 安全校验   │ │
+│  │ 注: PipelineController 已删除，CLI collect 同样使用 FeatureBus         │ │
 │  └──────────────────────────────────────────────────────────────────────┘ │
 │                                                                          │
 │  线程总计: 1 (TimerWheel) + M (CollectPool) + N (ProcessThread) + K (Sink)│
@@ -303,7 +304,7 @@ sizeof(ChannelItem) = sizeof(variant<16B, 1B>) = 24 bytes (含 discriminant + pa
 
 **核心约束**: **不做任何 I/O，不持有任何定时器，不做任何调度决策。**
 
-**实际实现**（`pipeline_controller.h` 中的 `Pipeline::ProcessLoop`）:
+**实际实现**（`pipeline.h` 中的 `Pipeline::ProcessLoop`）:
 
 ```cpp
 void ProcessLoop() {
@@ -432,7 +433,7 @@ void SubmitToSinks(DataBatchPtr batch) {
 **实现**: 直接复用现有 `ThreadPool`，与 SinkPool 是两个独立实例。
 
 ```cpp
-// PipelineController 中:
+// InfrastructureManager 中:
 std::unique_ptr<ThreadPool> collect_pool_;  // M 线程，用于 Collect
 std::unique_ptr<ThreadPool> sink_pool_;     // K 线程，用于 Write
 
@@ -599,7 +600,7 @@ struct EngineConfig {
 ## 八、优雅停机序列
 
 ```
-PipelineController::StopAll()
+FeatureBus::RemoveAll() + InfrastructureManager::Stop()
    │
    ├─ 1. TimerWheel::Stop()
    │     running_ = false → Wakeup(eventfd) → thread_.join()
@@ -631,7 +632,7 @@ PipelineController::StopAll()
          等待所有 Write() 完成，确保数据不丢失
 ```
 
-**关键**: SinkPool 最后销毁（作为 PipelineController 的成员，在 pipelines_ 之后析构），确保 ProcessThread drain 阶段提交的最后一批数据能被写入。
+**关键**: InfrastructureManager::Stop() 在所有 FeatureDriver::Remove() 之后调用，确保 ProcessThread drain 阶段提交的最后一批数据能被 SinkPool 写入。
 
 ## 九、类图与文件组织
 
@@ -653,9 +654,10 @@ src/
 │   │   ├── data_batch.h           # 数据模型（Record, StackSample, DataBatch, Arena）
 │   │   ├── async_channel.h        # 异步通道（variant<DataBatchPtr, FlushSentinel>, 三级退避）
 │   │   ├── timer_wheel.h          # 全局定时调度器（timerfd+epoll+eventfd+最小堆）
-│   │   ├── feature_manager.h      # 功能级生命周期管理（按需启停+录制+重配）
-│   │   ├── pipeline_controller.h  # Pipeline + PipelineController 定义
-│   │   └── pipeline_controller.cc # PipelineController 实现（BuildFromConfig, StartAll, StopAll）
+│   │   ├── feature_driver.h       # Feature 驱动基类（BuildPipeline + Probe/Remove）
+│   │   ├── feature_bus.h           # Feature 注册与生命周期编排
+│   │   ├── infrastructure_manager.h # 共享基础设施（TimerWheel + CollectPool + SinkPool）
+│   │   └── pipeline.h             # Pipeline 类定义（独立于 FeatureDriver）
 │   ├── memory/
 │   │   ├── arena.h                # Arena 内存分配器（碰撞指针）
 │   │   └── lock_free_queue.h      # 无锁队列
@@ -676,8 +678,6 @@ src/
 ├── aggregators/                   # 聚合器插件实现（CPU 统计聚合）
 ├── sinks/                         # 数据出口插件实现（10+ 种）
 │   ├── recording_sink/            # 录制 Sink（供 API 录制回放）
-│   ├── stream_sink/               # 流式 Sink（供 /collect API 拉取）
-│   └── websocket_sink/            # WebSocket Sink（实时推送前端）
 ├── ebpf/                          # eBPF 探针程序（C 源码）+ 加载器
 ├── server/                        # HTTP 服务器 + API 路由 + WebSocket 管理
 ├── storage/                       # 存储后端抽象 + SQLite 实现
@@ -687,49 +687,45 @@ src/
 ### 9.2 组件依赖图
 
 ```
-                     GlobalConfig
+                     InfrastructureManager
+                     (TimerWheel + CollectPool + SinkPool)
                           │
-                 PipelineController
-               ┌────────┼──────────┐
-          TimerWheel  Pipelines[]  ThreadPools
-               │          │        (CollectPool, SinkPool)
-               │     Pipeline
-               │      │    │
-         CollectPool  │  ProcessThread
-               │      │    │
-               │  AsyncChannel<ChannelItem>
-               │      │
-               └── SinkPool
+                 FeatureBus (注册与生命周期编排)
+                      │    │
+            FeatureDriver[]
+                      │    │
+                 Pipeline (BuildPipeline)
+                      │    │
+               AsyncChannel<ChannelItem>
                       │
                  Source::Collect   Sink::Write
                  
                  
-              FeatureManager（用户层）
+              FeatureBus（编排层）
                │
-               └── PipelineController（引擎层）
+               └── FeatureDriver（实例层）
                     │
                     └── Pipeline（单管道）
                          ├── SourcePlugin
                          ├── ProcessorPlugin[]
                          ├── AggregatorPlugin
                          └── SinkPlugin[]
-                              ├── StreamSink（自动注入，数据拉取）
-                              ├── WebSocketSink（自动注入，实时推送）
+                              ├── SseSink（自动注入，SSE 实时推送）
                               └── RecordingSink（自动注入，录制回放）
 ```
 
-### 9.3 FeatureManager 状态机
+### 9.3 FeatureDriver 状态机
 
 ```
-  Inactive ──→ Starting ──→ Active ⇄ Paused
-     ↑            │            │        │
-     │            │            │        │
-     └── Stopping ←────────────┴────────┘
+  Inactive ──→ Probe() → Active ⇄ Paused
+     ↑            │         │        │
+     │            │         │        │
+     └── Remove() ←─────────┴────────┘
 
-  FeatureTier 分级:
-  - Tier1 (kMonitoring): procfs 读取，<0.5% CPU，进入 Tab 页自动启动
-  - Tier2 (kTracing):    轻量 eBPF + procfs，1-3% CPU，自动启动
-  - Tier3 (kProfiling):  高频采样，3-10% CPU，必须手动触发 + 指定 target_pids
+  DriverTier 分级:
+  - Tier 1 (kMonitoring): procfs 读取，<0.5% CPU，daemon 启动时自动 Probe
+  - Tier 2 (kTracing):    轻量 eBPF + procfs，1-3% CPU，自动 Probe
+  - Tier 3 (kProfiling):  高频采样，3-10% CPU，必须手动触发 + 指定 target_pids
 ```
 
 ### 9.4 与设计文档的差异总结
@@ -742,8 +738,6 @@ src/
 | Sink 提交 | 永远非阻塞 | 带过载保护（>256 pending 丢弃） |
 | 优雅停机 | 基本描述 | 完整 Drain 流程（排空 channel + 最后 flush） |
 | 资源检查 | 未提及 | 每 100 次循环检查内存限制 |
-| 用户层 | 无 | FeatureManager（按需启停/暂停/录制/重配） |
-| 自动注入 | 无 | StreamSink + WebSocketSink + RecordingSink |
 | BPF 启动 | 无 | 100ms 延迟避免内核过载 |
 
 ## 十、Metrics 自观测
@@ -809,7 +803,7 @@ timer_.AddRepeating(std::chrono::seconds(10), [this] {
 | Phase 1 | 新增 TimerWheel（timerfd+epoll+eventfd） | ✅ 已完成 |
 | Phase 2 | AsyncChannel 改为 variant | ✅ 已完成 |
 | Phase 3 | Pipeline 重构 ProcessLoop（三级退避出队） | ✅ 已完成 |
-| Phase 4 | PipelineController 集成（CollectPool + SinkPool） | ✅ 已完成 |
+| Phase 4 | InfrastructureManager 集成（CollectPool + SinkPool） | ✅ 已完成 |
 | Phase 5 | 配置 + 构建 | ✅ 已完成 |
 | Phase 6 | FeatureManager 按需启停管理 | ✅ 已完成 |
 | Phase 7 | 自动注入 StreamSink + WebSocketSink + RecordingSink | ✅ 已完成 |

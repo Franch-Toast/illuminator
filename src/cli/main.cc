@@ -18,7 +18,7 @@
 #include "core/engine/feature_bus.h"
 #include "core/engine/feature_driver.h"
 #include "core/engine/infrastructure_manager.h"
-#include "core/engine/pipeline_controller.h"
+#include "core/engine/pipeline.h"
 #include "features/feature_registry.h"
 #include "features/cpu_utilization_driver.h"
 #include "features/process_cpu_driver.h"
@@ -56,8 +56,7 @@ static void PrintUsage(const char* prog) {
         "  --config <path>       Configuration file path\n"
         "  --log-level <level>   Log level (trace/debug/info/warn/error)\n"
         "  --duration <sec>      Collection duration (collect command)\n"
-        "  --port <port>         HTTP port override\n"
-        "  --ws-port <port>      WebSocket port override\n\n",
+        "  --port <port>         HTTP port override\n\n",
         illuminator::kIlluminatorVersion, prog);
 }
 
@@ -178,7 +177,7 @@ static bool ParseListenAddr(const std::string& listen,
 }
 
 static int RunDaemon(const std::string& config_path, const std::string& log_level,
-                     int port_override, int /*ws_port_override*/) {
+                     int port_override) {
     SetLogLevel(log_level);
     IL_INFO("Illuminator v{} starting...", illuminator::kIlluminatorVersion);
 
@@ -327,6 +326,42 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                     res.set_content(err.dump(), "application/json");
                     return;
                 }
+                // Apply optional config params from request body (e.g. target_pids for profiler)
+                if (!req.body.empty()) {
+                    try {
+                        auto body = nlohmann::json::parse(req.body);
+                        illuminator::ConfigValue cfg;
+                        for (auto& [key, val] : body.items()) {
+                            if (val.is_array()) {
+                                // Convert JSON array to comma-separated string
+                                std::string joined;
+                                for (size_t i = 0; i < val.size(); ++i) {
+                                    if (i > 0) joined += ",";
+                                    if (val[i].is_number()) {
+                                        joined += std::to_string(val[i].get<int64_t>());
+                                    } else {
+                                        joined += val[i].get<std::string>();
+                                    }
+                                }
+                                cfg.Set(key, joined);
+                            } else if (val.is_number_integer()) {
+                                cfg.Set(key, static_cast<int64_t>(val.get<int64_t>()));
+                            } else if (val.is_number()) {
+                                cfg.Set(key, std::to_string(val.get<double>()));
+                            } else if (val.is_boolean()) {
+                                cfg.Set(key, val.get<bool>() ? "true" : "false");
+                            } else if (val.is_string()) {
+                                cfg.Set(key, val.get<std::string>());
+                            }
+                        }
+                        auto reconf_status = bus.Reconfigure(name, cfg);
+                        if (!reconf_status.ok()) {
+                            IL_WARN("FeatureBus: reconfigure '{}' after start failed: {}", name, reconf_status.message());
+                        }
+                    } catch (const std::exception& e) {
+                        IL_WARN("FeatureBus: failed to parse start config for '{}': {}", name, e.what());
+                    }
+                }
                 res.set_content(R"({"ok":true})", "application/json");
             });
 
@@ -419,24 +454,23 @@ static int RunCollect(int duration_sec, const std::string& log_level) {
     IL_INFO("Collecting for {} seconds...", duration_sec);
 
     illuminator::RegisterBuiltinPlugins();
-    auto config = BuildDemoConfig();
-    illuminator::PipelineController controller;
 
-    auto build_st = controller.BuildFromConfig(config);
-    if (!build_st.ok()) {
-        IL_ERROR("Failed to build pipelines: {}", build_st.message());
+    illuminator::InfrastructureConfig infra_cfg;
+    infra_cfg.collect_pool_threads = 2;
+    infra_cfg.sink_pool_threads = 4;
+    auto status = illuminator::InfrastructureManager::Instance().Start(infra_cfg);
+    if (!status.ok()) {
+        IL_ERROR("Failed to start InfrastructureManager: {}", status.message());
         return 1;
     }
 
-    auto start_st = controller.StartAll();
-    if (!start_st.ok()) {
-        IL_ERROR("Failed to start pipelines: {}", start_st.message());
-        return 1;
-    }
+    illuminator::FeatureRegistry::RegisterAll();
+    illuminator::FeatureBus::Instance().ProbeAll();
 
     std::this_thread::sleep_for(std::chrono::seconds(duration_sec));
 
-    controller.StopAll();
+    illuminator::FeatureBus::Instance().RemoveAll();
+    illuminator::InfrastructureManager::Instance().Stop();
     IL_INFO("Collection complete.");
     return 0;
 }
@@ -543,7 +577,7 @@ int main(int argc, char** argv) {
     std::string command = argv[1];
     std::string config_path, log_level = "info";
     int duration = 10;
-    int port_override = 0, ws_port_override = 0;
+    int port_override = 0;
 
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
@@ -554,11 +588,9 @@ int main(int argc, char** argv) {
             duration = std::atoi(argv[++i]);
         else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
             port_override = std::atoi(argv[++i]);
-        else if (strcmp(argv[i], "--ws-port") == 0 && i + 1 < argc)
-            ws_port_override = std::atoi(argv[++i]);
     }
 
-    if (command == "daemon") return RunDaemon(config_path, log_level, port_override, ws_port_override);
+    if (command == "daemon") return RunDaemon(config_path, log_level, port_override);
     if (command == "collect") return RunCollect(duration, log_level);
     if (command == "top") return RunTop(log_level);
     if (command == "version") {

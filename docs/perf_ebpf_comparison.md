@@ -11,7 +11,7 @@
 | **BPF 程序数** | **17 个**（含 DWARF 展开器） | **8 个**（7 已编译集成 + 1 孤立） |
 | **用户态插件数** | 14 个 Plugin | 9 Source + 4 Processor + 9 Sink |
 | **构建系统** | Bazel + `bpf_rules.bzl` | Bazel + `bpf_probe.bzl` |
-| **数据输出** | 文件(zstd) + Church 事件上报 | WS 实时推送 + HTTP API + SQLite |
+| **数据输出** | 文件(zstd) + Church 事件上报 | SSE 实时推送 + HTTP REST + SQLite |
 | **配置格式** | JSON（v1/v2，支持 `extends` 继承） | YAML（单文件 + 内置默认） |
 | **前端** | 无（由 FlameCraft 等离线分析） | 内置 React SPA 实时可视化 |
 
@@ -25,7 +25,7 @@ perf_ebpf:
   特点：路径短，无中间队列
 
 illuminator:
-  BPF → ringbuf → Source → AsyncChannel → Processor → SinkPool → WebSocket/SQLite
+  BPF → ringbuf → Source → AsyncChannel → Processor → SinkPool → SSE/SQLite
   特点：灵活组合，但链路长，背压传递慢
 ```
 
@@ -35,7 +35,7 @@ illuminator:
 |------|-----------|-------------|
 | **注册** | `REGISTER_PLUGIN` 静态构造 | `IL_REGISTER_SOURCE/PROCESSOR/SINK` |
 | **生命周期** | init → start → stop → rotate | Init → Start → Stop |
-| **线程模型** | 每插件独立轮询线程 | PipelineController 统一调度 |
+| **线程模型** | 每插件独立轮询线程 | InfrastructureManager 线程池 + per-Pipeline ProcessThread |
 | **探针管理** | 插件自管理 skeleton | BpfProgramManager 统一加载 |
 
 ### 2.3 BPF Buffer 抽象
@@ -191,7 +191,7 @@ illuminator（修复后）:
 | **IO monitor** | 事件驱动 | tracepoint | 🟡 取决于 I/O 负载 |
 | **Net tracer** | 事件驱动 | kprobe | 🟡 取决于网络负载 |
 | **Ringbuf poll** | 100 ms timeout | poll 系统调用 | 🟢 安全 |
-| **WS broadcast** | 1000 ms | 后台线程 sleep | 🟢 安全 |
+| **SSE push** | 事件驱动 | SseSink → SseHandler 条件变量 | 🟢 安全 |
 | **TimerWheel** | 1000 ms epoll | 内部调度 | 🟢 安全 |
 | **Storage prune** | 60000 ms | 定时器 | 🟢 安全 |
 
@@ -286,7 +286,7 @@ perf_ebpf **不冻结系统**的根本原因（按重要性排序）：
 
 | 功能 | perf_ebpf 参考 | 说明 |
 |------|----------------|------|
-| Church 事件上报 | `ReporterManager` | illuminator 用 WS + REST 已足够 |
+| Church 事件上报 | `ReporterManager` | illuminator 用 SSE + REST 已足够 |
 | ftrace 管道 | `libtracefs` 集成 | 当前 eBPF 已覆盖需求 |
 | D-state 独立阈值 | `dump_stack_threshold_ns` | 可区分正常阻塞和异常死锁 |
 
@@ -322,6 +322,6 @@ perf_ebpf **不冻结系统**的根本原因（按重要性排序）：
 | 设计 | 理由 |
 |------|------|
 | perf_event_array 替代 ringbuf | illuminator 的 ring_buffer 已工作良好，且内核 ≥5.8 场景下 ringbuf 更优 |
-| 多进程 PluginManager 线程模型 | illuminator 的 PipelineController 线程池更灵活 |
+| 多进程 PluginManager 线程模型 | illuminator 的 InfrastructureManager (CollectPool+SinkPool) + per-Pipeline ProcessThread 更灵活 |
 | JSON 配置格式 | YAML 对人类更友好，且已有完整解析层 |
-| 文件输出为主 | illuminator 面向实时 UI，WS+HTTP 是正确选择 |
+| 文件输出为主 | illuminator 面向实时 UI，SSE+HTTP 是正确选择 |

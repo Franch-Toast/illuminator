@@ -26,12 +26,12 @@
 > | 原报告识别的问题 | 解决方案 | 状态 |
 > |-----------------|---------|------|
 > | FeatureManager 上帝类 (1200 行) | 拆分为 FeatureBus + FeatureDriver | ✅ 已移除 |
-> | PipelineController 职责过重 | 提取 InfrastructureManager；Daemon 模式不使用 PipelineController | ✅ 已实现 |
+> | PipelineController 职责过重 | 完全删除 PipelineController；Pipeline 类独立在 `pipeline.h`，由 FeatureDriver 持有 | ✅ 已删除 |
 > | WebSocket 轮询冒充推送 | 替换为 SSE (Server-Sent Events) 直推 | ✅ 已移除 WebSocket |
 > | StreamSinkStore Buffer 多余 | 移除；SseSink 直接 push 到 SseHandler | ✅ 已移除 |
 > | main.cc 硬编码 Feature 元数据 | FeatureDriver::Describe() 自描述 | ✅ 已实现 |
 > | 前端无法自动发现 Feature 能力 | /api/v2/features 返回 FeatureDescriptor | ✅ 已实现 |
-> | api_routes.h 上帝文件 (1200 行) | 拆分为 v2 REST + SSE routes | ⚠️ 部分完成 (~550 行) |
+> | api_routes.h 上帝文件 (1200 行) | 拆分为 v2 REST + SSE routes + 移除废弃路由 | ✅ 已精简 (~400 行) |
 >
 > **详见**: `docs/rfc_data_contract_v2.md` (RFC v3 设计与实现偏差记录)
 >

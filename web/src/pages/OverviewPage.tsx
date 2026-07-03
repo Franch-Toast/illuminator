@@ -60,8 +60,8 @@ export default function OverviewPage() {
         <span style={{ fontSize: 16 }}>{alwaysOnCount > 0 ? '●' : '○'}</span>
         <span style={{ fontSize: 13, color: alwaysOnCount > 0 ? colors.success : '#ef4444' }}>
           Always-On: {alwaysOnCount} features collecting data
-          {connStatus === 'connected' && ' · WebSocket real-time'}
-          {connStatus === 'disconnected' && ' · HTTP polling fallback'}
+          {connStatus === 'connected' && ' · SSE real-time'}
+          {connStatus === 'disconnected' && ' · reconnecting...'}
         </span>
       </div>
 

@@ -21,10 +21,9 @@ const SUB_TABS = [
 
 export default function CpuPage() {
   const { subTab, setUrlState } = useUrlState()
-  const [activeTab, setActiveTab] = useState(subTab || 'system')
+  const activeTab = subTab || 'system'
 
   const handleTabChange = (tab: string) => {
-    setActiveTab(tab)
     setUrlState({ subTab: tab })
   }
 
@@ -125,10 +124,10 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
     startedRef.current = true
     setProfilingStatus('starting')
     try {
-      const sessionOpts = { target_pids: [pid], target_comms: [comm], duration_sec: 0 }
+      const profilerConfig = { target_pids: [pid] }
       await Promise.all([
-        api.createSession({ type: 'cpu_profile', ...sessionOpts }),
-        api.createSession({ type: 'offcpu_profile', ...sessionOpts }),
+        api.featureStart('cpu_profiler', profilerConfig),
+        api.featureStart('offcpu_profiler', profilerConfig),
       ])
       setProfilingStatus('active')
     } catch {
@@ -140,8 +139,8 @@ function ProcessDetailView({ pid, comm, onBack }: { pid: number; comm: string; o
   const stopProfiling = async () => {
     try {
       await Promise.all([
-        api.stopSession({ type: 'cpu_profile' }),
-        api.stopSession({ type: 'offcpu_profile' }),
+        api.featureStop('cpu_profiler'),
+        api.featureStop('offcpu_profiler'),
       ])
     } catch { /* best effort */ }
     setProfilingStatus('idle')

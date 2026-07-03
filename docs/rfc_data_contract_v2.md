@@ -1357,10 +1357,13 @@ SinkPool 线程只做快速内存操作（push 到队列 + 条件变量通知）
 | `/api/v1/sessions` | 未实现 | Tier 3 session 管理通过 `/api/v2/features/:name/start` + config body 替代 |
 | `/api/v1/export` | 未实现（后续） | 前端 ringBuffer 导出已满足当前需求 |
 
-### 11.5 PipelineController 保留
+### 11.5 PipelineController 已完全移除
 
-原设计要求完全移除 `PipelineController`。实际保留用于 CLI 一次性命令 (`illuminator collect`)。
-Daemon 运行模式中完全不使用 `PipelineController`，数据流独占通过 `FeatureBus` → `FeatureDriver` → `Pipeline` 路径。
+`PipelineController` 类已被删除。`Pipeline` 类独立定义在 `src/core/engine/pipeline.h` 中，
+由 `FeatureDriver` 通过 `BuildPipeline()` 创建并持有（`std::unique_ptr<Pipeline> pipeline_`）。
+
+CLI `illuminator collect` 命令同样使用 `FeatureBus::ProbeAll()` → sleep → `FeatureBus::RemoveAll()`，
+与 daemon 模式走完全相同的数据路径。
 
 ### 11.6 文件组织
 
@@ -1369,6 +1372,7 @@ Daemon 运行模式中完全不使用 `PipelineController`，数据流独占通�
 | `src/core/infrastructure/infrastructure_manager.h` | `src/core/engine/infrastructure_manager.h` |
 | `src/core/bus/feature_bus.h` | `src/core/engine/feature_bus.h` |
 | `src/core/driver/feature_driver.h` | `src/core/engine/feature_driver.h` |
+| (Pipeline 嵌入 PipelineController) | `src/core/engine/pipeline.h`（独立文件） |
 | `src/features/cpu_utilization_driver.h` | `src/features/cpu_utilization_driver.h` ✅ |
 | `src/server/sse_handler.h` | `src/server/sse_handler.h` ✅ |
 

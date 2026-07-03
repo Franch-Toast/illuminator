@@ -168,7 +168,7 @@ SinkPool (K 线程)          — 并行执行 Sink::Write()
 1. `docs/pipeline_v3_design.md` — 架构设计文档（重点看前 200 行）
 2. `src/core/engine/infrastructure_manager.h` — TimerWheel + CollectPool + SinkPool
 3. `src/core/engine/feature_driver.h` — 每个 Feature 自包含的 Pipeline 构建
-4. `src/core/engine/pipeline_controller.h` — `Pipeline` 类的 `Start()` 和 `ProcessLoop()`
+4. `src/core/engine/pipeline.h` — `Pipeline` 类的 `Start()` 和 `ProcessLoop()`
 
 ### 阶段三：理解 FeatureBus / FeatureDriver 与 Always-On 架构（Day 2）
 
@@ -305,7 +305,7 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
             └→ FeatureRegistry::RegisterAll() + FeatureBus::ProbeAll()
                 （Feature 由 REGISTER_FEATURE 宏注册，非 YAML pipelines 驱动）
 
-注：`collect` CLI 子命令仍使用 PipelineController::BuildFromConfig() 一次性采集。
+注：`collect` CLI 子命令同样使用 FeatureBus::ProbeAll() + sleep + RemoveAll()。
 ```
 
 **必读文件**：
@@ -464,7 +464,7 @@ daemon 启动               →   Tier 1-2 全部自动 Probe   →   FeatureBus
 
 用户点击 "Start Profile"  →   POST /api/v2/features/cpu_profiler/start
                           →   FeatureBus::Probe() → Tier 3 Pipeline 启动
-                          →   Source 配置 BPF perf_event + PID 过滤
+                          →   Source per-CPU perf_event + BPF 内核态 tgid 过滤
                           →   数据经 SSE 推送 → 火焰图渲染
 
 手动 Stop                 →   POST /api/v2/features/cpu_profiler/stop

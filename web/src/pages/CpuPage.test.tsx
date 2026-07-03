@@ -4,9 +4,8 @@ import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../services/apiClient', () => ({
   api: {
-    featureCollect: vi.fn().mockResolvedValue({ records: [] }),
-    createSession: vi.fn().mockResolvedValue({ status: 'ok' }),
-    stopSession: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featureStart: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featureStop: vi.fn().mockResolvedValue({ status: 'ok' }),
     features: vi.fn().mockResolvedValue({ features: [] }),
   },
 }))

@@ -14,7 +14,8 @@
 
 #include "core/common/config.h"
 #include "core/engine/data_batch.h"
-#include "core/engine/pipeline_controller.h"
+#include "core/engine/infrastructure_manager.h"
+#include "core/engine/pipeline.h"
 
 namespace illuminator {
 namespace {
@@ -271,9 +272,12 @@ private:
     std::thread push_thread_;
 };
 
-// 测试：Push-mode 源在 PipelineController 中正确工作（含启动延迟路径）
-TEST(PipelineIntegrationTest, PushModeSourceWorksWithStartupDelay) {
-    PipelineController controller;
+// 测试：Push-mode 源通过 Pipeline 直接工作
+TEST(PipelineIntegrationTest, PushModeSourceWorksDirectly) {
+    auto& infra = InfrastructureManager::Instance();
+    if (!infra.IsStarted()) {
+        infra.Start({.collect_pool_threads = 1, .sink_pool_threads = 2});
+    }
 
     auto pipe = std::make_unique<Pipeline>("test_push_mode");
     pipe->SetSource(std::make_unique<MockPushSource>());
@@ -281,46 +285,45 @@ TEST(PipelineIntegrationTest, PushModeSourceWorksWithStartupDelay) {
     auto sink = std::make_unique<MockSink>();
     auto* sink_ptr = sink.get();
     pipe->AddSink(std::move(sink));
+    pipe->SetSinkPool(infra.GetSinkPool());
 
-    controller.AddPipeline(std::move(pipe));
-    controller.InitSinkPool(2);
-    controller.InitCollectPool(1);
-
-    ASSERT_TRUE(controller.StartAll().ok());
+    ASSERT_TRUE(pipe->Start().ok());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-    ASSERT_TRUE(controller.StopAll().ok());
+    pipe->Stop();
 
     EXPECT_GT(sink_ptr->WriteCount(), 0u);
 }
 
-// 测试：多个 Push-mode 源的启动延迟确保顺序启动
-TEST(PipelineIntegrationTest, MultiplePushModeSourcesStartSequentially) {
-    PipelineController controller;
+// 测试：多个 Push-mode Pipeline 可以独立启动
+TEST(PipelineIntegrationTest, MultiplePushModePipelinesStartIndependently) {
+    auto& infra = InfrastructureManager::Instance();
+    if (!infra.IsStarted()) {
+        infra.Start({.collect_pool_threads = 1, .sink_pool_threads = 2});
+    }
 
-    auto create_push_pipeline = [](const std::string& name) {
+    auto create_push_pipeline = [&](const std::string& name) {
         auto pipe = std::make_unique<Pipeline>(name);
         pipe->SetSource(std::make_unique<MockPushSource>());
         pipe->AddSink(std::make_unique<MockSink>());
+        pipe->SetSinkPool(infra.GetSinkPool());
         return pipe;
     };
 
-    controller.AddPipeline(create_push_pipeline("push_1"));
-    controller.AddPipeline(create_push_pipeline("push_2"));
-    controller.AddPipeline(create_push_pipeline("push_3"));
-    controller.InitSinkPool(2);
-    controller.InitCollectPool(1);
+    auto p1 = create_push_pipeline("push_1");
+    auto p2 = create_push_pipeline("push_2");
+    auto p3 = create_push_pipeline("push_3");
 
-    auto start_time = std::chrono::steady_clock::now();
-    ASSERT_TRUE(controller.StartAll().ok());
-    auto elapsed = std::chrono::steady_clock::now() - start_time;
-
-    // 3 个 push-mode 管道应有 3 * 100ms ≈ 300ms+ 延迟
-    EXPECT_GE(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 280);
+    ASSERT_TRUE(p1->Start().ok());
+    ASSERT_TRUE(p2->Start().ok());
+    ASSERT_TRUE(p3->Start().ok());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    ASSERT_TRUE(controller.StopAll().ok());
+
+    p1->Stop();
+    p2->Stop();
+    p3->Stop();
 }
 
 }  // namespace

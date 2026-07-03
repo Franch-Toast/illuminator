@@ -46,7 +46,7 @@ namespace illuminator {
 // KernelFeatures：内核 eBPF 特性探测结果
 //
 // 汇总当前运行内核的各项 eBPF 能力，以布尔标志 + 版本号组合呈现。
-// 上层代码（PipelineController 或 BpfProgramManager）根据这些标志
+// 上层代码（FeatureDriver 或 BpfProgramManager）根据这些标志
 // 决定启用哪些 eBPF 探针以及使用何种 map 类型。
 // ============================================================================
 struct KernelFeatures {

@@ -51,14 +51,14 @@
 
 | 层级 | 特征 | 开销 | 激活方式 | 典型示例 |
 |------|------|------|---------|---------|
-| **Tier 1 — 监控** | 读取 procfs 文件 | < 0.5% CPU | **自动**：进入标签页即激活 | `cpu_utilization`, `cpu_processes`, `memory_utilization` |
+| **Tier 1 — 监控** | 读取 procfs 文件 | < 0.5% CPU | **自动**：进入标签页即激活 | `cpu_utilization`, `process_cpu` |
 | **Tier 2 — 追踪** | 轻量 eBPF + procfs | 1-3% CPU | **自动**：进入标签页即激活 | `sched_analysis`, `io_monitor`, `net_tracer` |
 | **Tier 3 — 剖析** | 高频 eBPF 采样 | 3-10% CPU | **手动**：用户显式触发 | `cpu_profile`, `offcpu_profile`, `heap_profiler` |
 
 **行为规则**：
 
 1. **进入标签页 → Tier 1/2 自动启动**
-   - 用户打开 CPU 页，`cpu_utilization` 和 `cpu_processes` 立即开始采集
+   - 用户打开 CPU 页，`cpu_utilization` 和 `process_cpu` 立即开始采集
    - 图表直接显示实时数据，无需任何点击操作
    - 体验等同于打开 htop 或 Grafana Dashboard
 
@@ -237,9 +237,9 @@ interface DataSource {
 延用后端 `RecordingSink` 已实现的 NDJSON 格式（每行一个 JSON 对象）：
 
 ```
-{"type":"header","version":1,"features":["cpu_utilization","cpu_processes"],"start_ts":1718150400000,"end_ts":1718150712000}
+{"type":"header","version":1,"features":["cpu_utilization","process_cpu"],"start_ts":1718150400000,"end_ts":1718150712000}
 {"ts":1718150400000,"feature":"cpu_utilization","data":{"user_pct":12.3,"system_pct":5.1,...}}
-{"ts":1718150400000,"feature":"cpu_processes","data":{"processes":[...]}}
+{"ts":1718150400000,"feature":"process_cpu","data":{"processes":[...]}}
 {"ts":1718150401000,"feature":"cpu_utilization","data":{"user_pct":13.1,...}}
 ...
 ```
@@ -362,16 +362,16 @@ class ReplayEngine implements DataSource {
 | Feature | Category | Tier | 激活方式 |
 |---------|----------|------|---------|
 | `cpu_utilization` | cpu | 1 | 进入 CPU 页自动启动 |
-| `cpu_processes` | cpu | 1 | 进入 CPU/Process 页自动启动 |
+| `process_cpu` | cpu | 1 | 进入 CPU/Process 页自动启动 |
 | `cpu_profile` | cpu | 3 | 用户在 Process Detail 中点击启动 |
 | `offcpu_profile` | cpu | 3 | 用户在 Process Detail 中点击启动 |
-| `memory_utilization` | memory | 1 | 进入 Memory 页自动启动 |
-| `memory_processes` | memory | 1 | 进入 Memory/Process 页自动启动 |
+| `memory_utilization` | memory | 1 | 进入 Memory 页自动启动（前端 placeholder，后端 FeatureDriver 待实现） |
+| `memory_processes` | memory | 1 | 进入 Memory/Process 页自动启动（前端 placeholder，后端 FeatureDriver 待实现） |
 | `heap_profiler` | memory | 3 | 用户在 Process Detail 中点击启动 |
 | `io_monitor` | io | 2 | 进入 IO 页自动启动 |
 | `net_tracer` | network | 2 | 进入 Network 页自动启动 |
 | `sched_analysis` | scheduler | 2 | 进入 System 页自动启动 |
-| `gpu_monitor` | gpu | 1 | 进入 GPU 页自动启动 |
+| `gpu_monitor` | gpu | 1 | 进入 GPU 页自动启动（前端 placeholder，后端 FeatureDriver 待实现） |
 
 ---
 

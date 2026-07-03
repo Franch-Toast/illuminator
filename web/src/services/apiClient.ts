@@ -73,7 +73,7 @@ export const api = {
   setFeatureConfig: (name: string, config: Record<string, unknown>) =>
     post<{ status: string }>(`/api/v2/features/${name}/config`, config),
 
-  featureStart: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/start`, {}),
+  featureStart: (name: string, config?: Record<string, unknown>) => post<{ status: string }>(`/api/v2/features/${name}/start`, config ?? {}),
   featureStop: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/stop`, {}),
   featurePause: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/pause`, {}),
   featureResume: (name: string) => post<{ status: string }>(`/api/v2/features/${name}/resume`, {}),
@@ -92,12 +92,4 @@ export const api = {
 
   // ─── Plugin Hot-reload ────────────────────────────────────────────────
   pluginsReload: () => post<{ status: string; loaded: number; plugins: string[] }>('/api/v1/plugins/reload', {}),
-
-  // ─── Session API (Tier 3 profiling with auto-expiry) ──────────────────
-  createSession: (opts: { type: string; target_pids?: number[]; target_comms?: string[]; duration_sec?: number }) =>
-    post<{ session_id: string; type: string; status: string; started_at: number; expires_at?: number; duration_sec?: number }>('/api/v1/sessions', opts),
-  stopSession: (opts: { type: string }) =>
-    post<{ status: string; type: string; stopped: boolean }>('/api/v1/sessions/stop', opts),
-  listSessions: () =>
-    get<{ sessions: Array<{ type: string; category: string; status: string; uptime_ms: number }> }>('/api/v1/sessions'),
 }

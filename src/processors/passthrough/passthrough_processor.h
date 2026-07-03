@@ -18,7 +18,7 @@ namespace illuminator {
 // 完全不做任何处理，直接将输入 DataBatch 作为输出返回。
 // 典型用途：
 //   - 在未确定处理逻辑时作为占位节点
-//   - 测试 PipelineController 框架是否正常串联
+//   - 测试 Pipeline 框架是否正常串联
 //   - 性能基准测试（测量框架本身开销）
 class PassthroughProcessor : public ProcessorPlugin {
 public:

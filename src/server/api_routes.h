@@ -10,10 +10,9 @@
 //   1. 基础工具函数（JsonError、SetupAuthMiddleware）
 //   2. RegisterApiRoutes() — 核心 API 路由
 //      - /healthz:                健康检查（无需认证）
-//      - /api/v1/pipelines:       管道列表（PipelineController 管理的管道）
-//      - /api/v1/pipelines/:name/collect: 管道数据采集（已废弃，推荐使用 Feature API）
+//      - /api/v1/pipelines:       管道列表（FeatureBus 管理的管道）
+//      - /api/v1/pipelines/:name/collect: 同步采集（调试用）
 //      - /api/v1/channel_stats:   通道统计（所有管道的 AsyncChannel 指标）
-//      - /api/v1/query:           SQL 查询（只读，仅允许 SELECT 和 PRAGMA）
 //      - /metrics:                Prometheus 格式指标
 //      - /api/v1/internal_metrics: JSON 格式内部指标
 //   3. 录制 API
@@ -33,8 +32,8 @@
 //   /healthz 和 /metrics 不需要认证。
 //
 // 【API 版本演进】
-//   旧版 API（/api/v1/cpu/*、/api/v1/pipelines/:name/collect）已标记为
-//   Deprecated。旧 API 返回 Deprecation 和 Sunset 头，提示客户端迁移。
+//   v1 路由保留 pipelines/collect/channel_stats/metrics 等核心运维端点。
+//   Feature 管理通过 /api/v2/features/* 路由（定义在 main.cc 中）。
 // ============================================================================
 
 #pragma once
@@ -119,7 +118,7 @@ inline void SetupAuthMiddleware(httplib::Server& srv,
 // ============================================================================
 //
 // 注册 Illuminator 的核心 API 端点。所有管道状态通过 FeatureBus 查询。
-// PipelineController 已在 daemon 模式下移除（RFC v3）。
+// 所有管道状态通过 FeatureBus 查询（RFC v3）。
 inline void RegisterApiRoutes(httplib::Server& srv) {
     // ========================================================================
     // /healthz — 健康检查（无需认证）
@@ -169,12 +168,10 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
             });
 
     // ========================================================================
-    // /api/v1/pipelines/:name/collect — 同步采集（已废弃，通过 FeatureBus）
+    // /api/v1/pipelines/:name/collect — 同步采集（通过 FeatureBus）
     // ========================================================================
     srv.Get("/api/v1/pipelines/:name/collect",
             [](const httplib::Request& req, httplib::Response& res) {
-                res.set_header("Deprecation", "true");
-                res.set_header("Sunset", "2026-09-01");
                 auto name = req.path_params.at("name");
                 auto& bus = FeatureBus::Instance();
                 auto* drv = bus.GetDriver(name);
@@ -199,95 +196,6 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                 }
                 res.set_content(BatchToJson(**processed, name) + "\n",
                                 "application/json");
-            });
-
-    // ========================================================================
-    // 已废弃的旧 API 端点 — 通过 FeatureBus 采集
-    // ========================================================================
-    auto deprecated_collect = [](const std::string& feature_name,
-                                  httplib::Response& res) {
-        res.set_header("Deprecation", "true");
-        res.set_header("Sunset", "2026-09-01");
-        auto& bus = FeatureBus::Instance();
-        auto* drv = bus.GetDriver(feature_name);
-        if (!drv || !drv->GetPipeline()) {
-            JsonError(res, feature_name + " not found or inactive", 404);
-            return;
-        }
-        auto* source = drv->GetPipeline()->GetSource();
-        if (!source) { JsonError(res, "source not available"); return; }
-        auto result = source->Collect();
-        if (!result.ok()) { JsonError(res, result.status().message()); return; }
-        auto processed = drv->GetPipeline()->RunProcessors(std::move(*result));
-        if (!processed.ok()) { JsonError(res, processed.status().message()); return; }
-        res.set_content(BatchToJson(**processed, feature_name) + "\n",
-                        "application/json");
-    };
-
-    srv.Get("/api/v1/cpu/utilization",
-            [deprecated_collect](const httplib::Request&, httplib::Response& res) {
-                deprecated_collect("cpu_utilization", res);
-            });
-    srv.Get("/api/v1/cpu/processes",
-            [deprecated_collect](const httplib::Request&, httplib::Response& res) {
-                deprecated_collect("cpu_processes", res);
-            });
-    srv.Get("/api/v1/cpu/profile/flamegraph",
-            [deprecated_collect](const httplib::Request&, httplib::Response& res) {
-                deprecated_collect("cpu_profile", res);
-            });
-    srv.Get("/api/v1/cpu/profile/offcpu",
-            [deprecated_collect](const httplib::Request&, httplib::Response& res) {
-                deprecated_collect("offcpu_profile", res);
-            });
-    srv.Get("/api/v1/cpu/sched/summary",
-            [deprecated_collect](const httplib::Request&, httplib::Response& res) {
-                deprecated_collect("sched_analysis", res);
-            });
-
-    // ========================================================================
-    // 已废弃的 QueryExtra 端点 — 通过 FeatureBus 查询
-    // ========================================================================
-    auto query_handler = [](const std::string& feature_name,
-                             const std::string& query_name,
-                             const httplib::Request& req,
-                             httplib::Response& res) {
-        res.set_header("Deprecation", "true");
-        res.set_header("Sunset", "2026-09-01");
-        auto& bus = FeatureBus::Instance();
-        auto* drv = bus.GetDriver(feature_name);
-        if (!drv || !drv->GetPipeline()) {
-            JsonError(res, feature_name + " not found or inactive", 404);
-            return;
-        }
-        auto* source = drv->GetPipeline()->GetSource();
-        if (!source) { JsonError(res, "source not available"); return; }
-        QueryParams params;
-        for (auto& [k, v] : req.params) params[k] = v;
-        auto result = source->QueryExtra(query_name, params);
-        if (!result.ok()) { JsonError(res, result.status().message()); return; }
-        res.set_content(*result + "\n", "application/json");
-    };
-
-    srv.Get("/api/v1/cpu/profile/offcpu/snapshot",
-            [query_handler](const httplib::Request& req, httplib::Response& res) {
-                query_handler("offcpu_profile", "snapshot", req, res);
-            });
-    srv.Get("/api/v1/cpu/profile/oncpu/snapshot",
-            [query_handler](const httplib::Request& req, httplib::Response& res) {
-                query_handler("cpu_profile", "snapshot", req, res);
-            });
-    srv.Get("/api/v1/cpu/sched/history",
-            [query_handler](const httplib::Request& req, httplib::Response& res) {
-                query_handler("sched_analysis", "history", req, res);
-            });
-    srv.Get("/api/v1/cpu/sched/events",
-            [query_handler](const httplib::Request& req, httplib::Response& res) {
-                query_handler("sched_analysis", "events", req, res);
-            });
-    srv.Get("/api/v1/cpu/sched/wakeups",
-            [query_handler](const httplib::Request& req, httplib::Response& res) {
-                query_handler("sched_analysis", "wakeups", req, res);
             });
 
     // ========================================================================
@@ -322,14 +230,6 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                     "application/json");
             });
 
-    // ========================================================================
-    // /api/v1/query — SQL 查询端点（已废弃：无 always-on storage）
-    // ========================================================================
-    srv.Post("/api/v1/query",
-            [](const httplib::Request&, httplib::Response& res) {
-                JsonError(res, "SQL query endpoint deprecated in RFC v3. "
-                          "Use SSE stream for real-time data or recording API for persistence.", 410);
-            });
 
     // ========================================================================
     // /metrics — Prometheus 格式指标（无需认证）

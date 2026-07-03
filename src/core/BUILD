@@ -71,13 +71,12 @@ cc_library(
 
 cc_library(
     name = "engine",
-    srcs = ["engine/pipeline_controller.cc"],
     hdrs = [
         "engine/async_channel.h",
         "engine/feature_bus.h",
         "engine/feature_driver.h",
         "engine/infrastructure_manager.h",
-        "engine/pipeline_controller.h",
+        "engine/pipeline.h",
         "engine/timer_wheel.h",
     ],
     strip_include_prefix = "",

@@ -5,6 +5,7 @@ import { getDataSource } from '../../hooks/useDataSource'
 import type { FlameNode, StackSample as WorkerSample } from '../../workers/flameGraphWorker'
 
 interface StackSample {
+  pid: number
   comm: string
   tid: number
   stack: string[]
@@ -79,19 +80,21 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
 
     const newSamples: StackSample[] = rawSamples
       .map((s) => {
-        const kernelStack = (s.kernel_stack as Array<{ function_name?: string; address?: number }>) ?? []
-        const userStack = (s.user_stack as Array<{ function_name?: string; address?: number }>) ?? []
+        const kernelStack = (s.kernel_stack as Array<{ func?: string; addr?: number }>) ?? []
+        const userStack = (s.user_stack as Array<{ func?: string; addr?: number }>) ?? []
         return {
+          pid: (s.pid as number) ?? 0,
           comm: (s.comm as string) ?? '',
           tid: (s.tid as number) ?? 0,
           count: (s.count as number) ?? ((s.duration_ns as number) ? Math.round((s.duration_ns as number) / 1000) : 1),
           timestamp: now,
           stack: [
-            ...kernelStack.map(f => cleanFrameName(f.function_name, f.address)),
-            ...userStack.map(f => cleanFrameName(f.function_name, f.address)),
+            ...kernelStack.map(f => cleanFrameName(f.func, f.addr)),
+            ...userStack.map(f => cleanFrameName(f.func, f.addr)),
           ].filter(f => f !== ''),
         }
       })
+      .filter(s => s.pid === pid)
 
     if (newSamples.length > 0) {
       accumulatedRef.current = [...accumulatedRef.current, ...newSamples]
@@ -151,13 +154,13 @@ export default function ProfileSnapshot({ pid, comm, profileType, timeSelection 
       return
     }
 
-    const featureName = profileType === 'off_cpu' ? 'offcpu_profile' : 'cpu_profile'
+    const featureName = profileType === 'off_cpu' ? 'offcpu_profiler' : 'cpu_profiler'
 
     const ds = getDataSource()
     const unsub = ds.subscribe(featureName, (batch) => {
       const data = batch.data as Record<string, unknown> | undefined
       if (!data) return
-      const rawSamples = (data.stack_samples as Array<Record<string, unknown>>) ?? []
+      const rawSamples = (data.samples as Array<Record<string, unknown>>) ?? []
       if (rawSamples.length > 0) {
         processCollectedData(rawSamples)
       }

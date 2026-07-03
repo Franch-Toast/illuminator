@@ -1,7 +1,10 @@
 # Illuminator 动态插件架构设计 v2 — 按需启停 · 实时流 · 录制回放
 
 > **版本**: 2.2  
-> **状态**: Phase 2 已实现（Tier 分层自动激活 + WebSocket 推送 + 资源预算 + ECharts）  
+> **状态**: ⚠️ **已过时 (Deprecated)** — 本文档描述基于 `FeatureManager` + `WebSocket` 的旧架构。  
+> **当前架构**: RFC v3 三层架构（`InfrastructureManager` + `FeatureBus` + `FeatureDriver`），SSE 替代 WebSocket。  
+> **参考文档**: `docs/rfc_data_contract_v2.md`（RFC v3 设计）、`docs/onboarding_guide.md`（入门指南）  
+> **保留原因**: 作为历史参考，Tier 分层交互理念在新架构中仍适用。  
 > **核心交互模型**: 分层自动激活（Tier 1/2 自动运行，Tier 3 手动触发）
 
 ---
