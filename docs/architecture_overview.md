@@ -1141,7 +1141,7 @@ web/src/
 |--------|------|-------------|------|
 | 实时推送 | SSE (Server-Sent Events) | WebSocket | 单向推送场景, 浏览器原生支持, 自动重连, 代理兼容 |
 | Buffer | 无 (直推) | StreamSinkStore (340行) | 实时推送/重连/录制均不需要 buffer |
-| PID 过滤 | 用户态过滤 + comm 动态学习 | BPF 内核态 tgid 过滤 | BPF tgid 在 PID namespace 下与用户态不一致，改用 comm 匹配自动发现 root ns PID |
+| PID 过滤 | `bpf_get_ns_current_pid_tgid()` BPF 内核态过滤 | 用户态 comm 学习 + 升级 | 内核 helper 零开销实现 namespace 透明，BPF 侧直接用 ns-local PID 过滤 |
 | Feature 管理 | 去中心化 FeatureDriver | 中心化 FeatureManager | 消除上帝类, 每个 Feature 自包含 |
 | 定时器 | timerfd + epoll + eventfd | condition_variable + priority_queue | 更高精度, 支持外部唤醒 |
 | Channel 出队 | 三级自适应退避 | 简单阻塞 | 高频时低延迟(spin), 低频时省 CPU(sleep) |
@@ -1167,20 +1167,30 @@ web/src/
 
 ---
 
-## 附录 C: PID Namespace 自动适配
+## 附录 C: PID Namespace 透明过滤
 
 ### 问题
 
-PID namespace 下 BPF 的 tgid 与用户态 PID 不同，导致过滤失败。
+容器或 PID namespace 环境下，BPF 的 bpf_get_current_pid_tgid() 返回 root namespace PID，与用户态 getpid() 的 namespace-local PID 不一致，导致 BPF PID 过滤失败。
 
-### 方案：comm 动态学习
+### 方案
 
-1. Reconfigure 时读取目标 `/proc/<pid>/comm`
-2. BPF 侧禁用 PID 过滤（收集全部事件）
-3. 用户态遍历 BPF map 时，先 PID 匹配，失败则 comm 匹配
-4. comm 匹配成功后动态学习 root ns TGID，后续直接 PID 过滤
+使用 Linux 5.7+ 的 bpf_get_ns_current_pid_tgid(dev, ino) helper：
+
+1. 用户态 stat("/proc/self/ns/pid") 获取 PID namespace 的 dev/ino
+2. 写入 BPF map (cpu_pidns_cfg / offcpu_pidns_cfg)
+3. BPF 调用 helper 将 root-ns PID 翻译为 namespace-local PID
+4. 直接用 namespace-local PID 过滤，零启动延迟
+
+### 优势
+
+- 启动即生效（无学习期）
+- BPF 内核态过滤（零用户态开销）
+- PID 精确匹配（无 comm 碰撞风险）
+- 代码简洁（约 20 行替代原 100+ 行 comm 学习机制）
 
 ### 代码路径
 
-- `offcpu_profiler.h`: `AllowPidWithComm()` + `ResolveNsPids()`
-- `cpu_profiler.h`: `SnapshotAggregatedCounts()` + `ResolveNsPids()`
+- event_types.h: struct il_pidns_config
+- cpu_profiler.bpf.c / offcpu_profiler.bpf.c: pidns_cfg map + ns helper
+- cpu_profiler.h / offcpu_profiler.h: ConfigurePidNamespace()

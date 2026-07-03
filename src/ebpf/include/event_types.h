@@ -60,6 +60,17 @@ typedef int32_t  il_s32;  // 32 位有符号整数
 #endif
 
 // ============================================================================
+// PID Namespace 配置（BPF 侧用于 bpf_get_ns_current_pid_tgid）
+// ============================================================================
+
+// il_pidns_config：用户态通过 stat("/proc/self/ns/pid") 获取 dev/ino，
+// 写入 BPF map，让 BPF 程序获取 namespace-local PID 进行过滤。
+struct il_pidns_config {
+    __u64 dev;   // PID namespace device number (stat.st_dev)
+    __u64 ino;   // PID namespace inode number (stat.st_ino)
+};
+
+// ============================================================================
 // 全局常量定义
 // ============================================================================
 

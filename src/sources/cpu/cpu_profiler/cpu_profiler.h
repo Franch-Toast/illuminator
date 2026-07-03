@@ -66,11 +66,9 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
-#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 #include <sys/ioctl.h>
@@ -415,19 +413,6 @@ public:
         auto comm_str = params["target_comms"].AsString("");
 
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
-        ResolveNsPids(target_pids_);
-        bpf_filter_upgraded_ = false;
-        target_comm_set_.clear();
-        for (uint32_t p : target_pids_) {
-            std::string comm_path = "/proc/" + std::to_string(p) + "/comm";
-            std::ifstream cf(comm_path);
-            if (cf.good()) {
-                std::string comm;
-                std::getline(cf, comm);
-                while (!comm.empty() && comm.back() == '\n') comm.pop_back();
-                if (!comm.empty()) target_comm_set_.insert(comm);
-            }
-        }
         target_comms_.clear();
         ParseCommaSeparatedStrings(comm_str, &target_comms_);
 
@@ -586,94 +571,32 @@ private:
     // ========================================================================
     // ApplyFilterMaps — 将过滤配置写入 eBPF 侧的配置 map
     // ========================================================================
-    // 将 PID 列表和进程名列表写入对应的 eBPF map（target_pids / target_comms），
-    // 同时设置 cpu_profiler_cfg 配置 map 中的标志位，告知 eBPF 程序是否启用过滤。
+    // 配置 PID namespace 翻译（bpf_get_ns_current_pid_tgid），使 BPF 可以
+    // 直接使用 namespace-local PID 进行过滤，无需 comm 学习等间接机制。
     // ========================================================================
-    // ResolveNsPids — 从 NStgid 解析所有命名空间层级的 PID
-    // ========================================================================
-    void ResolveNsPids(std::vector<uint32_t>& pids) {
-        std::vector<uint32_t> extra;
-        for (uint32_t pid : pids) {
-            std::string status_path = "/proc/" + std::to_string(pid) + "/status";
-            std::ifstream f(status_path);
-            if (!f.good()) continue;
-            std::string line;
-            while (std::getline(f, line)) {
-                if (line.compare(0, 7, "NStgid:") == 0) {
-                    std::istringstream iss(line.substr(7));
-                    uint32_t ns_pid;
-                    while (iss >> ns_pid) {
-                        if (ns_pid != pid) {
-                            extra.push_back(ns_pid);
-                            IL_INFO("cpu_profiler: added NStgid={} for pid={} "
-                                    "(PID namespace translation)", ns_pid, pid);
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        for (uint32_t p : extra)
-            pids.push_back(p);
-    }
-
-    // ========================================================================
-    // UpgradeToBpfPidFilter — 学习到 root ns PID 后重新启用 BPF 过滤
-    // ========================================================================
-    void UpgradeToBpfPidFilter(uint32_t root_ns_pid) {
-        if (bpf_filter_upgraded_) return;
-
-        int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
-        if (pid_fd < 0) return;
-
-        // 清空旧 map 并写入 root ns PID
-        uint32_t cur{}, next{};
-        int err = bpf_map_get_next_key(pid_fd, nullptr, &cur);
-        while (err == 0) {
-            uint32_t del = cur;
-            err = bpf_map_get_next_key(pid_fd, &cur, &next);
-            cur = next;
-            bpf_map_delete_elem(pid_fd, &del);
-        }
-
-        uint8_t one = 1;
-        bpf_map_update_elem(pid_fd, &root_ns_pid, &one, BPF_ANY);
-
-        // 启用 BPF PID 过滤 (bit1)
-        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
-        if (cfg_fd >= 0) {
-            uint32_t k = 0;
-            uint32_t flags = (stream_mode_ ? 1u : 0u) | 2u;  // +bit1(PID filter)
-            bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
-            IL_INFO("cpu_profiler: upgraded to BPF-side PID filter "
-                    "(root_pid={}, flags=0x{:x})", root_ns_pid, flags);
-        }
-
-        bpf_filter_upgraded_ = true;
-    }
-
     //
     // 标志位含义：
     //   位 0 (1): stream 模式
     //   位 1 (2): 启用 PID 过滤
     //   位 2 (4): 启用进程名过滤
     void ApplyFilterMaps() {
+        // 1. 配置 PID Namespace 翻译
+        ConfigurePidNamespace();
+
+        // 2. 设置配置标志位 — 启用 BPF-side PID 过滤
         int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
-        // 禁用 BPF 侧 PID 过滤（bit1），改为用户态过滤
-        // 原因：诊断发现 BPF bpf_map_lookup_elem 在 sched context 中
-        //       可能因 PID namespace 差异导致匹配失败
         uint32_t flags =
             (stream_mode_ ? 1u : 0u) |
-            // bit1 (PID filter) 不设置 — 由 SnapshotAggregatedCounts 用户态过滤
+            (!target_pids_.empty() ? 2u : 0u) |
             (!target_comms_.empty() ? 4u : 0u);
         if (cfg_fd >= 0) {
             uint32_t k = 0;
             bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
-            IL_INFO("cpu_profiler: BPF cfg_flags=0x{:x} (userspace PID filter)",
+            IL_INFO("cpu_profiler: BPF cfg_flags=0x{:x} (BPF-side PID filter, ns-aware)",
                     flags);
         }
 
-        // 仍然写入 PID 白名单（保留用于诊断和未来恢复 BPF 过滤）
+        // 3. 写入 PID 白名单（namespace-local PID，BPF 翻译后可直接匹配）
         int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
         if (pid_fd >= 0 && !target_pids_.empty()) {
             uint8_t one = 1;
@@ -681,7 +604,7 @@ private:
                 bpf_map_update_elem(pid_fd, &pid, &one, BPF_ANY);
         }
 
-        // 写入进程名白名单
+        // 4. 写入进程名白名单
         int comm_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_comms");
         if (comm_fd >= 0 && !target_comms_.empty()) {
             uint8_t one = 1;
@@ -691,6 +614,33 @@ private:
                             std::min(name.size(), sizeof(key) - 1));
                 bpf_map_update_elem(comm_fd, key, &one, BPF_ANY);
             }
+        }
+    }
+
+    // ========================================================================
+    // ConfigurePidNamespace — 将当前进程的 PID namespace dev/ino 写入 BPF map
+    // ========================================================================
+    // BPF 使用 bpf_get_ns_current_pid_tgid(dev, ino) 将内核态 root-ns PID
+    // 翻译为目标 namespace 的 local PID，实现零开销 namespace 透明过滤。
+    void ConfigurePidNamespace() {
+        int ns_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_pidns_cfg");
+        if (ns_fd < 0) return;
+
+        struct stat st = {};
+        if (stat("/proc/self/ns/pid", &st) != 0) {
+            IL_WARN("cpu_profiler: stat(/proc/self/ns/pid) failed: {}",
+                    strerror(errno));
+            return;
+        }
+
+        il_pidns_config cfg = {};
+        cfg.dev = static_cast<uint64_t>(st.st_dev);
+        cfg.ino = static_cast<uint64_t>(st.st_ino);
+
+        uint32_t k = 0;
+        if (bpf_map_update_elem(ns_fd, &k, &cfg, BPF_ANY) == 0) {
+            IL_INFO("cpu_profiler: configured pidns (dev={}, ino={}) for "
+                    "bpf_get_ns_current_pid_tgid", cfg.dev, cfg.ino);
         }
     }
 
@@ -748,23 +698,6 @@ private:
             uint64_t count = 0;
             if (bpf_map_lookup_elem(counts_fd_, &key, &count) != 0)
                 continue;
-
-            // 用户态 PID 过滤（启动时 BPF 侧禁用以学习 root ns PID）
-            if (!target_pids_.empty()) {
-                bool pid_match = std::find(target_pids_.begin(),
-                    target_pids_.end(), key.pid) != target_pids_.end();
-                if (!pid_match && !target_comm_set_.empty()) {
-                    std::string_view sv(key.comm, strnlen(key.comm, TASK_COMM_LEN));
-                    if (target_comm_set_.count(std::string(sv))) {
-                        target_pids_.push_back(key.pid);
-                        IL_INFO("cpu_profiler: learned root-ns pid={} via "
-                                "comm '{}' (PID namespace)", key.pid, sv);
-                        UpgradeToBpfPidFilter(key.pid);
-                        pid_match = true;
-                    }
-                }
-                if (!pid_match) continue;
-            }
 
             auto& sample = batch->AddStackSample();
             sample.pid = key.pid;
@@ -931,9 +864,7 @@ private:
 
     std::string bpf_obj_path_;                // eBPF 目标文件路径
     std::vector<uint32_t> target_pids_;       // 目标 PID 列表
-    std::unordered_set<std::string> target_comm_set_;  // 目标 comm（PID ns 自动匹配）
     std::vector<std::string> target_comms_;   // 目标进程名列表
-    bool bpf_filter_upgraded_ = false;
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};        // 运行中标志（线程安全）

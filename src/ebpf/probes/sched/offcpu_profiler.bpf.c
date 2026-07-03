@@ -152,6 +152,14 @@ struct {
     __type(value, __u8);
 } offcpu_target_comms SEC(".maps");
 
+// offcpu_pidns_cfg：PID Namespace 配置（用于 bpf_get_ns_current_pid_tgid）
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct il_pidns_config);
+} offcpu_pidns_cfg SEC(".maps");
+
 static __always_inline __u32 offcpu_cfg_flags(void) {
     __u32 k = 0;
     __u32 *p = bpf_map_lookup_elem(&offcpu_cfg, &k);
@@ -210,7 +218,23 @@ int trace_offcpu(struct trace_event_raw_sched_switch *ctx) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 prev_tgid = pid_tgid >> 32;
 
+    // PID Namespace 翻译：将 root-ns tgid 转为用户态可见的 namespace-local tgid
+    {
+        __u32 ns_key = 0;
+        struct il_pidns_config *ns_cfg = bpf_map_lookup_elem(&offcpu_pidns_cfg, &ns_key);
+        if (ns_cfg && ns_cfg->ino != 0) {
+            struct bpf_pidns_info ns_info = {};
+            long ret = bpf_get_ns_current_pid_tgid(
+                ns_cfg->dev, ns_cfg->ino, &ns_info, sizeof(ns_info));
+            if (ret == 0) {
+                prev_tgid = ns_info.tgid;
+                prev_tid = ns_info.pid;
+            }
+        }
+    }
+
     // PID 白名单过滤（flags bit2=4）：用 tgid 匹配，捕获进程的所有线程
+    // 此时 prev_tgid 已经是 namespace-local PID（如果配置了 pidns）
     if (flags & 4) {
         if (!bpf_map_lookup_elem(&offcpu_target_pids, &prev_tgid))
             goto phase2;

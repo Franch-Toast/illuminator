@@ -104,6 +104,16 @@ struct {
     __type(value, __u64);
 } stack_counts SEC(".maps");
 
+// cpu_pidns_cfg：PID Namespace 配置（用于 bpf_get_ns_current_pid_tgid）
+// 用户态通过 stat("/proc/self/ns/pid") 获取 dev/ino 并写入此 map
+// BPF 使用此信息将 root-ns PID 翻译为 namespace-local PID
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct il_pidns_config);
+} cpu_pidns_cfg SEC(".maps");
+
 // ============================================================================
 // on_cpu_sample：CPU 采样处理函数（perf_event 类型）
 //
@@ -127,12 +137,31 @@ int on_cpu_sample(struct bpf_perf_event_data *ctx) {
     // 高 32 位 = tgid（进程 ID），低 32 位 = pid（线程 ID）
     // ---------------------------------------------------------------
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;     // 进程 ID（tgid）
-    __u32 tid = (__u32)pid_tgid;    // 线程 ID（pid）
+    __u32 pid = pid_tgid >> 32;     // 进程 ID（tgid）— root namespace
+    __u32 tid = (__u32)pid_tgid;    // 线程 ID（pid）— root namespace
 
     // 跳过内核空闲任务（pid=0 是 idle task，没有有意义的用户态上下文）
     if (pid == 0)
         return 0;
+
+    // ---------------------------------------------------------------
+    // 步骤 1.5：PID Namespace 翻译
+    // 如果 cpu_pidns_cfg 有配置，使用 bpf_get_ns_current_pid_tgid()
+    // 将 root-ns PID 翻译为目标 namespace 的 local PID
+    // 这样 BPF 可以直接使用用户态传入的 namespace-local PID 进行过滤
+    // ---------------------------------------------------------------
+    __u32 ns_key = 0;
+    struct il_pidns_config *ns_cfg = bpf_map_lookup_elem(&cpu_pidns_cfg, &ns_key);
+    if (ns_cfg && ns_cfg->ino != 0) {
+        struct bpf_pidns_info ns_info = {};
+        long ret = bpf_get_ns_current_pid_tgid(
+            ns_cfg->dev, ns_cfg->ino, &ns_info, sizeof(ns_info));
+        if (ret == 0) {
+            pid = ns_info.tgid;
+            tid = ns_info.pid;
+        }
+        // ret != 0: 进程不在目标 namespace 中，使用 root-ns PID
+    }
 
     // ---------------------------------------------------------------
     // 步骤 2：读取配置标志位
@@ -147,6 +176,7 @@ int on_cpu_sample(struct bpf_perf_event_data *ctx) {
     // ---------------------------------------------------------------
     // 步骤 3：PID 白名单过滤（cfg bit1=2）
     // 如果启用了 PID 过滤但当前 pid 不在 target_pids 中，跳过本次采样
+    // 此时 pid 已经是 namespace-local PID（如果配置了 pidns）
     // ---------------------------------------------------------------
     if (cfg_flags & 2) {
         if (!bpf_map_lookup_elem(&target_pids, &pid))
