@@ -34,7 +34,7 @@
 #include "core/common/status.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
-#include "sinks/recording_sink/recording_sink.h"
+#include "plugin/sinks/recording_sink/recording_sink.h"
 
 namespace illuminator {
 

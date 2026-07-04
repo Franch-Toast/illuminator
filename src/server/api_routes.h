@@ -42,13 +42,13 @@
 
 #include "httplib.h"
 
-#include "core/common/self_observability.h"
+#include "core/engine/self_observability.h"
 #include "core/common/version_generated.h"
 #include "core/engine/feature_bus.h"
 #include "core/engine/feature_driver.h"
 #include "plugin/manager/plugin_manager.h"
-#include "serialization/json_serializer.h"
-#include "sinks/recording_sink/recording_sink.h"
+#include "cli/json_serializer.h"
+#include "plugin/sinks/recording_sink/recording_sink.h"
 
 namespace illuminator {
 

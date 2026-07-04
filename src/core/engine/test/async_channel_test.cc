@@ -1,7 +1,7 @@
 // AsyncChannel 单元测试：入队/出队、丢弃策略、反压水位线与统计计数。
 
 #include "core/engine/async_channel.h"
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 
 #include <gtest/gtest.h>
 

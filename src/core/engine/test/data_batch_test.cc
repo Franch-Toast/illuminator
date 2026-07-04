@@ -1,6 +1,6 @@
 // DataBatch 单元测试：批次类型、记录/堆栈采样、Arena 字符串内部化、元数据与字段值类型。
 
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 
 #include <gtest/gtest.h>
 

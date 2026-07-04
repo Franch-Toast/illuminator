@@ -1,4 +1,17 @@
-load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+cc_library(
+    name = "json_serializer",
+    hdrs = ["json_serializer.h"],
+    strip_include_prefix = "",
+    include_prefix = "cli",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:common",
+        "//src/core:data",
+        "@nlohmann_json//:json",
+    ],
+)
 
 cc_binary(
     name = "illuminator",
@@ -9,14 +22,14 @@ cc_binary(
         "//src/core:engine",
         "//src/core:version",
         "//src/core:yaml_config",
-        "//src/features:all_drivers",
-        "//src/features:feature_registry",
+        "//src/plugin/features:all_drivers",
+        "//src/plugin/features:feature_registry",
         "//src/plugin:builtin",
         "//src/plugin:manager",
-        "//src/serialization:json_serializer",
+        ":json_serializer",
         "//src/server:http_server",
         "//src/server:api_routes",
         "//src/server:sse_handler",
-        "//src/storage:storage",
+        "//src/server/storage:storage",
     ],
 )

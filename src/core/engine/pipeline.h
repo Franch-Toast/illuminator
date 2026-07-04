@@ -41,10 +41,10 @@
 #include <vector>
 
 #include "core/common/logging.h"
-#include "core/common/self_observability.h"
+#include "core/engine/self_observability.h"
 #include "core/common/status.h"
 #include "core/engine/async_channel.h"
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 #include "core/threading/thread_pool.h"
 #include "core/threading/thread_util.h"
 #include "plugin/api/source_plugin.h"

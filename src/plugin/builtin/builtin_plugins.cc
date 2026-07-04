@@ -15,41 +15,41 @@
 #include "plugin/builtin/builtin_plugins.h"
 
 // ---- CPU 子系统 ----
-#include "sources/cpu/proc_stat_reader/proc_stat_reader.h"
-#include "sources/cpu/cpu_utilization/cpu_utilization.h"
-#include "sources/cpu/process_cpu/process_cpu.h"
-#include "sources/cpu/cpu_profiler/cpu_profiler.h"
+#include "plugin/sources/cpu/proc_stat_reader/proc_stat_reader.h"
+#include "plugin/sources/cpu/cpu_utilization/cpu_utilization.h"
+#include "plugin/sources/cpu/process_cpu/process_cpu.h"
+#include "plugin/sources/cpu/cpu_profiler/cpu_profiler.h"
 
 // ---- 调度子系统 ----
-#include "sources/sched/sched_analyzer/sched_analyzer.h"
-#include "sources/sched/ebpf_sched_tracer/ebpf_sched_tracer.h"
-#include "sources/sched/offcpu_profiler/offcpu_profiler.h"
+#include "plugin/sources/sched/sched_analyzer/sched_analyzer.h"
+#include "plugin/sources/sched/ebpf_sched_tracer/ebpf_sched_tracer.h"
+#include "plugin/sources/sched/offcpu_profiler/offcpu_profiler.h"
 
 // ---- I/O 子系统 ----
-#include "sources/io/ebpf_io_monitor/ebpf_io_monitor.h"
+#include "plugin/sources/io/ebpf_io_monitor/ebpf_io_monitor.h"
 
 // ---- 网络子系统 ----
-#include "sources/net/ebpf_net_tracer/ebpf_net_tracer.h"
+#include "plugin/sources/net/ebpf_net_tracer/ebpf_net_tracer.h"
 
 // ---- 数据处理器 ----
-#include "processors/passthrough/passthrough_processor.h"       // 透传处理器（无操作，测试用）
-#include "processors/filter/filter_processor.h"                  // 过滤处理器（按标签值丢弃记录）
-#include "processors/stack_symbolizer/stack_symbolizer.h"       // 堆栈符号化（地址 → 函数名，含 ELF 解析）
-#include "processors/stack_merger/stack_merger.h"               // 堆栈合并器（相同调用栈计数累加）
+#include "plugin/processors/passthrough/passthrough_processor.h"       // 透传处理器（无操作，测试用）
+#include "plugin/processors/filter/filter_processor.h"                  // 过滤处理器（按标签值丢弃记录）
+#include "plugin/processors/stack_symbolizer/stack_symbolizer.h"       // 堆栈符号化（地址 → 函数名，含 ELF 解析）
+#include "plugin/processors/stack_merger/stack_merger.h"               // 堆栈合并器（相同调用栈计数累加）
 
 // ---- 聚合器 ----
-#include "aggregators/cpu_stats_aggregator/cpu_stats_aggregator.h"  // CPU 统计聚合器
+#include "plugin/aggregators/cpu_stats_aggregator/cpu_stats_aggregator.h"  // CPU 统计聚合器
 
 // ---- 数据出口 ----
-#include "sinks/console_output/console_sink.h"                  // 控制台输出（文本/JSON 格式）
-#include "sinks/file_export/file_export_sink.h"                 // 文件导出（JSONL 格式）
-#include "sinks/local_storage/local_storage_sink.h"             // 本地存储（委托给 StorageBackend）
-#include "sinks/pprof_export/pprof_export_sink.h"               // pprof 格式导出（折叠栈兼容 FlameGraph）
-#include "sinks/prometheus_exposition/prometheus_sink.h"        // Prometheus 指标暴露
-#include "sinks/otlp_export/otlp_export_sink.h"                 // OTLP 导出（JSON over HTTP）
+#include "plugin/sinks/console_output/console_sink.h"                  // 控制台输出（文本/JSON 格式）
+#include "plugin/sinks/file_export/file_export_sink.h"                 // 文件导出（JSONL 格式）
+#include "plugin/sinks/local_storage/local_storage_sink.h"             // 本地存储（委托给 StorageBackend）
+#include "plugin/sinks/pprof_export/pprof_export_sink.h"               // pprof 格式导出（折叠栈兼容 FlameGraph）
+#include "plugin/sinks/prometheus_exposition/prometheus_sink.h"        // Prometheus 指标暴露
+#include "plugin/sinks/otlp_export/otlp_export_sink.h"                 // OTLP 导出（JSON over HTTP）
 
 // ---- 存储后端（强制链接） ----
-#include "storage/sqlite_backend/sqlite_backend.h"              // SQLite 持久化存储
+#include "server/storage/sqlite_backend/sqlite_backend.h"              // SQLite 持久化存储
 
 namespace illuminator {
 

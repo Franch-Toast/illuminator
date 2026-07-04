@@ -1087,33 +1087,89 @@ illuminator.yaml.example
 
 ```
 src/
-├── cli/main.cc                        daemon 入口 (RunDaemon + RunCollect)
+├── cli/                                CLI 入口 + 序列化
+│   ├── main.cc                         daemon 入口 (RunDaemon + RunCollect)
+│   └── json_serializer.h              DataBatch → JSON 序列化
 ├── core/
-│   ├── engine/
+│   ├── common/                         基础设施（无外部依赖）
+│   │   ├── status.h                   StatusCode + Status + StatusOr<T>
+│   │   ├── logging.h                  spdlog 封装 + IL_* 日志宏
+│   │   ├── config.h                   ConfigValue + PipelineConfig + GlobalConfig
+│   │   ├── yaml_config_loader.h       YAML 配置加载 (yaml-cpp)
+│   │   ├── data_batch.h              数据模型 (Record + StackSample + Arena)
+│   │   ├── string_util.h             通用工具函数
+│   │   └── proc_reader.h             /proc 文件系统解析库
+│   ├── engine/                        引擎运行时
 │   │   ├── infrastructure_manager.h   Layer 1: TimerWheel + CollectPool + SinkPool
 │   │   ├── feature_bus.h              Layer 2: Driver 注册与生命周期编排
 │   │   ├── feature_driver.h           Layer 3: Driver 基类 (Probe/Remove/BuildPipeline)
 │   │   ├── pipeline.h                 Pipeline 类 (AsyncChannel + ProcessThread)
 │   │   ├── timer_wheel.h              全局定时调度 (timerfd + epoll + eventfd)
 │   │   ├── async_channel.h            无锁通道 (variant<Data, Sentinel>)
-│   │   └── data_batch.h              数据模型 (Record + StackSample + Arena)
-│   ├── memory/
+│   │   └── self_observability.h       自监控 (InternalMetrics + ResourceLimiter)
+│   ├── memory/                        内存管理
 │   │   ├── arena.h                    碰撞指针内存分配器
 │   │   └── lock_free_queue.h          无锁环形队列 (CAS, 2^N 容量)
-│   └── common/
-│       ├── status.h                   StatusCode + Status + StatusOr<T>
-│       └── config.h                   ConfigValue + PipelineConfig + GlobalConfig
-├── features/
-│   ├── feature_registry.h             REGISTER_FEATURE() 宏 + RegisterAll()
-│   ├── cpu_utilization_driver.h       典型 Tier 1 Driver 实现
-│   └── ...                            其他 Driver
-├── server/
-│   ├── api_routes.h                   REST API 路由注册
-│   └── sse_handler.h                  SSE 订阅管理 + SseSink 推送
-├── sources/                           数据源插件 (eBPF / procfs / sysfs)
-├── processors/                        处理器插件 (filter / symbolizer / merger)
-├── sinks/                             输出插件 (SSE / recording / console / storage)
-└── ebpf/                              BPF C 程序 + 加载器
+│   └── threading/                     线程管理
+│       ├── thread_pool.h              通用线程池 (生产者-消费者模式)
+│       └── thread_util.h              线程命名工具
+├── ebpf/                              BPF C 程序 + 加载器
+│   ├── include/                       vmlinux.h, event_types.h, bpf_compat.h
+│   ├── probes/                        BPF 程序 (cpu/sched/io/net/memory)
+│   └── loader/                        BpfProgramManager, FeatureProbe, StackTraceUtil
+├── plugin/                            完整插件体系
+│   ├── api/                           插件接口定义
+│   │   ├── plugin_api.h               Plugin 基类 + C ABI (IlPluginDescriptor)
+│   │   ├── source_plugin.h            Source 接口 (Pull/Push 模式)
+│   │   ├── processor_plugin.h         Processor 接口
+│   │   ├── aggregator_plugin.h        Aggregator 接口
+│   │   └── sink_plugin.h              Sink 接口
+│   ├── manager/                       插件管理
+│   │   ├── plugin_registry.h          集中式工厂注册表 (IL_REGISTER_* 宏)
+│   │   ├── plugin_manager.h           .so 插件发现与加载
+│   │   ├── so_loader.h                dlopen/dlsym 动态加载
+│   │   └── wasm_runtime.h             WASM 沙箱运行时 (预留)
+│   ├── builtin/                       内置插件强链接注册
+│   │   ├── builtin_plugins.h          声明
+│   │   └── builtin_plugins.cc         #include 所有内置插件头文件
+│   ├── features/                      FeatureDriver 编排层
+│   │   ├── feature_registry.h         REGISTER_FEATURE() 宏 + RegisterAll()
+│   │   ├── cpu_utilization_driver.h   典型 Tier 1 Driver 实现
+│   │   ├── process_cpu_driver.h
+│   │   ├── cpu_profiler_driver.h      Tier 3: eBPF CPU Profiler
+│   │   ├── offcpu_profiler_driver.h   Tier 3: eBPF Off-CPU Profiler
+│   │   ├── io_monitor_driver.h
+│   │   ├── net_tracer_driver.h
+│   │   └── sched_analyzer_driver.h
+│   ├── sources/                       数据源插件 (按 cpu/sched/io/net 分组)
+│   │   ├── ebpf_ring_buffer_source.h  eBPF Push Source 基类
+│   │   ├── cpu/                       cpu_utilization, process_cpu, cpu_profiler, proc_stat_reader
+│   │   ├── sched/                     sched_analyzer, offcpu_profiler, ebpf_sched_tracer
+│   │   ├── io/                        ebpf_io_monitor
+│   │   └── net/                       ebpf_net_tracer
+│   ├── processors/                    处理器插件
+│   │   ├── passthrough/               透传处理器 (测试用)
+│   │   ├── filter/                    标签过滤处理器
+│   │   ├── stack_symbolizer/          堆栈符号化 (ELF + kallsyms + demangle)
+│   │   └── stack_merger/              堆栈合并器
+│   ├── aggregators/                   聚合器插件
+│   │   └── cpu_stats_aggregator/      CPU 统计时间窗口聚合
+│   └── sinks/                         输出插件
+│       ├── console_output/            控制台输出 (文本/JSON)
+│       ├── file_export/               JSONL 文件导出
+│       ├── local_storage/             SQLite 本地存储
+│       ├── pprof_export/              pprof 折叠栈格式导出
+│       ├── prometheus_exposition/     Prometheus 指标暴露
+│       ├── otlp_export/               OTLP JSON over HTTP
+│       ├── recording_sink/            按需录制 (.ilr NDJSON)
+│       └── fanout/                    零拷贝多路分发
+└── server/                            服务层
+    ├── http_server.h                  cpp-httplib 封装
+    ├── api_routes.h                   REST API 路由 (控制面)
+    ├── sse_handler.h                  SSE 订阅管理 + SseSink 推送 (数据面)
+    └── storage/                       存储后端
+        ├── storage_backend.h          抽象接口 + 工厂
+        └── sqlite_backend/            SQLite 实现 (WAL 模式)
 
 web/src/
 ├── services/

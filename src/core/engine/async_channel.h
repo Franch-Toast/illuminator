@@ -58,7 +58,7 @@
 #include <thread>
 #include <variant>
 
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 #include "core/memory/lock_free_queue.h"
 
 namespace illuminator {

@@ -13,7 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "core/common/config.h"
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
 

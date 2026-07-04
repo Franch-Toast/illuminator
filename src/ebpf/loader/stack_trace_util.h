@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 #include "ebpf/include/event_types.h"
 
 namespace illuminator {

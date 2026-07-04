@@ -1373,7 +1373,7 @@ CLI `illuminator collect` 命令同样使用 `FeatureBus::ProbeAll()` → sleep 
 | `src/core/bus/feature_bus.h` | `src/core/engine/feature_bus.h` |
 | `src/core/driver/feature_driver.h` | `src/core/engine/feature_driver.h` |
 | (Pipeline 嵌入 PipelineController) | `src/core/engine/pipeline.h`（独立文件） |
-| `src/features/cpu_utilization_driver.h` | `src/features/cpu_utilization_driver.h` ✅ |
+| `src/plugin/features/cpu_utilization_driver.h` | `src/plugin/features/cpu_utilization_driver.h` ✅ |
 | `src/server/sse_handler.h` | `src/server/sse_handler.h` ✅ |
 
 ### 11.7 已实现的 7 个 FeatureDriver

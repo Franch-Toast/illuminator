@@ -30,7 +30,7 @@
 
 #include "core/common/config.h"
 #include "core/common/status.h"
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 
 namespace illuminator {
 

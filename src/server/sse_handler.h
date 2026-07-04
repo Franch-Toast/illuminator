@@ -36,7 +36,7 @@
 
 #include "core/common/logging.h"
 #include "core/common/status.h"
-#include "core/engine/data_batch.h"
+#include "core/common/data_batch.h"
 #include "plugin/api/sink_plugin.h"
 
 namespace illuminator {

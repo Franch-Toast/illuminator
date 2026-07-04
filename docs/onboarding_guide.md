@@ -287,7 +287,7 @@ FeatureDriver (每个 Feature 自包含)
 1. `src/core/engine/infrastructure_manager.h` — 共享基础设施（TimerWheel + CollectPool + SinkPool）
 2. `src/core/engine/feature_bus.h` — FeatureDriver 注册与生命周期编排
 3. `src/core/engine/feature_driver.h` — 自包含 Pipeline 构建与状态机
-4. `src/features/feature_registry.h` — `REGISTER_FEATURE` 宏自动注册
+4. `src/plugin/features/feature_registry.h` — `REGISTER_FEATURE` 宏自动注册
 5. `src/server/sse_handler.h` — SSE 订阅模型 + SseSink 推送
 6. `src/server/api_routes.h` — REST API + Recording API
 7. `web/src/services/dataBus.ts` — 前端 SSE 数据总线
@@ -317,9 +317,9 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 
 **必读文件**：
 1. `src/plugin/manager/plugin_registry.h` — 宏注册机制 `IL_REGISTER_*`
-2. `src/sources/cpu/cpu_utilization/cpu_utilization.h` — 最简单的 Pull Source
-3. `src/processors/filter/filter_processor.h` — 标签过滤 Processor
-4. `src/sinks/console_output/console_sink.h` — 最简单的 Sink
+2. `src/plugin/sources/cpu/cpu_utilization/cpu_utilization.h` — 最简单的 Pull Source
+3. `src/plugin/processors/filter/filter_processor.h` — 标签过滤 Processor
+4. `src/plugin/sinks/console_output/console_sink.h` — 最简单的 Sink
 
 ### 阶段六：eBPF 子系统（专项）
 
@@ -328,7 +328,7 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 **必读文件**：
 1. `src/ebpf/include/event_types.h` — 内核/用户态共享数据结构
 2. `src/ebpf/loader/bpf_program_manager.h` — libbpf 封装层
-3. `src/sources/ebpf_ring_buffer_source.h` — eBPF Push Source 公共基类
+3. `src/plugin/sources/ebpf_ring_buffer_source.h` — eBPF Push Source 公共基类
 4. `src/ebpf/probes/cpu/cpu_profiler.bpf.c` — BPF C 程序示例
 
 ---
@@ -530,8 +530,8 @@ SSE 订阅和控制面 API 均走 `/api/` 路径，通过 `SetupAuthMiddleware` 
 
 | 序号 | 文件 | 阅读重点 |
 |------|------|---------|
-| 15 | `src/features/feature_registry.h` | REGISTER_FEATURE 宏注册 |
-| 16 | `src/features/cpu_utilization_driver.h` | 典型 Tier 1 FeatureDriver |
+| 15 | `src/plugin/features/feature_registry.h` | REGISTER_FEATURE 宏注册 |
+| 16 | `src/plugin/features/cpu_utilization_driver.h` | 典型 Tier 1 FeatureDriver |
 | 17 | `src/server/sse_handler.h` | SSE 订阅模型 + SseSink 推送 |
 | 18 | `src/server/api_routes.h` | REST API 端点全景 |
 
@@ -555,7 +555,7 @@ SSE 订阅和控制面 API 均走 `/api/` 路径，通过 `SetupAuthMiddleware` 
 
 ### Step 1: 创建 FeatureDriver
 
-`src/features/memory_usage_driver.h`
+`src/plugin/features/memory_usage_driver.h`
 
 ```cpp
 #pragma once
@@ -597,7 +597,7 @@ REGISTER_FEATURE(MemoryUsageDriver);
 
 ### Step 2: 添加 BUILD 规则
 
-在 `src/features/BUILD` 中添加：
+在 `src/plugin/features/BUILD` 中添加：
 
 ```python
 cc_library(
@@ -611,12 +611,12 @@ cc_library(
         ":feature_registry",
         "//src/core:engine",
         "//src/server:sse_handler",
-        "//src/sources:memory_usage",
+        "//src/plugin/sources:memory_usage",
     ],
 )
 ```
 
-并在 `all_drivers` target 的 deps 中添加 `"//src/features:memory_usage_driver"`（或直接 `:memory_usage_driver`）。
+并在 `all_drivers` target 的 deps 中添加 `"//src/plugin/features:memory_usage_driver"`（或直接 `:memory_usage_driver`）。
 
 ### Step 3: 验证
 
@@ -853,14 +853,14 @@ server:
 | 管道怎么工作 | `src/core/engine/feature_driver.h`（BuildPipeline） |
 | 共享基础设施 | `src/core/engine/infrastructure_manager.h` |
 | Feature 注册与生命周期 | `src/core/engine/feature_bus.h` |
-| Feature 自动注册 | `src/features/feature_registry.h` |
+| Feature 自动注册 | `src/plugin/features/feature_registry.h` |
 | 配置怎么解析 | `src/core/config/yaml_config_loader.h` |
 | API 有哪些 | `src/server/api_routes.h` + `/api/v2/features/*` |
 | SSE 推送怎么做 | `src/server/sse_handler.h` |
-| 如何写 FeatureDriver | `src/features/cpu_utilization_driver.h` |
-| 如何写 Source | `src/sources/cpu/cpu_utilization/cpu_utilization.h` |
-| 如何写 Processor | `src/processors/filter/filter_processor.h` |
-| 如何写 Sink | `src/sinks/console_output/console_sink.h` |
+| 如何写 FeatureDriver | `src/plugin/features/cpu_utilization_driver.h` |
+| 如何写 Source | `src/plugin/sources/cpu/cpu_utilization/cpu_utilization.h` |
+| 如何写 Processor | `src/plugin/processors/filter/filter_processor.h` |
+| 如何写 Sink | `src/plugin/sinks/console_output/console_sink.h` |
 | 错误怎么处理 | `src/core/common/status.h` |
 | 内存怎么管理 | `src/core/memory/arena.h` |
 | 线程怎么调度 | `src/core/engine/timer_wheel.h` |

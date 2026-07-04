@@ -20,7 +20,6 @@ cc_library(
         "common/status.h",
         "common/logging.h",
         "common/config.h",
-        "common/self_observability.h",
         "common/string_util.h",
         "common/proc_reader.h",
     ],
@@ -58,7 +57,7 @@ cc_library(
 cc_library(
     name = "data",
     hdrs = [
-        "engine/data_batch.h",
+        "common/data_batch.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -78,6 +77,7 @@ cc_library(
         "engine/infrastructure_manager.h",
         "engine/pipeline.h",
         "engine/timer_wheel.h",
+        "engine/self_observability.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
@@ -89,15 +89,15 @@ cc_library(
         ":threading",
         "//src/plugin:api",
         "//src/plugin:manager",
-        "//src/sinks:recording_sink",
-        "//src/storage:storage",
+        "//src/plugin/sinks:recording_sink",
+        "//src/server/storage:storage",
     ],
 )
 
 cc_library(
     name = "yaml_config",
     hdrs = [
-        "config/yaml_config_loader.h",
+        "common/yaml_config_loader.h",
     ],
     strip_include_prefix = "",
     include_prefix = "core",
