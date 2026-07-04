@@ -132,7 +132,7 @@ Source (数据源) → AsyncChannel → Processor (处理器) → Aggregator (�
 ```
 
 **必读文件**：
-1. `src/core/engine/data_batch.h` — 数据的"容器"长什么样
+1. `src/core/common/data_batch.h` — 数据的"容器"长什么样
 2. `src/plugin/api/source_plugin.h` — Pull 模式 vs Push 模式
 3. `src/plugin/api/sink_plugin.h` — 数据最终去向
 
@@ -311,7 +311,7 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 **必读文件**：
 1. `illuminator.yaml.example` — 完整配置参考
 2. `src/core/common/config.h` — `ConfigValue`, `PipelineConfig`, `GlobalConfig` 三层结构
-3. `src/core/config/yaml_config_loader.h` — YAML → GlobalConfig 的转换逻辑
+3. `src/core/common/yaml_config_loader.h` — YAML → GlobalConfig 的转换逻辑
 
 ### 阶段五：理解插件系统（Day 2-3）
 
@@ -513,7 +513,7 @@ SSE 订阅和控制面 API 均走 `/api/` 路径，通过 `SetupAuthMiddleware` 
 |------|------|---------|
 | 6 | `src/core/common/status.h` | `StatusCode`/`Status::Wrap()`/`StatusOr<T>` |
 | 7 | `src/core/common/config.h` | `ConfigValue`/`PipelineConfig`/`GlobalConfig` |
-| 8 | `src/core/engine/data_batch.h` | `Record`/`StackSample`/`DataBatch` + Arena |
+| 8 | `src/core/common/data_batch.h` | `Record`/`StackSample`/`DataBatch` + Arena |
 
 ### 第三轮：管道引擎（3 小时）
 
@@ -849,12 +849,12 @@ server:
 | 你想了解... | 去看... |
 |------------|--------|
 | 程序入口 | `src/cli/main.cc` |
-| 数据长什么样 | `src/core/engine/data_batch.h` |
+| 数据长什么样 | `src/core/common/data_batch.h` |
 | 管道怎么工作 | `src/core/engine/feature_driver.h`（BuildPipeline） |
 | 共享基础设施 | `src/core/engine/infrastructure_manager.h` |
 | Feature 注册与生命周期 | `src/core/engine/feature_bus.h` |
 | Feature 自动注册 | `src/plugin/features/feature_registry.h` |
-| 配置怎么解析 | `src/core/config/yaml_config_loader.h` |
+| 配置怎么解析 | `src/core/common/yaml_config_loader.h` |
 | API 有哪些 | `src/server/api_routes.h` + `/api/v2/features/*` |
 | SSE 推送怎么做 | `src/server/sse_handler.h` |
 | 如何写 FeatureDriver | `src/plugin/features/cpu_utilization_driver.h` |

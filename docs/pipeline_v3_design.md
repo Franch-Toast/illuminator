@@ -641,29 +641,32 @@ FeatureBus::RemoveAll() + InfrastructureManager::Stop()
 ```
 src/
 ├── cli/
-│   └── main.cc                    # 命令行入口（daemon/collect/top/version/plugins/storage）
+│   ├── main.cc                    # 命令行入口（daemon/collect/top/version/plugins/storage）
+│   └── json_serializer.h          # DataBatch → JSON 序列化
 ├── core/
 │   ├── common/
-│   │   ├── config.h               # 配置结构体（GlobalConfig, PipelineConfig, EngineConfig）
+│   │   ├── config.h               # 配置结构体（ConfigValue, PipelineConfig, GlobalConfig）
+│   │   ├── yaml_config_loader.h   # YAML 配置解析
 │   │   ├── logging.h              # 日志工具
 │   │   ├── status.h               # Status/StatusOr 错误处理
-│   │   └── self_observability.h   # 内部指标（InternalMetrics, ResourceLimiter）
-│   ├── config/
-│   │   └── yaml_config_loader.h   # YAML 配置解析
-│   ├── engine/
 │   │   ├── data_batch.h           # 数据模型（Record, StackSample, DataBatch, Arena）
+│   │   ├── string_util.h          # 通用工具函数
+│   │   └── proc_reader.h          # /proc 文件系统解析库
+│   ├── engine/
 │   │   ├── async_channel.h        # 异步通道（variant<DataBatchPtr, FlushSentinel>, 三级退避）
 │   │   ├── timer_wheel.h          # 全局定时调度器（timerfd+epoll+eventfd+最小堆）
 │   │   ├── feature_driver.h       # Feature 驱动基类（BuildPipeline + Probe/Remove）
 │   │   ├── feature_bus.h           # Feature 注册与生命周期编排
 │   │   ├── infrastructure_manager.h # 共享基础设施（TimerWheel + CollectPool + SinkPool）
-│   │   └── pipeline.h             # Pipeline 类定义（独立于 FeatureDriver）
+│   │   ├── pipeline.h             # Pipeline 类定义（独立于 FeatureDriver）
+│   │   └── self_observability.h   # 内部指标（InternalMetrics, ResourceLimiter）
 │   ├── memory/
 │   │   ├── arena.h                # Arena 内存分配器（碰撞指针）
 │   │   └── lock_free_queue.h      # 无锁队列
 │   └── threading/
 │       ├── thread_pool.h          # 通用线程池
 │       └── thread_util.h          # 线程工具（SetThreadName）
+├── ebpf/                          # eBPF 探针程序（C 源码）+ 加载器
 ├── plugin/
 │   ├── api/
 │   │   ├── plugin_api.h           # Plugin 基类 + C ABI 接口
@@ -672,16 +675,18 @@ src/
 │   │   ├── aggregator_plugin.h    # Aggregator 插件抽象
 │   │   └── sink_plugin.h          # Sink 插件抽象
 │   ├── builtin/                   # 内置插件注册
-│   └── manager/                   # 插件管理器（注册表、so_loader、wasm_runtime）
-├── sources/                       # 数据源插件实现（CPU/内存/IO/网络/调度）
-├── processors/                    # 处理器插件实现（过滤/透传/符号化/栈合并）
-├── aggregators/                   # 聚合器插件实现（CPU 统计聚合）
-├── sinks/                         # 数据出口插件实现（10+ 种）
-│   ├── recording_sink/            # 录制 Sink（供 API 录制回放）
-├── ebpf/                          # eBPF 探针程序（C 源码）+ 加载器
-├── server/                        # HTTP 服务器 + API 路由 + WebSocket 管理
-├── storage/                       # 存储后端抽象 + SQLite 实现
-└── serialization/                 # JSON 序列化
+│   ├── manager/                   # 插件管理器（注册表、so_loader、wasm_runtime）
+│   ├── features/                  # FeatureDriver 编排层
+│   ├── sources/                   # 数据源插件（CPU/内存/IO/网络/调度）
+│   ├── processors/                # 处理器插件（过滤/透传/符号化/栈合并）
+│   ├── aggregators/               # 聚合器插件（CPU 统计聚合）
+│   └── sinks/                     # 数据出口插件（10+ 种）
+│       └── recording_sink/        # 录制 Sink（供 API 录制回放）
+└── server/
+    ├── http_server.h              # HTTP 服务器封装
+    ├── api_routes.h               # REST API 路由 + WebSocket 管理
+    ├── sse_handler.h              # SSE 订阅管理 + SseSink 推送
+    └── storage/                   # 存储后端抽象 + SQLite 实现
 ```
 
 ### 9.2 组件依赖图
