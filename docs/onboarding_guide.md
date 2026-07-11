@@ -327,9 +327,10 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 
 **必读文件**：
 1. `src/ebpf/include/event_types.h` — 内核/用户态共享数据结构
-2. `src/ebpf/loader/bpf_program_manager.h` — libbpf 封装层
-3. `src/plugin/sources/ebpf_ring_buffer_source.h` — eBPF Push Source 公共基类
+2. `src/plugin/sources/ebpf_skeleton_source.h` — eBPF Skeleton Push Source 基类（bpftool gen skeleton）
+3. `src/ebpf/probes/bpf_probe.bzl` — BPF 编译与 skeleton 生成 Bazel 规则
 4. `src/ebpf/probes/cpu/cpu_profiler.bpf.c` — BPF C 程序示例
+5. `src/plugin/sources/cpu/cpu_profiler/cpu_profiler.h` — 复杂 skeleton 源示例
 
 ---
 
@@ -864,7 +865,7 @@ server:
 | 错误怎么处理 | `src/core/common/status.h` |
 | 内存怎么管理 | `src/core/memory/arena.h` |
 | 线程怎么调度 | `src/core/engine/timer_wheel.h` |
-| eBPF 怎么加载 | `src/ebpf/loader/bpf_program_manager.h` |
+| eBPF 怎么加载 | `src/plugin/sources/ebpf_skeleton_source.h`（skeleton 基类）|
 | 前端数据流 | `web/src/services/dataBus.ts` |
 | 前端 SSE 传输层 | `web/src/services/sseLink.ts` |
 | 前端路由 | `web/src/App.tsx` |
@@ -924,7 +925,7 @@ server:
                │
 ┌──────────────▼──────────────────────────────────────────┐
 │              eBPF Subsystem                              │
-│  BpfProgramManager | FeatureProbe | StackTraceUtil      │
+│  libbpf Skeleton | FeatureProbe | StackTraceUtil        │
 │  7 probes: cpu_profiler/sampler, offcpu, sched(×2),     │
 │            bio_latency, net_tracer                       │
 │  vmlinux.h | event_types.h (kernel/userspace shared)    │

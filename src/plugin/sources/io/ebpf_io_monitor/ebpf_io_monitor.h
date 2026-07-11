@@ -1,8 +1,9 @@
 // ============================================================================
-// EbpfIoMonitor — eBPF 块设备 I/O 延迟监控器（Push 模式）
+// EbpfIoMonitor — eBPF 块设备 I/O 延迟监控器（Skeleton Push 模式）
 // ============================================================================
 //
-// 继承 EbpfRingBufferSource 基类，仅实现 I/O 事件特有的配置和事件解析。
+// 使用 bpftool gen skeleton 生成的类型安全骨架加载 BPF 程序。
+// BPF 字节码嵌入二进制，无需外部 .bpf.o 文件。
 //
 // eBPF tracepoint: block_rq_issue + block_rq_complete
 // 输出: pid, comm, latency_us, sector, nr_sector, rw
@@ -12,25 +13,22 @@
 
 #include <cstring>
 
+#include "bio_latency_sk.skel.h"
 #include "ebpf/include/event_types.h"
-#include "plugin/sources/ebpf_ring_buffer_source.h"
+#include "plugin/sources/ebpf_skeleton_source.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
-class EbpfIoMonitor : public EbpfRingBufferSource {
+IL_DEFINE_SKEL_OPS(BioLatencySkelOps, bio_latency_sk,
+                   bio_events, collection_gate, "io-poll");
+
+class EbpfIoMonitor : public EbpfSkeletonSource<BioLatencySkelOps> {
 public:
     const char* Name() const override { return "ebpf_io_monitor"; }
-    const char* Version() const override { return "0.1.0"; }
+    const char* Version() const override { return "0.2.0"; }
 
 protected:
-    EbpfSourceBpfConfig BpfConfig() const override {
-        return {"bio_latency",
-                {"trace_block_rq_issue", "trace_block_rq_complete"},
-                "bio_events",
-                "io-poll"};
-    }
-
     ring_buffer_sample_fn EventCallback() const override {
         return HandleEvent;
     }

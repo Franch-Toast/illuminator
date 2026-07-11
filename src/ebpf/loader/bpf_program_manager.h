@@ -48,6 +48,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/common/logging.h"
@@ -81,7 +82,8 @@ public:
     ~BpfProgramManager() {
         DetachAll();
         for (auto& [name, obj] : objects_) {
-            if (obj) bpf_object__close(obj);
+            if (obj && skeleton_owned_.find(name) == skeleton_owned_.end())
+                bpf_object__close(obj);
         }
     }
 
@@ -126,6 +128,23 @@ public:
         objects_[name] = obj;
         IL_INFO("Loaded BPF object: {} from {}", name, path);
         return Status::Ok();
+    }
+
+    // ------------------------------------------------------------------------
+    // RegisterSkeletonObject：注册由 skeleton 管理的 BPF 对象
+    //
+    // 将 skeleton 的 bpf_object* 注册到管理器，使 GetMapFd/GetProgFd/
+    // AttachProgram 等方法可以正常使用。对象生命周期由 skeleton 管理（
+    // 通过 xxx_bpf__destroy），管理器析构时不会 close 这些对象。
+    //
+    // 参数：
+    //   name - 逻辑对象名（与 GetMapFd 等调用时使用的名称一致）
+    //   obj  - skeleton 的 bpf_object 指针（skel->obj）
+    // ------------------------------------------------------------------------
+    void RegisterSkeletonObject(const std::string& name, struct bpf_object* obj) {
+        objects_[name] = obj;
+        skeleton_owned_.insert(name);
+        IL_INFO("Registered skeleton BPF object: {}", name);
     }
 
     // ------------------------------------------------------------------------
@@ -281,9 +300,10 @@ public:
     }
 
 private:
-    KernelFeatures features_;  // 内核特性探测结果（BTF/ring buffer/版本等）
-    std::unordered_map<std::string, struct bpf_object*> objects_;  // 对象名→BPF对象的映射
-    std::vector<struct bpf_link*> links_;  // 所有已附加 bpf_link 的列表，用于批量分离
+    KernelFeatures features_;
+    std::unordered_map<std::string, struct bpf_object*> objects_;
+    std::unordered_set<std::string> skeleton_owned_;  // skeleton 管理的对象名，析构时跳过
+    std::vector<struct bpf_link*> links_;
 };
 
 }  // namespace illuminator

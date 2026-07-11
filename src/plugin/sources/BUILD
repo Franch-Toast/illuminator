@@ -3,22 +3,21 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 # Source plugins — organized by subsystem (cpu, sched, io, net)
 
 # ============================================================================
-# eBPF common base class
+# eBPF Skeleton-based Push Source base class
 # ============================================================================
 
 cc_library(
-    name = "ebpf_ring_buffer_source",
-    hdrs = ["ebpf_ring_buffer_source.h"],
+    name = "ebpf_skeleton_source",
+    hdrs = ["ebpf_skeleton_source.h"],
     strip_include_prefix = "",
     include_prefix = "plugin/sources",
     visibility = ["//visibility:public"],
+    linkopts = ["-lbpf", "-lelf", "-lz"],
     deps = [
         "//src/core:common",
         "//src/core:threading",
-        "//src/ebpf:common_bpf_types",
         "//src/ebpf:loader",
         "//src/plugin:api",
-        "//src/plugin:manager",
     ],
 )
 
@@ -80,8 +79,8 @@ cc_library(
         "//src/core:common",
         "//src/core:threading",
         "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
         "//src/ebpf:stack_trace_util",
+        "//src/ebpf/probes:cpu_profiler_sk_skel",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],
@@ -102,7 +101,7 @@ cc_library(
         "//src/core:common",
         "//src/core:threading",
         "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
+        "//src/ebpf/probes:sched_analyzer_sk_skel",
         "//src/plugin:api",
         "//src/plugin:manager",
         "@nlohmann_json//:json",
@@ -117,11 +116,10 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
-        ":ebpf_ring_buffer_source",
+        ":ebpf_skeleton_source",
         "//src/core:common",
-        "//src/core:threading",
         "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
+        "//src/ebpf/probes:sched_tracer_sk_skel",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],
@@ -138,8 +136,8 @@ cc_library(
         "//src/core:common",
         "//src/core:threading",
         "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
         "//src/ebpf:stack_trace_util",
+        "//src/ebpf/probes:offcpu_profiler_sk_skel",
         "//src/plugin/processors:stack_symbolizer",
         "//src/plugin:api",
         "//src/plugin:manager",
@@ -159,11 +157,10 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
-        ":ebpf_ring_buffer_source",
+        ":ebpf_skeleton_source",
         "//src/core:common",
-        "//src/core:threading",
         "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
+        "//src/ebpf/probes:bio_latency_sk_skel",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],
@@ -181,11 +178,10 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
-        ":ebpf_ring_buffer_source",
+        ":ebpf_skeleton_source",
         "//src/core:common",
-        "//src/core:threading",
         "//src/ebpf:common_bpf_types",
-        "//src/ebpf:loader",
+        "//src/ebpf/probes:net_tracer_sk_skel",
         "//src/plugin:api",
         "//src/plugin:manager",
     ],

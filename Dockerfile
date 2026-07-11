@@ -62,11 +62,9 @@ RUN printf '#!/bin/bash\necho "STABLE_GIT_VERSION %s"\necho "STABLE_GIT_COMMIT %
     "${GIT_VERSION}" "${GIT_COMMIT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > tools/workspace_status.sh && chmod +x tools/workspace_status.sh
 
-# Build the backend binary and BPF probes (optimized)
-RUN bazel build //src/cli:illuminator //src/ebpf/probes:all --config=opt \
-    && cp bazel-bin/src/cli/illuminator /app/illuminator-bin \
-    && mkdir -p /app/bpf \
-    && cp bazel-bin/src/ebpf/probes/*.bpf.o /app/bpf/
+# Build the backend binary (BPF bytecode is embedded via skeleton)
+RUN bazel build //src/cli:illuminator --config=opt \
+    && cp bazel-bin/src/cli/illuminator /app/illuminator-bin
 
 # ---------------------------------------------------------------------------
 # Stage 3: Runtime Image (minimal)
@@ -88,7 +86,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/illuminator
 
 COPY --from=backend-builder /app/illuminator-bin ./illuminator
-COPY --from=backend-builder /app/bpf ./bpf
+# BPF bytecode now embedded in binary via skeleton — no external .bpf.o files needed
 COPY --from=frontend-builder /app/web/dist ./web/dist
 COPY illuminator.yaml.example ./illuminator.yaml
 

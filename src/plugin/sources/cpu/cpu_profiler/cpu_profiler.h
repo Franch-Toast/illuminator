@@ -83,11 +83,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cpu_profiler_sk.skel.h"
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
 #include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
-#include "ebpf/loader/bpf_program_manager.h"
 #include "ebpf/loader/stack_trace_util.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
@@ -228,11 +228,6 @@ public:
         auto mode = config["mode"].AsString("aggregated");
         stream_mode_ = (mode == "stream");
 
-        bpf_obj_path_ = config["bpf_object"].AsString("");
-        if (bpf_obj_path_.empty()) {
-            bpf_obj_path_ = AutoDiscoverBpfObject("cpu_profiler.bpf.o");
-        }
-
         target_pids_ =
             ParseCommaSeparated<uint32_t>(config["target_pids"].AsString(""));
         ParseCommaSeparatedStrings(config["target_comms"].AsString(""),
@@ -257,21 +252,26 @@ public:
     // 3. 将 eBPF 程序挂载到 perf_event（PERF_EVENT_IOC_SET_BPF）
     // 4. 根据模式启动后台线程（stream → StreamPollLoop / aggregated → AggregatedPullLoop）
     Status Start() override {
-        if (bpf_obj_path_.empty()) {
-            IL_WARN("cpu_profiler: no bpf_object path; idle mode");
+        // Skeleton 模式：从嵌入的字节码加载，无需外部 .bpf.o 文件
+        cpu_skel_ = cpu_profiler_sk_bpf__open();
+        if (!cpu_skel_) {
+            IL_WARN("cpu_profiler: skeleton open failed; idle mode");
             stub_mode_ = true;
             running_.store(false);
             return Status::Ok();
         }
 
-        // 加载 eBPF 对象
-        auto st = bpf_mgr_.LoadObject("cpu_profiler", bpf_obj_path_);
-        if (!st.ok())
-            return st;
+        int err = cpu_profiler_sk_bpf__load(cpu_skel_);
+        if (err) {
+            cpu_profiler_sk_bpf__destroy(cpu_skel_);
+            cpu_skel_ = nullptr;
+            return Status::Error(StatusCode::kInternal,
+                "cpu_profiler: skeleton load failed (err=" +
+                std::to_string(err) + ")");
+        }
 
-        // 获取堆栈 map 和计数 map 的文件描述符
-        int stacks_fd = bpf_mgr_.GetMapFd("cpu_profiler", "stacks");
-        int counts_fd = bpf_mgr_.GetMapFd("cpu_profiler", "stack_counts");
+        int stacks_fd = bpf_map__fd(cpu_skel_->maps.stacks);
+        int counts_fd = bpf_map__fd(cpu_skel_->maps.stack_counts);
         if (stacks_fd < 0 || counts_fd < 0) {
             return Status::Error(StatusCode::kInternal,
                                  "cpu_profiler: stacks/stack_counts maps missing");
@@ -281,12 +281,7 @@ public:
 
         ApplyFilterMaps();
 
-        // 获取 eBPF 程序的文件描述符（perf_event 回调入口）
-        int prog_fd = bpf_mgr_.GetProgFd("cpu_profiler", "on_cpu_sample");
-        if (prog_fd < 0) {
-            return Status::Error(StatusCode::kInternal,
-                                 "cpu_profiler: on_cpu_sample program missing");
-        }
+        int prog_fd = bpf_program__fd(cpu_skel_->progs.on_cpu_sample);
 
         // per-CPU 模式：系统全局采样，BPF 内核态 tgid 过滤
         {
@@ -345,12 +340,8 @@ public:
 
         // 根据模式启动对应的后台轮询线程
         if (stream_mode_) {
-            int rb_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_events");
-            if (rb_fd < 0) {
-                return Status::Error(StatusCode::kInternal,
-                                     "cpu_profiler: cpu_events ringbuf missing");
-            }
-            ring_buf_ = bpf_mgr_.CreateRingBuffer(rb_fd, HandleStreamEvent, this);
+            int rb_fd = bpf_map__fd(cpu_skel_->maps.cpu_events);
+            ring_buf_ = ring_buffer__new(rb_fd, HandleStreamEvent, this, nullptr);
             if (!ring_buf_) {
                 return Status::Error(StatusCode::kInternal,
                                      "cpu_profiler: ring buffer init failed");
@@ -398,7 +389,11 @@ public:
         }
         perf_fds_.clear();
 
-        bpf_mgr_.DetachAll();
+        if (cpu_skel_) {
+            cpu_profiler_sk_bpf__destroy(cpu_skel_);
+            cpu_skel_ = nullptr;
+        }
+
         return Status::Ok();
     }
 
@@ -417,7 +412,7 @@ public:
         ParseCommaSeparatedStrings(comm_str, &target_comms_);
 
         // Clear existing PID map entries
-        int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
+        int pid_fd = bpf_map__fd(cpu_skel_->maps.target_pids);
         if (pid_fd >= 0) {
             uint32_t cur{};
             uint32_t next{};
@@ -433,7 +428,7 @@ public:
         }
 
         // Clear existing comm map entries
-        int comm_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_comms");
+        int comm_fd = bpf_map__fd(cpu_skel_->maps.target_comms);
         if (comm_fd >= 0) {
             char cur_key[TASK_COMM_LEN] = {};
             char next_key[TASK_COMM_LEN] = {};
@@ -483,52 +478,13 @@ public:
     }
 
 private:
-    static std::string AutoDiscoverBpfObject(const char* filename) {
-        auto try_path = [](const std::string& p) -> std::string {
-            struct stat st;
-            if (stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode))
-                return p;
-            return {};
-        };
-
-        // 1. Relative to CWD
-        auto r = try_path(std::string("build/bpf/") + filename);
-        if (!r.empty()) return r;
-
-        // 2. Relative to binary location
-        char exe_path[PATH_MAX] = {};
-        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-        if (len > 0) {
-            exe_path[len] = '\0';
-            std::string dir(exe_path);
-            auto slash = dir.rfind('/');
-            if (slash != std::string::npos) {
-                dir = dir.substr(0, slash);
-                r = try_path(dir + "/bpf/" + filename);
-                if (!r.empty()) return r;
-                r = try_path(dir + "/../build/bpf/" + filename);
-                if (!r.empty()) return r;
-                r = try_path(dir + "/" + filename);
-                if (!r.empty()) return r;
-            }
-        }
-
-        // 3. Common system paths
-        r = try_path(std::string("/usr/lib/illuminator/bpf/") + filename);
-        if (!r.empty()) return r;
-        r = try_path(std::string("/opt/illuminator/bpf/") + filename);
-        if (!r.empty()) return r;
-
-        return {};
-    }
-
     // ========================================================================
     // RebuildPerfEvents — 根据当前 target_pids_ 重建 perf events
     // ========================================================================
     // 在 Reconfigure 时调用。关闭旧的 perf_event FDs，根据新的
     // target_pids_ 重新创建（per-PID 或 per-CPU 模式）。
     void RebuildPerfEvents() {
-        int prog_fd = bpf_mgr_.GetProgFd("cpu_profiler", "on_cpu_sample");
+        int prog_fd = bpf_program__fd(cpu_skel_->progs.on_cpu_sample);
         if (prog_fd < 0) return;
 
         for (int fd : perf_fds_) {
@@ -584,7 +540,7 @@ private:
         ConfigurePidNamespace();
 
         // 2. 设置配置标志位 — 启用 BPF-side PID 过滤
-        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
         uint32_t flags =
             (stream_mode_ ? 1u : 0u) |
             (!target_pids_.empty() ? 2u : 0u) |
@@ -597,7 +553,7 @@ private:
         }
 
         // 3. 写入 PID 白名单（namespace-local PID，BPF 翻译后可直接匹配）
-        int pid_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_pids");
+        int pid_fd = bpf_map__fd(cpu_skel_->maps.target_pids);
         if (pid_fd >= 0 && !target_pids_.empty()) {
             uint8_t one = 1;
             for (uint32_t pid : target_pids_)
@@ -605,7 +561,7 @@ private:
         }
 
         // 4. 写入进程名白名单
-        int comm_fd = bpf_mgr_.GetMapFd("cpu_profiler", "target_comms");
+        int comm_fd = bpf_map__fd(cpu_skel_->maps.target_comms);
         if (comm_fd >= 0 && !target_comms_.empty()) {
             uint8_t one = 1;
             for (const auto& name : target_comms_) {
@@ -623,7 +579,7 @@ private:
     // BPF 使用 bpf_get_ns_current_pid_tgid(dev, ino) 将内核态 root-ns PID
     // 翻译为目标 namespace 的 local PID，实现零开销 namespace 透明过滤。
     void ConfigurePidNamespace() {
-        int ns_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_pidns_cfg");
+        int ns_fd = bpf_map__fd(cpu_skel_->maps.cpu_pidns_cfg);
         if (ns_fd < 0) return;
 
         struct stat st = {};
@@ -842,7 +798,7 @@ private:
     // 同时清除 cfg bit0 使 BPF 停止向 ringbuf 发射事件。
     Status PauseCollection() override {
         if (stub_mode_ || !stream_mode_) return Status::Ok();
-        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
         if (cfg_fd >= 0) {
             uint32_t k = 0, val = 0;
             bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
@@ -866,7 +822,7 @@ private:
         });
         for (int fd : perf_fds_)
             ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
         if (cfg_fd >= 0) {
             uint32_t k = 0;
             uint32_t flags = 1u |
@@ -901,15 +857,14 @@ private:
     bool stream_mode_ = false;
     bool stub_mode_ = false;
 
-    std::string bpf_obj_path_;                // eBPF 目标文件路径
     std::vector<uint32_t> target_pids_;       // 目标 PID 列表
     std::vector<std::string> target_comms_;   // 目标进程名列表
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
-    BpfProgramManager bpf_mgr_;
-    int stacks_fd_ = -1;                      // stacks map 的文件描述符
+    struct cpu_profiler_sk_bpf* cpu_skel_ = nullptr;
+    int stacks_fd_ = -1;
     int counts_fd_ = -1;                      // stack_counts map 的文件描述符
     std::vector<int> perf_fds_;               // 所有 perf_event 的文件描述符
     struct ring_buffer* ring_buf_ = nullptr;  // BPF ring buffer 句柄

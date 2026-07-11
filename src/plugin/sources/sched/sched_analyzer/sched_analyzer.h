@@ -61,11 +61,11 @@
 #include "ebpf/include/bpf_compat.h"
 #include <nlohmann/json.hpp>
 
+#include "sched_analyzer_sk.skel.h"
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
 #include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
-#include "ebpf/loader/bpf_program_manager.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
@@ -117,7 +117,6 @@ public:
         aggregate_interval_ms_ =
             static_cast<uint32_t>(config["aggregate_interval_ms"].AsInt(5000));
         track_migrations_ = config["track_migrations"].AsBool(true);
-        bpf_obj_path_ = config["bpf_object"].AsString("");
         target_pids_ = ParseCommaSeparated<uint32_t>(
             config["target_pids"].AsString(""));
         // 构建 PID 快速查找集合
@@ -136,51 +135,47 @@ public:
     //    （可选）sched/sched_migrate_task 等内核 tracepoint
     // 4. 详细模式下创建 ring buffer 和后台轮询线程
     Status Start() override {
-        if (bpf_obj_path_.empty()) {
-            IL_WARN("sched_analyzer: no bpf_object path; idle mode");
+        // Skeleton 模式：从嵌入的字节码加载
+        sched_skel_ = sched_analyzer_sk_bpf__open();
+        if (!sched_skel_) {
+            IL_WARN("sched_analyzer: skeleton open failed; idle mode");
             stub_mode_ = true;
             running_.store(false);
             return Status::Ok();
         }
 
-        // 加载 eBPF 对象
-        auto st = bpf_mgr_.LoadObject("sched_analyzer", bpf_obj_path_);
-        if (!st.ok())
-            return st;
+        int err = sched_analyzer_sk_bpf__load(sched_skel_);
+        if (err) {
+            sched_analyzer_sk_bpf__destroy(sched_skel_);
+            sched_skel_ = nullptr;
+            return Status::Error(StatusCode::kInternal,
+                "sched_analyzer: skeleton load failed (err=" +
+                std::to_string(err) + ")");
+        }
 
-        // 写入配置标志位到 eBPF 侧
-        // 位 0: detailed_mode, 位 1: track_migrations
+        // 写入配置标志位到 eBPF 侧（位 0: detailed, 位 1: migrations）
         uint32_t cfg_flags =
             (detailed_mode_ ? 1u : 0u) | (track_migrations_ ? 2u : 0u);
-        int cfg_fd = bpf_mgr_.GetMapFd("sched_analyzer", "sched_analyzer_cfg");
+        int cfg_fd = bpf_map__fd(sched_skel_->maps.sched_analyzer_cfg);
         if (cfg_fd >= 0) {
             uint32_t k = 0;
             bpf_map_update_elem(cfg_fd, &k, &cfg_flags, BPF_ANY);
         }
 
-        // 挂载 eBPF 程序到内核调度事件点
-        std::vector<std::string> progs = {"sched_analyzer_wakeup",
-                                          "sched_analyzer_switch"};
-        if (track_migrations_)
-            progs.push_back("sched_analyzer_migrate");
+        // Skeleton 自动 attach 所有程序
+        int err2 = sched_analyzer_sk_bpf__attach(sched_skel_);
+        if (err2) {
+            sched_analyzer_sk_bpf__destroy(sched_skel_);
+            sched_skel_ = nullptr;
+            return Status::Error(StatusCode::kInternal,
+                "sched_analyzer: attach failed (err=" + std::to_string(err2) + ")");
+        }
 
-        st = bpf_mgr_.AttachPrograms("sched_analyzer", progs);
-        if (!st.ok())
-            return st;
+        agg_fd_ = bpf_map__fd(sched_skel_->maps.sched_agg);
 
-        // 获取聚合 map 的文件描述符
-        agg_fd_ = bpf_mgr_.GetMapFd("sched_analyzer", "sched_agg");
-
-        // 详细模式：创建 ring buffer 和后台轮询线程
         if (detailed_mode_) {
-            int rb_fd =
-                bpf_mgr_.GetMapFd("sched_analyzer", "sched_analyzer_events");
-            if (rb_fd < 0) {
-                return Status::Error(StatusCode::kInternal,
-                                     "sched_analyzer_events ringbuf missing");
-            }
-            ring_buf_ =
-                bpf_mgr_.CreateRingBuffer(rb_fd, HandleDetailedEvent, this);
+            int rb_fd = bpf_map__fd(sched_skel_->maps.sched_analyzer_events);
+            ring_buf_ = ring_buffer__new(rb_fd, HandleDetailedEvent, this, nullptr);
             if (!ring_buf_) {
                 return Status::Error(StatusCode::kInternal,
                                      "sched_analyzer ring buffer failed");
@@ -206,7 +201,7 @@ public:
     // detailed_mode_ 时为 Push 模式，通过清除 cfg bit0 关闭 BPF 事件发射
     Status PauseCollection() override {
         if (stub_mode_ || !detailed_mode_) return Status::Ok();
-        int cfg_fd = bpf_mgr_.GetMapFd("sched_analyzer", "sched_analyzer_cfg");
+        int cfg_fd = bpf_map__fd(sched_skel_->maps.sched_analyzer_cfg);
         if (cfg_fd >= 0) {
             uint32_t k = 0, val = 0;
             bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
@@ -225,7 +220,7 @@ public:
             while (running_.load() && !paused_)
                 ring_buffer__poll(ring_buf_, 100);
         });
-        int cfg_fd = bpf_mgr_.GetMapFd("sched_analyzer", "sched_analyzer_cfg");
+        int cfg_fd = bpf_map__fd(sched_skel_->maps.sched_analyzer_cfg);
         if (cfg_fd >= 0) {
             uint32_t k = 0;
             uint32_t cfg_flags =
@@ -247,8 +242,14 @@ public:
             ring_buffer__free(ring_buf_);
             ring_buf_ = nullptr;
         }
-        bpf_mgr_.DetachAll();
+        // skeleton destroy handles detach
         agg_fd_ = -1;
+
+        if (sched_skel_) {
+            sched_analyzer_sk_bpf__destroy(sched_skel_);
+            sched_skel_ = nullptr;
+        }
+
         return Status::Ok();
     }
 
@@ -541,14 +542,13 @@ private:
     bool detailed_mode_ = false;
     uint32_t aggregate_interval_ms_ = 5000;   // 聚合统计输出间隔（毫秒）
     bool track_migrations_ = true;            // 是否追踪 CPU 迁移事件
-    std::string bpf_obj_path_;                // eBPF 目标文件路径
     std::vector<uint32_t> target_pids_;       // 目标 PID 列表
     std::unordered_set<uint32_t> target_pid_allow_;  // PID 快速查找集合
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};
     bool paused_ = false;
-    BpfProgramManager bpf_mgr_;
+    struct sched_analyzer_sk_bpf* sched_skel_ = nullptr;
     struct ring_buffer* ring_buf_ = nullptr;
     std::thread poll_thread_;
     int agg_fd_ = -1;

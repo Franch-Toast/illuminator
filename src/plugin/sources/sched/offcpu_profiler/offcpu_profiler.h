@@ -49,7 +49,6 @@
 // - user_stacks：是否采集用户态堆栈（默认 true）
 // - kernel_stacks：是否采集内核态堆栈（默认 true）
 // - target_pids：逗号分隔的 PID 白名单（空 = 追踪所有进程）
-// - bpf_object：eBPF 目标文件路径（必需）
 // ============================================================================
 
 #pragma once
@@ -67,7 +66,6 @@
 #include <string>
 #include <thread>
 #include <sys/stat.h>
-#include <linux/limits.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -77,11 +75,12 @@ using json = nlohmann::json;
 
 #include "ebpf/include/bpf_compat.h"
 
+#include "offcpu_profiler_sk.skel.h"
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
 #include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
-#include "ebpf/loader/bpf_program_manager.h"
+
 #include "ebpf/loader/stack_trace_util.h"
 #include "plugin/processors/stack_symbolizer/stack_symbolizer.h"
 #include "plugin/api/source_plugin.h"
@@ -143,10 +142,6 @@ public:
         kernel_stacks_ = config["kernel_stacks"].AsBool(true);
         start_delay_seconds_ =
             static_cast<int>(config["start_delay_seconds"].AsInt(3));
-        bpf_obj_path_ = config["bpf_object"].AsString("");
-        if (bpf_obj_path_.empty()) {
-            bpf_obj_path_ = AutoDiscoverBpfObject("offcpu_profiler.bpf.o");
-        }
         target_pids_ = ParseCommaSeparated<uint32_t>(
             config["target_pids"].AsString(""));
 
@@ -167,19 +162,29 @@ public:
     // Start — 加载 eBPF 程序并开始追踪 Off-CPU 等待
     // ========================================================================
     Status Start() override {
-        if (bpf_obj_path_.empty()) {
-            IL_WARN("offcpu_profiler: no bpf_object path; idle mode");
+        // Skeleton 模式：从嵌入的字节码加载
+        offcpu_skel_ = offcpu_profiler_sk_bpf__open();
+        if (!offcpu_skel_) {
+            IL_WARN("offcpu_profiler: skeleton open failed; idle mode");
             stub_mode_ = true;
             running_.store(false);
             return Status::Ok();
         }
 
-        auto st = bpf_mgr_.LoadObject("offcpu_profiler", bpf_obj_path_);
-        if (!st.ok())
-            return st;
+        int err = offcpu_profiler_sk_bpf__load(offcpu_skel_);
+        if (err) {
+            offcpu_profiler_sk_bpf__destroy(offcpu_skel_);
+            offcpu_skel_ = nullptr;
+            return Status::Error(StatusCode::kInternal,
+                "offcpu_profiler: skeleton load failed (err=" +
+                std::to_string(err) + ")");
+        }
+
+        // skeleton loaded — direct map/prog access below
+        Status st = Status::Ok();
 
         // 写入运行时配置到 offcpu_cfg BPF map（3 个 slot）
-        cfg_fd_ = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_cfg");
+        cfg_fd_ = bpf_map__fd(offcpu_skel_->maps.offcpu_cfg);
         if (cfg_fd_ >= 0) {
             uint32_t k0 = 0;
             // 启用 BPF-side PID 过滤（bit2）— pidns 翻译使其在容器中也能正确工作
@@ -211,8 +216,7 @@ public:
 
         // 写入目标 PID 到 offcpu_target_pids BPF map（namespace-local PID）
         if (!target_pids_.empty()) {
-            int pids_fd = bpf_mgr_.GetMapFd("offcpu_profiler",
-                                            "offcpu_target_pids");
+            int pids_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_pids);
             if (pids_fd >= 0) {
                 uint8_t val = 1;
                 for (uint32_t pid : target_pids_) {
@@ -225,8 +229,7 @@ public:
 
         // 写入目标进程名到 offcpu_target_comms BPF map
         if (!target_comms_.empty()) {
-            int comms_fd = bpf_mgr_.GetMapFd("offcpu_profiler",
-                                             "offcpu_target_comms");
+            int comms_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_comms);
             if (comms_fd >= 0) {
                 uint8_t val = 1;
                 for (const auto& comm : target_comms_) {
@@ -241,19 +244,24 @@ public:
         }
 
         // 挂载 Off-CPU 追踪 eBPF 程序
-        st = bpf_mgr_.AttachProgram("offcpu_profiler", "trace_offcpu");
+        {
+            int att_err = offcpu_profiler_sk_bpf__attach(offcpu_skel_);
+            if (att_err)
+                st = Status::Error(StatusCode::kInternal,
+                    "offcpu: attach failed (err=" + std::to_string(att_err) + ")");
+        }
         if (!st.ok())
             return st;
 
-        stacks_fd_ = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_stacks");
+        stacks_fd_ = bpf_map__fd(offcpu_skel_->maps.offcpu_stacks);
 
-        int rb_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_events");
+        int rb_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_events);
         if (rb_fd < 0) {
             return Status::Error(StatusCode::kInternal,
                                  "offcpu_events ringbuf missing");
         }
 
-        ring_buf_ = bpf_mgr_.CreateRingBuffer(rb_fd, HandleEvent, this);
+        ring_buf_ = ring_buffer__new(rb_fd, HandleEvent, this, nullptr);
         if (!ring_buf_) {
             return Status::Error(StatusCode::kInternal,
                                  "offcpu ring buffer init failed");
@@ -327,9 +335,15 @@ public:
             ring_buffer__free(ring_buf_);
             ring_buf_ = nullptr;
         }
-        bpf_mgr_.DetachAll();
+        // skeleton destroy handles detach
         stacks_fd_ = -1;
         cfg_fd_ = -1;
+
+        if (offcpu_skel_) {
+            offcpu_profiler_sk_bpf__destroy(offcpu_skel_);
+            offcpu_skel_ = nullptr;
+        }
+
         return Status::Ok();
     }
 
@@ -350,7 +364,7 @@ public:
         }
 
         // Clear and repopulate BPF PID map
-        int pids_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_target_pids");
+        int pids_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_pids);
         if (pids_fd >= 0) {
             uint32_t cur{}, next{};
             std::vector<uint32_t> old_keys;
@@ -369,7 +383,7 @@ public:
         }
 
         // Clear and repopulate BPF comm map
-        int comms_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_target_comms");
+        int comms_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_comms);
         if (comms_fd >= 0) {
             char cur_key[16] = {}, next_key[16] = {};
             std::vector<std::string> old_comms;
@@ -425,49 +439,13 @@ public:
     }
 
 private:
-    static std::string AutoDiscoverBpfObject(const char* filename) {
-        auto try_path = [](const std::string& p) -> std::string {
-            struct stat st;
-            if (stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode))
-                return p;
-            return {};
-        };
-
-        auto r = try_path(std::string("build/bpf/") + filename);
-        if (!r.empty()) return r;
-
-        char exe_path[PATH_MAX] = {};
-        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-        if (len > 0) {
-            exe_path[len] = '\0';
-            std::string dir(exe_path);
-            auto slash = dir.rfind('/');
-            if (slash != std::string::npos) {
-                dir = dir.substr(0, slash);
-                r = try_path(dir + "/bpf/" + filename);
-                if (!r.empty()) return r;
-                r = try_path(dir + "/../build/bpf/" + filename);
-                if (!r.empty()) return r;
-                r = try_path(dir + "/" + filename);
-                if (!r.empty()) return r;
-            }
-        }
-
-        r = try_path(std::string("/usr/lib/illuminator/bpf/") + filename);
-        if (!r.empty()) return r;
-        r = try_path(std::string("/opt/illuminator/bpf/") + filename);
-        if (!r.empty()) return r;
-
-        return {};
-    }
-
     // ========================================================================
     // ConfigurePidNamespace — 将当前进程的 PID namespace dev/ino 写入 BPF map
     // ========================================================================
     // BPF 使用 bpf_get_ns_current_pid_tgid(dev, ino) 将内核态 root-ns PID
     // 翻译为目标 namespace 的 local PID，实现零开销 namespace 透明过滤。
     void ConfigurePidNamespace() {
-        int ns_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_pidns_cfg");
+        int ns_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_pidns_cfg);
         if (ns_fd < 0) return;
 
         struct stat st = {};
@@ -512,7 +490,7 @@ private:
     // ReadAndClearStats — 批量读取 offcpu_stats BPF map 并转换为 DataBatch
     // ========================================================================
     void ReadAndClearStats() {
-        int stats_fd = bpf_mgr_.GetMapFd("offcpu_profiler", "offcpu_stats");
+        int stats_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_stats);
         if (stats_fd < 0) return;
 
         struct offcpu_stat_key {
@@ -906,13 +884,12 @@ private:
     bool user_stacks_ = true;
     bool kernel_stacks_ = true;
     int start_delay_seconds_ = 3;
-    std::string bpf_obj_path_;
     std::vector<uint32_t> target_pids_;
     std::vector<std::string> target_comms_;
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};
-    BpfProgramManager bpf_mgr_;
+    struct offcpu_profiler_sk_bpf* offcpu_skel_ = nullptr;
     int stacks_fd_ = -1;
     int cfg_fd_ = -1;
     uint32_t cfg_flags_base_ = 0;

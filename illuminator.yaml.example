@@ -129,7 +129,7 @@ pipelines:
         kernel_stacks: true           # 采集内核态堆栈
         # target_pids: "1234,5678"    # 仅采集指定 PID
         # target_comms: "planning,perception"  # 仅采集指定进程名
-        bpf_object: bazel-bin/src/ebpf/probes/cpu_profiler.bpf.o
+        # bpf_object 不再需要 — skeleton 模式下 BPF 字节码已嵌入二进制
     processors:
       - type: stack_symbolizer
         config:
@@ -164,7 +164,7 @@ pipelines:
         detailed_mode: false          # true = 每事件输出, false = 聚合输出
         aggregate_interval_ms: 5000   # 聚合间隔
         track_migrations: true        # 追踪 CPU 迁移
-        bpf_object: bazel-bin/src/ebpf/probes/sched_analyzer.bpf.o
+        # bpf_object 不再需要 — skeleton 模式下 BPF 字节码已嵌入二进制
     sinks:
       - type: local_storage
         config:
@@ -195,7 +195,7 @@ pipelines:
         kernel_stacks: true
         target_pids: ""               # 逗号分隔 PID 白名单（空=不按 PID 过滤）
         target_comms: "illuminator"   # 逗号分隔进程名白名单（推荐配置）
-        bpf_object: bazel-bin/src/ebpf/probes/offcpu_profiler.bpf.o
+        # bpf_object 不再需要 — skeleton 模式下 BPF 字节码已嵌入二进制
     processors:
       - type: stack_symbolizer
         config:
@@ -218,7 +218,7 @@ pipelines:
   #   source:
   #     type: ebpf_io_monitor
   #     config:
-  #       bpf_object: bazel-bin/src/ebpf/probes/bio_latency.bpf.o
+  #       # bpf_object 不再需要 — skeleton 模式
   #       track_file_io: true
   #       track_block_io: true
   #       min_latency_us: 100
@@ -238,7 +238,7 @@ pipelines:
   #   source:
   #     type: ebpf_net_tracer
   #     config:
-  #       bpf_object: bazel-bin/src/ebpf/probes/net_tracer.bpf.o
+  #       # bpf_object 不再需要 — skeleton 模式
   #       track_tcp: true
   #       track_udp: false
   #   sinks:

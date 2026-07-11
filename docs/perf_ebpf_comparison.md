@@ -36,7 +36,7 @@ illuminator:
 | **注册** | `REGISTER_PLUGIN` 静态构造 | `IL_REGISTER_SOURCE/PROCESSOR/SINK` |
 | **生命周期** | init → start → stop → rotate | Init → Start → Stop |
 | **线程模型** | 每插件独立轮询线程 | InfrastructureManager 线程池 + per-Pipeline ProcessThread |
-| **探针管理** | 插件自管理 skeleton | BpfProgramManager 统一加载 |
+| **探针管理** | 插件自管理 skeleton | 插件自管理 skeleton（EbpfSkeletonSource 基类 + 自定义 SourcePlugin） |
 
 ### 2.3 BPF Buffer 抽象
 
@@ -139,20 +139,20 @@ illuminator（修复后）:
 | **编译器** | `clang-14` 固定 | `$BPF_CLANG`（默认 clang） |
 | **编译参数** | `-g -O2 -target bpf -D__TARGET_ARCH_x86` | `-g -O2 -target bpf -D__TARGET_ARCH_x86` |
 | **vmlinux** | 预生成 x86_64 + arm64 | 仅 x86_64（系统头） |
-| **Skeleton 生成** | ✅ `bpftool gen skeleton` → `*.skel.h` | ❌ 无 skeleton |
-| **Object 打包** | ✅ `bpftool gen object` (CO-RE reloc) | 直接输出 `.bpf.o` |
+| **Skeleton 生成** | ✅ `bpftool gen skeleton` → `*.skel.h` | ✅ `bpf_skeleton()` → `*.skel.h`（已迁移） |
+| **Object 打包** | ✅ `bpftool gen object` (CO-RE reloc) | 直接编译 `.bpf.o` → skeleton 嵌入 |
 
 ### 5.2 运行时加载
 
 | 方面 | perf_ebpf | illuminator |
 |------|-----------|-------------|
-| **加载方式** | Skeleton API (`*_bpf__open/load/attach`) | **`bpf_object__open()`** + 手动查找 |
-| **Map 访问** | `skel->maps.xxx` 类型安全 | `bpf_object__find_map_by_name()` 字符串匹配 |
-| **Prog 访问** | `skel->progs.xxx` 类型安全 | `bpf_object__find_program_by_name()` |
-| **rodata 配置** | ✅ `skel->rodata->param = value` | ❌ 配置值仅 C++ 端，BPF 不可见 |
-| **Map 复用** | ✅ `bpf_map__reuse_fd()` 跨 BPF | 无 |
-| **类型安全** | 强（编译期检查） | 弱（运行时字符串匹配，拼写错误=静默失败） |
-| **RAII** | `*_bpf__destroy()` | `BpfProgramManager` destructor |
+| **加载方式** | Skeleton API (`*_bpf__open/load/attach`) | ✅ Skeleton API（已迁移，`*_sk_bpf__open/load/attach`） |
+| **Map 访问** | `skel->maps.xxx` 类型安全 | ✅ `skel_->maps.xxx` 类型安全（已迁移） |
+| **Prog 访问** | `skel->progs.xxx` 类型安全 | ✅ `skel_->progs.xxx` 类型安全（已迁移） |
+| **rodata 配置** | ✅ `skel->rodata->param = value` | ❌ 未使用（配置通过 BPF map 注入，可热更新） |
+| **Map 复用** | ✅ `bpf_map__reuse_fd()` 跨 BPF | ❌ 无（待引入） |
+| **类型安全** | 强（编译期检查） | ✅ 强（skeleton 编译期检查，已迁移） |
+| **RAII** | `*_bpf__destroy()` | ✅ `*_sk_bpf__destroy()` skeleton 析构 |
 
 ### 5.3 关键差异影响
 
@@ -161,9 +161,9 @@ illuminator（修复后）:
 2. 编译期验证 map 名称和结构体布局 → 不存在字符串拼写风险
 3. `bpf_map__reuse_fd` 支持跨 BPF 程序共享 map（如 sched ↔ native_unwinder）
 
-**illuminator 当前做法的风险：**
-- 配置文件中的 `min_duration_us` 对 BPF 程序不可见（BPF 用编译时 `const volatile`）
-- Map 名称拼写错误不会编译报错，仅运行时 `GetMapFd()` 返回 -1
+**illuminator 已完成 skeleton 迁移后的剩余差距：**
+- rodata 配置注入尚未使用（配置通过 BPF map 在运行时传递，可热更新但有 ~50ns map 查找开销）
+- Map 跨 BPF 复用（`bpf_map__reuse_fd`）尚未引入
 
 ### 5.4 编译选项
 
@@ -266,8 +266,8 @@ perf_ebpf **不冻结系统**的根本原因（按重要性排序）：
 
 | 功能 | perf_ebpf 参考 | 对 illuminator 的价值 |
 |------|----------------|---------------------|
-| **BPF skeleton 生成** | `bpf_rules.bzl` → `bpftool gen skeleton` | 类型安全、rodata 可配、编译期验证 map 名 |
-| **min_duration_ns 运行时可配** | `skel->rodata->offcpu_min_duration_ns` | 用户 YAML 配置能真正传入 BPF |
+| ~~**BPF skeleton 生成**~~ | ~~`bpf_rules.bzl` → `bpftool gen skeleton`~~ | ✅ **已实现** — `bpf_skeleton()` → `*.skel.h`，全部 6 个探针已迁移 |
+| **min_duration_ns rodata 注入** | `skel->rodata->offcpu_min_duration_ns` | 用户 YAML 配置经 rodata 传入 BPF（当前用 map，可选优化） |
 | **PID 动态发现** | `pid_manager_thread` 30s 周期 | 新启动的子进程自动纳入追踪 |
 | **Buffer 溢出统计** | `meta_stats_map` + `MetaObserver` | /api/v1/budget 暴露丢数据指标 |
 | **ResourceLimiter 强制执行** | （perf_ebpf 也缺少） | 超过 512MB 应自动停止采集 |
@@ -294,13 +294,10 @@ perf_ebpf **不冻结系统**的根本原因（按重要性排序）：
 
 ### 9.1 最值得借鉴的 3 个设计
 
-**1. Skeleton 生成 → 类型安全**
-```diff
-- // 当前：脆弱的字符串匹配
-- int map_fd = bpf_mgr_.GetMapFd("stack_counts");  // 拼写错误 = -1
-+ // 改为：skeleton 类型安全
-+ skel->maps.stack_counts  // 编译期检查
-```
+**1. ~~Skeleton 生成 → 类型安全~~ ✅ 已完成**
+
+所有 6 个 eBPF 探针已迁移到 skeleton API，使用 `skel_->maps.xxx` 类型安全访问。
+`EbpfSkeletonSource` 基类 + `IL_DEFINE_SKEL_OPS` 宏提供统一的 skeleton 生命周期管理。
 
 **2. rodata 配置注入**
 ```diff

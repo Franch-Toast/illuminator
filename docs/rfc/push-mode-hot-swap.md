@@ -8,7 +8,7 @@
 ## 问题
 
 当前 `FeatureDriver::Pause()` 仅调用 `UnregisterTimers()`，对 Push 模式的 eBPF 源
-（`EbpfRingBufferSource` 及其子类）**完全无效**：
+（`EbpfSkeletonSource` 及其子类）**完全无效**：
 
 1. Push 源从不注册 collect timer — 没有定时器可取消
 2. ringbuf poll 线程持续运行（`running_` 标志不受 Pause 影响）
@@ -94,13 +94,13 @@ virtual Status ResumeCollection() { return Status::Ok(); }
 Pull 源默认空操作（由 FeatureDriver 停定时器即可）。
 Push 源在子类中覆写，实现 BPF gate 控制 + poll 线程管理。
 
-### 3. EbpfRingBufferSource 基类增强
+### 3. EbpfSkeletonSource 基类增强（已实现）
 
-提供 gate-based 的暂停/恢复默认实现：
+通过 `IL_DEFINE_SKEL_OPS` 宏和 CRTP 模板提供 gate-based 的暂停/恢复默认实现：
 
 - `PauseCollection()`: 关闭 BPF gate → 停止 poll 线程
 - `ResumeCollection()`: 启动 poll 线程 → 打开 BPF gate
-- 子类只需覆写 `GateMapFd()` 返回 gate map 的 fd
+- 子类通过 `IL_DEFINE_SKEL_OPS` 指定 gate map 名称
 
 ### 4. FeatureDriver 改造
 
@@ -143,7 +143,7 @@ Resume 序列（先发车后开门）:
 | `src/ebpf/probes/net/net_tracer.bpf.c` | 新增 gate map + CHECK_GATE |
 | `src/ebpf/probes/sched/sched_tracer.bpf.c` | 新增 gate map + CHECK_GATE |
 | `src/plugin/api/source_plugin.h` | 新增 PauseCollection/ResumeCollection |
-| `src/plugin/sources/ebpf_ring_buffer_source.h` | 实现 gate-based pause/resume |
+| `src/plugin/sources/ebpf_skeleton_source.h` | 实现 gate-based pause/resume（替代已废弃的 EbpfRingBufferSource） |
 | `src/core/engine/feature_driver.h` | Pause/Resume 增加 push-mode 分支 |
 | `src/plugin/sources/cpu/cpu_profiler/cpu_profiler.h` | 覆写 PauseCollection（复用 cfg） |
 | `src/plugin/sources/sched/sched_analyzer/sched_analyzer.h` | 覆写 PauseCollection（复用 cfg） |

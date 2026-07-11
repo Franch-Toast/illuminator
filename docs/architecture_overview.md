@@ -52,7 +52,7 @@ Illuminator 采用 **Linux 驱动模型风格的三层架构**，结合 **事件
 │                              │                                                   │
 │  ┌───────────────────────────▼─────────────────────────────────────────────────┐│
 │  │                         eBPF Subsystem (内核级采集)                           ││
-│  │   BpfProgramManager + libbpf CO-RE                                          ││
+│  │   libbpf Skeleton (嵌入字节码) + CO-RE                                      ││
 │  │   ├── cpu_profiler.bpf.c    (perf_event + BPF tgid 过滤)                   ││
 │  │   ├── offcpu.bpf.c          (sched tracepoint + tgid 过滤)                 ││
 │  │   ├── bio_latency.bpf.c     (block I/O 追踪)                               ││
@@ -636,14 +636,12 @@ Linux Kernel          eBPF ringbuf         CpuProfilerSource    AsyncChannel    
 │  │  用户态 CpuProfilerSource                                               │    │
 │  │                                                                         │    │
 │  │  Start():                                                               │    │
-│  │    1. open_bpf_object() → 加载 BPF ELF                                 │    │
-│  │    2. per-CPU 创建 perf_event_open(PERF_TYPE_SOFTWARE, freq=49)         │    │
-│  │    3. bpf_program__attach_perf_event() → 附加到所有 CPU                  │    │
-│  │    4. ApplyFilterMaps():                                                │    │
-│  │       if (!target_pids_.empty()):                                       │    │
-│  │           写 filter_pids_map ← {pid: 1, ...}                           │    │
-│  │           设置 filter_enabled = true                                    │    │
-│  │    5. ring_buffer__new() → 注册 callback                               │    │
+│  │    1. cpu_profiler_sk_bpf__open() → 打开嵌入的 skeleton                 │    │
+│  │    2. cpu_profiler_sk_bpf__load() → 加载 BPF 程序                       │    │
+│  │    3. per-CPU 创建 perf_event_open(PERF_TYPE_SOFTWARE, freq=49)         │    │
+│  │    4. bpf_program__attach_perf_event() → 附加到所有 CPU                  │    │
+│  │    5. ApplyFilterMaps(): 通过 skel_->maps.xxx 直接写入                  │    │
+│  │    6. ring_buffer__new() → 注册 callback                               │    │
 │  │                                                                         │    │
 │  │  Callback (Push 模式):                                                  │    │
 │  │    解析事件 → 构建 StackSample → DataBatch → Enqueue(channel)           │    │
@@ -1142,7 +1140,7 @@ src/
 │   │   ├── net_tracer_driver.h
 │   │   └── sched_analyzer_driver.h
 │   ├── sources/                       数据源插件 (按 cpu/sched/io/net 分组)
-│   │   ├── ebpf_ring_buffer_source.h  eBPF Push Source 基类
+│   │   ├── ebpf_skeleton_source.h     eBPF Skeleton Push Source 基类
 │   │   ├── cpu/                       cpu_utilization, process_cpu, cpu_profiler, proc_stat_reader
 │   │   ├── sched/                     sched_analyzer, offcpu_profiler, ebpf_sched_tracer
 │   │   ├── io/                        ebpf_io_monitor

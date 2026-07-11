@@ -1,8 +1,8 @@
 // ============================================================================
-// EbpfSchedTracer — 基于 eBPF 的调度器事件追踪器（Push 模式）
+// EbpfSchedTracer — 基于 eBPF 的调度器事件追踪器（Skeleton Push 模式）
 // ============================================================================
 //
-// 继承 EbpfRingBufferSource 基类，仅实现调度事件特有的配置和事件解析。
+// 使用 bpftool gen skeleton 生成的类型安全骨架加载 BPF 程序。
 //
 // eBPF tracepoint: sched_wakeup + sched_switch
 // 输出: prev_pid, next_pid, cpu, latency_us, prev_comm, next_comm, event
@@ -12,25 +12,22 @@
 
 #include <cstring>
 
+#include "sched_tracer_sk.skel.h"
 #include "ebpf/include/event_types.h"
-#include "plugin/sources/ebpf_ring_buffer_source.h"
+#include "plugin/sources/ebpf_skeleton_source.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
-class EbpfSchedTracer : public EbpfRingBufferSource {
+IL_DEFINE_SKEL_OPS(SchedTracerSkelOps, sched_tracer_sk,
+                   sched_events, collection_gate, "schedtrc-poll");
+
+class EbpfSchedTracer : public EbpfSkeletonSource<SchedTracerSkelOps> {
 public:
     const char* Name() const override { return "ebpf_sched_tracer"; }
-    const char* Version() const override { return "0.1.0"; }
+    const char* Version() const override { return "0.2.0"; }
 
 protected:
-    EbpfSourceBpfConfig BpfConfig() const override {
-        return {"sched_tracer",
-                {"trace_sched_wakeup", "trace_sched_switch"},
-                "sched_events",
-                "schedtrc-poll"};
-    }
-
     ring_buffer_sample_fn EventCallback() const override {
         return HandleEvent;
     }

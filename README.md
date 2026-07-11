@@ -56,7 +56,7 @@
   │                               └────────────────────────────┘    │
   │                                                                  │
   │  Shared Infra: Arena + LockFreeQueue + ThreadPool                │
-  │  eBPF Subsystem: libbpf Loader + Ring Buffer + BTF Cache         │
+  │  eBPF Subsystem: libbpf Skeleton (嵌入字节码) + Ring Buffer + BTF │
   │  Plugin Manager: SO Loader + WASM Runtime + Plugin Registry      │
   │  Storage Layer: SQLite (WAL 模式)                                │
   │  Export Layer: pprof / OTLP / Prometheus / JSON                  │
@@ -134,10 +134,10 @@ illuminator/
 │   │   │   ├── io/             #     bio_latency.bpf.c
 │   │   │   ├── net/            #     net_tracer.bpf.c
 │   │   │   └── memory/         #     mem_tracer.bpf.c
-│   │   └── loader/             #   BpfProgramManager, FeatureProbe, StackTraceUtil
+│   │   └── loader/             #   FeatureProbe, StackTraceUtil
 │   │
 │   ├── sources/                # Source 插件 (按子系统分类)
-│   │   ├── ebpf_ring_buffer_source.h  # eBPF Push Source 公共基类
+│   │   ├── ebpf_skeleton_source.h     # eBPF Skeleton Push Source 基类 (bpftool gen skeleton)
 │   │   ├── cpu/                #   4 个 CPU 相关源
 │   │   │   ├── cpu_profiler/   #     eBPF perf_event CPU 性能剖析 (Push)
 │   │   │   ├── cpu_utilization/#     CPU 利用率 /proc/stat (Pull, EMA 平滑)
@@ -468,7 +468,7 @@ pipelines:
       type: cpu_profiler
       config:
         frequency_hz: 49
-        bpf_object: bazel-bin/src/ebpf/probes/cpu_profiler.bpf.o
+        # BPF 字节码已通过 skeleton 嵌入二进制，无需指定 bpf_object 路径
     processors:
       - type: stack_symbolizer
       - type: stack_merger

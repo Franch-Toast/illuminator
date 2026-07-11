@@ -1,19 +1,11 @@
 // ============================================================================
-// EbpfNetTracer — 基于 eBPF 的 TCP 连接追踪器（Push 模式）
+// EbpfNetTracer — 基于 eBPF 的 TCP 连接追踪器（Skeleton Push 模式）
 // ============================================================================
 //
-// 使用 eBPF tracepoint 跟踪 TCP 连接的生命周期事件（连接建立/关闭）。
-// 挂钩点在 inet_sock_set_state，自动过滤 IPv4 协议族。
+// 使用 bpftool gen skeleton 生成的类型安全骨架加载 BPF 程序。
 //
-// 输出 Record 指标：
-// ===================
-// 每条连接事件记录包含：
-//   - 进程信息（pid, comm）
-//   - 源/目标地址和端口（saddr, daddr, sport, dport）
-//   - 事件类型（connect/accept/close）
-//
-// 备选模式（无 bpf_object 时）：
-//   - 自动启用 /proc/net/tcp fallback（当前为空实现）
+// eBPF tracepoint: inet_sock_set_state
+// 输出: pid, comm, saddr, daddr, sport, dport, event
 // ============================================================================
 
 #pragma once
@@ -21,32 +13,24 @@
 #include <arpa/inet.h>
 #include <cstring>
 
+#include "net_tracer_sk.skel.h"
 #include "ebpf/include/event_types.h"
-#include "plugin/sources/ebpf_ring_buffer_source.h"
+#include "plugin/sources/ebpf_skeleton_source.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
-class EbpfNetTracer : public EbpfRingBufferSource {
+IL_DEFINE_SKEL_OPS(NetTracerSkelOps, net_tracer_sk,
+                   net_events, collection_gate, "net-poll");
+
+class EbpfNetTracer : public EbpfSkeletonSource<NetTracerSkelOps> {
 public:
     const char* Name() const override { return "ebpf_net_tracer"; }
-    const char* Version() const override { return "0.1.0"; }
+    const char* Version() const override { return "0.2.0"; }
 
 protected:
-    EbpfSourceBpfConfig BpfConfig() const override {
-        return {"net_tracer",
-                {"trace_inet_sock_set_state"},
-                "net_events",
-                "net-poll"};
-    }
-
     ring_buffer_sample_fn EventCallback() const override {
         return HandleEvent;
-    }
-
-    Status OnStubStart() override {
-        running_ = true;
-        return Status::Ok();
     }
 
 private:
@@ -58,7 +42,6 @@ private:
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
         auto& rec = batch->AddRecord();
 
-        // 二进制 IP 转字符串（IPv4 点分十进制）
         char saddr_str[INET_ADDRSTRLEN], daddr_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &event->saddr, saddr_str, sizeof(saddr_str));
         inet_ntop(AF_INET, &event->daddr, daddr_str, sizeof(daddr_str));
@@ -74,7 +57,6 @@ private:
         rec.SetField(batch->InternString("sport"), static_cast<uint64_t>(event->sport));
         rec.SetField(batch->InternString("dport"), static_cast<uint64_t>(event->dport));
 
-        // 事件类型映射
         const char* evt_types[] = {"connect", "accept", "close"};
         int idx = event->event_type < 3 ? event->event_type : 0;
         rec.SetField(batch->InternString("event"), batch->InternString(evt_types[idx]));
@@ -82,8 +64,6 @@ private:
         if (self->callback_) self->callback_(std::move(batch));
         return 0;
     }
-
-    // Members inherited from EbpfRingBufferSource
 };
 
 IL_REGISTER_SOURCE("ebpf_net_tracer", EbpfNetTracer);
