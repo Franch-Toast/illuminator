@@ -66,6 +66,8 @@ struct {
     __type(value, struct ns_request_start);
 } req_starts SEC(".maps");
 
+DECLARE_COLLECTION_GATE();
+
 // ============================================================================
 // trace_block_rq_issue：IO 请求提交 tracepoint 处理函数
 //
@@ -83,7 +85,6 @@ struct {
 // ============================================================================
 SEC("tracepoint/block/block_rq_issue")
 int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx) {
-    // 以起始扇区号作为 IO 请求的标识 key
     __u64 key = ctx->sector;
     struct ns_request_start start = {};
     start.start_ns = bpf_ktime_get_ns();
@@ -123,7 +124,7 @@ int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx) {
 // ============================================================================
 SEC("tracepoint/block/block_rq_complete")
 int trace_block_rq_complete(struct trace_event_raw_block_rq_complete *ctx) {
-    // 查找该扇区对应的开始快照
+    CHECK_GATE();
     __u64 key = ctx->sector;
     struct ns_request_start *start = bpf_map_lookup_elem(&req_starts, &key);
     if (!start) return 0;  // 找不到开始记录（可能来自非 block_rq_issue 路径）

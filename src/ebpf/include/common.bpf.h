@@ -55,4 +55,22 @@
 // 对于 IO 延迟追踪场景（低频大事件），256KB 也能覆盖突发情况
 #define IL_RINGBUF_SIZE (256 * 1024)
 
+// ---- Collection Gate: Push 源暂停/恢复控制 ----
+// 所有 push-mode BPF 程序应声明此 map 并在 tracepoint 入口调用 CHECK_GATE()。
+// 用户态通过 bpf_map_update_elem 将 gate 设为 0（暂停）或 1（恢复）。
+// ARRAY map 的 lookup 开销约 5ns，在 10 万次/秒触发率下额外 CPU < 0.05%。
+#define DECLARE_COLLECTION_GATE() \
+    struct { \
+        __uint(type, BPF_MAP_TYPE_ARRAY); \
+        __uint(max_entries, 1); \
+        __type(key, __u32); \
+        __type(value, __u32); \
+    } collection_gate SEC(".maps")
+
+#define CHECK_GATE() do { \
+    __u32 _gate_key = 0; \
+    __u32 *_gate_val = bpf_map_lookup_elem(&collection_gate, &_gate_key); \
+    if (!_gate_val || !*_gate_val) return 0; \
+} while(0)
+
 #endif /* __ILLUMINATOR_COMMON_BPF_H */

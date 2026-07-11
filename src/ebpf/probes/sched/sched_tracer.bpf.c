@@ -48,16 +48,18 @@ struct {
     __type(value, __u64);
 } wakeup_ts SEC(".maps");
 
+DECLARE_COLLECTION_GATE();
+
 // ---- sched_wakeup tracepoint ----
 SEC("tracepoint/sched/sched_wakeup")
 int trace_sched_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
     __u32 pid = ctx->pid;
     __u64 ts = bpf_ktime_get_ns();
 
-    // 存储唤醒时间戳到 BPF map，供 sched_switch 时查询
     bpf_map_update_elem(&wakeup_ts, &pid, &ts, BPF_ANY);
 
-    // 在 Ring Buffer 中预留事件空间
+    CHECK_GATE();
+
     struct il_sched_event *e = bpf_ringbuf_reserve(&sched_events, sizeof(*e), 0);
     if (!e) return 0;
 
@@ -85,6 +87,7 @@ int trace_sched_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
 // ---- sched_switch tracepoint ----
 SEC("tracepoint/sched/sched_switch")
 int trace_sched_switch(struct trace_event_raw_sched_switch *ctx) {
+    CHECK_GATE();
     struct il_sched_event *e = bpf_ringbuf_reserve(&sched_events, sizeof(*e), 0);
     if (!e) return 0;
 

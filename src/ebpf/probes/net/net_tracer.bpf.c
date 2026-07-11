@@ -44,6 +44,8 @@ struct {
     __uint(max_entries, IL_RINGBUF_SIZE);
 } net_events SEC(".maps");
 
+DECLARE_COLLECTION_GATE();
+
 // ============================================================================
 // trace_inet_sock_set_state：TCP 连接状态变迁处理函数
 //
@@ -67,7 +69,7 @@ struct {
 // ============================================================================
 SEC("tracepoint/sock/inet_sock_set_state")
 int trace_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
-    // 地址族过滤：仅处理 IPv4（AF_INET=2）
+    CHECK_GATE();
     __u16 family = ctx->family;
     if (family != 2 /* AF_INET */) return 0;
 

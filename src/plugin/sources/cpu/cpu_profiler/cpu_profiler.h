@@ -650,7 +650,7 @@ private:
     // 持续调用 ring_buffer__poll 从 BPF ring buffer 中读取实时事件。
     // 每次 poll 超时 100ms，检查 running_ 标志决定是否退出。
     void StreamPollLoop() {
-        while (running_.load()) {
+        while (running_.load() && !paused_.load()) {
             int err = ring_buffer__poll(ring_buf_, 100);
             if (err < 0 && err != -EINTR)
                 IL_WARN("cpu_profiler: ringbuf poll err {}", err);
@@ -837,9 +837,48 @@ private:
 
     // PID 映射预留点（容器环境如需 PID namespace 转换可在此扩展）
 
+    // ---- Push 模式暂停/恢复 ----
+    // stream_mode_ 时 IsPushMode()=true，通过 disable/enable perf events 实现暂停。
+    // 同时清除 cfg bit0 使 BPF 停止向 ringbuf 发射事件。
+    Status PauseCollection() override {
+        if (stub_mode_ || !stream_mode_) return Status::Ok();
+        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        if (cfg_fd >= 0) {
+            uint32_t k = 0, val = 0;
+            bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
+        }
+        for (int fd : perf_fds_)
+            ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+        paused_.store(true);
+        if (poll_thread_.joinable())
+            poll_thread_.join();
+        IL_INFO("cpu_profiler: collection paused");
+        return Status::Ok();
+    }
+
+    Status ResumeCollection() override {
+        if (stub_mode_ || !stream_mode_) return Status::Ok();
+        paused_.store(false);
+        poll_thread_ = std::thread([this] {
+            SetThreadName("cpuprofiler-poll");
+            while (running_.load() && !paused_.load())
+                ring_buffer__poll(ring_buf_, 100);
+        });
+        for (int fd : perf_fds_)
+            ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+        int cfg_fd = bpf_mgr_.GetMapFd("cpu_profiler", "cpu_profiler_cfg");
+        if (cfg_fd >= 0) {
+            uint32_t k = 0;
+            uint32_t flags = 1u |
+                (!target_pids_.empty() ? 2u : 0u) |
+                (!target_comms_.empty() ? 4u : 0u);
+            bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
+        }
+        IL_INFO("cpu_profiler: collection resumed");
+        return Status::Ok();
+    }
+
     // ---- 反压响应 ----
-    // 反压激活时降低采样频率至原始值的 1/4，解除时恢复。
-    // 通过 PERF_EVENT_IOC_PERIOD 修改每个 perf_event 的采样周期。
     void OnBackpressure(bool active) override {
         uint64_t new_freq = active
             ? std::max(1, frequency_hz_ / 4)
@@ -867,8 +906,9 @@ private:
     std::vector<std::string> target_comms_;   // 目标进程名列表
 
     // ---- 运行时状态 ----
-    std::atomic<bool> running_{false};        // 运行中标志（线程安全）
-    BpfProgramManager bpf_mgr_;               // eBPF 程序管理器
+    std::atomic<bool> running_{false};
+    std::atomic<bool> paused_{false};
+    BpfProgramManager bpf_mgr_;
     int stacks_fd_ = -1;                      // stacks map 的文件描述符
     int counts_fd_ = -1;                      // stack_counts map 的文件描述符
     std::vector<int> perf_fds_;               // 所有 perf_event 的文件描述符

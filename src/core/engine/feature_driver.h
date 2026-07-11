@@ -237,23 +237,35 @@ public:
         return Status::Ok();
     }
 
-    // Pause — 暂停采集（取消定时器，保留 Pipeline 线程）
+    // Pause — 暂停采集
+    //   Pull 模式：取消定时器即可
+    //   Push 模式：额外关闭 BPF gate + 停止 poll 线程
     Status Pause() {
         if (state_ != DriverState::kActive) {
             return Status::Error(StatusCode::kInvalidArgument,
                                  std::string(Name()) + " not active");
         }
         UnregisterTimers(InfrastructureManager::Instance());
+        if (pipeline_ && pipeline_->GetSource()) {
+            auto status = pipeline_->GetSource()->PauseCollection();
+            if (!status.ok()) return status;
+        }
         state_ = DriverState::kPaused;
         IL_INFO("FeatureDriver '{}' paused", Name());
         return Status::Ok();
     }
 
-    // Resume — 恢复采集（重新注册定时器）
+    // Resume — 恢复采集
+    //   Push 模式：先恢复 Source（启动 poll + 开 BPF gate）
+    //   Pull 模式：重新注册定时器
     Status Resume() {
         if (state_ != DriverState::kPaused) {
             return Status::Error(StatusCode::kInvalidArgument,
                                  std::string(Name()) + " not paused");
+        }
+        if (pipeline_ && pipeline_->GetSource()) {
+            auto status = pipeline_->GetSource()->ResumeCollection();
+            if (!status.ok()) return status;
         }
         RegisterTimers(InfrastructureManager::Instance());
         state_ = DriverState::kActive;

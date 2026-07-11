@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <thread>
 #include <vector>
@@ -76,47 +77,86 @@ public:
                 "Failed to create ring buffer for " + bpf_cfg.object_name);
         }
 
+        gate_map_fd_ = bpf_mgr_.GetMapFd(
+            bpf_cfg.object_name, GateMapName());
+
         running_ = true;
-        poll_thread_ = std::thread([this, thread_name = bpf_cfg.thread_name] {
-            SetThreadName(thread_name.c_str());
-            while (running_) ring_buffer__poll(ring_buf_, 100);
-        });
+        paused_ = false;
+        StartPollThread(bpf_cfg.thread_name);
+        SetBpfGate(true);
 
         IL_INFO("{} started (BPF: {})", Name(), bpf_cfg.object_name);
         return Status::Ok();
     }
 
     Status Stop() override {
+        SetBpfGate(false);
         running_ = false;
+        paused_ = false;
         if (poll_thread_.joinable()) poll_thread_.join();
         if (ring_buf_) { ring_buffer__free(ring_buf_); ring_buf_ = nullptr; }
         bpf_mgr_.DetachAll();
         return Status::Ok();
     }
 
-protected:
-    // 子类必须实现：提供 BPF 配置
-    virtual EbpfSourceBpfConfig BpfConfig() const = 0;
+    // 暂停采集：先关 BPF gate（内核停止发射事件），再停 poll 线程
+    Status PauseCollection() override {
+        if (stub_mode_) return Status::Ok();
+        SetBpfGate(false);
+        paused_ = true;
+        if (poll_thread_.joinable()) poll_thread_.join();
+        IL_INFO("{}: collection paused (BPF gate closed)", Name());
+        return Status::Ok();
+    }
 
-    // 子类必须实现：返回 ring_buffer 回调函数指针
+    // 恢复采集：先启 poll 线程（消费端就绪），再开 BPF gate
+    Status ResumeCollection() override {
+        if (stub_mode_) return Status::Ok();
+        paused_ = false;
+        StartPollThread(BpfConfig().thread_name);
+        SetBpfGate(true);
+        IL_INFO("{}: collection resumed (BPF gate opened)", Name());
+        return Status::Ok();
+    }
+
+protected:
+    virtual EbpfSourceBpfConfig BpfConfig() const = 0;
     virtual ring_buffer_sample_fn EventCallback() const = 0;
 
-    // 子类可选覆写：额外的 Init 逻辑
     virtual Status OnInit(const ConfigValue& /*config*/) {
         return Status::Ok();
     }
 
-    // 子类可选覆写：stub 模式的特殊启动逻辑
     virtual Status OnStubStart() {
         return Status::Ok();
     }
 
+    // 子类可覆写：指定 gate map 的名称（默认 "collection_gate"）
+    virtual const char* GateMapName() const { return "collection_gate"; }
+
     std::string bpf_obj_path_;
-    bool running_ = false;
+    std::atomic<bool> running_{false};
+    std::atomic<bool> paused_{false};
     bool stub_mode_ = false;
     BpfProgramManager bpf_mgr_;
     struct ring_buffer* ring_buf_ = nullptr;
     std::thread poll_thread_;
+    int gate_map_fd_ = -1;
+
+private:
+    void SetBpfGate(bool enabled) {
+        if (gate_map_fd_ < 0) return;
+        uint32_t key = 0;
+        uint32_t val = enabled ? 1 : 0;
+        bpf_map_update_elem(gate_map_fd_, &key, &val, BPF_ANY);
+    }
+
+    void StartPollThread(const std::string& thread_name) {
+        poll_thread_ = std::thread([this, tn = thread_name] {
+            SetThreadName(tn.c_str());
+            while (running_ && !paused_) ring_buffer__poll(ring_buf_, 100);
+        });
+    }
 };
 
 }  // namespace illuminator

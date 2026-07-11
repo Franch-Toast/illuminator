@@ -201,6 +201,42 @@ public:
     }
 
     // ========================================================================
+    // PauseCollection / ResumeCollection — Push 模式暂停/恢复
+    // ========================================================================
+    // detailed_mode_ 时为 Push 模式，通过清除 cfg bit0 关闭 BPF 事件发射
+    Status PauseCollection() override {
+        if (stub_mode_ || !detailed_mode_) return Status::Ok();
+        int cfg_fd = bpf_mgr_.GetMapFd("sched_analyzer", "sched_analyzer_cfg");
+        if (cfg_fd >= 0) {
+            uint32_t k = 0, val = 0;
+            bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
+        }
+        paused_ = true;
+        if (poll_thread_.joinable()) poll_thread_.join();
+        IL_INFO("sched_analyzer: collection paused");
+        return Status::Ok();
+    }
+
+    Status ResumeCollection() override {
+        if (stub_mode_ || !detailed_mode_) return Status::Ok();
+        paused_ = false;
+        poll_thread_ = std::thread([this] {
+            SetThreadName("sched-poll");
+            while (running_.load() && !paused_)
+                ring_buffer__poll(ring_buf_, 100);
+        });
+        int cfg_fd = bpf_mgr_.GetMapFd("sched_analyzer", "sched_analyzer_cfg");
+        if (cfg_fd >= 0) {
+            uint32_t k = 0;
+            uint32_t cfg_flags =
+                (detailed_mode_ ? 1u : 0u) | (track_migrations_ ? 2u : 0u);
+            bpf_map_update_elem(cfg_fd, &k, &cfg_flags, BPF_ANY);
+        }
+        IL_INFO("sched_analyzer: collection resumed");
+        return Status::Ok();
+    }
+
+    // ========================================================================
     // Stop — 停止调度分析，清理资源
     // ========================================================================
     Status Stop() override {
@@ -511,6 +547,7 @@ private:
 
     // ---- 运行时状态 ----
     std::atomic<bool> running_{false};
+    bool paused_ = false;
     BpfProgramManager bpf_mgr_;
     struct ring_buffer* ring_buf_ = nullptr;
     std::thread poll_thread_;

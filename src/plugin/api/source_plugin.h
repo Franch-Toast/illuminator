@@ -68,6 +68,14 @@ public:
         return Status::Error(StatusCode::kUnimplemented, "reconfigure not supported");
     }
 
+    // Push 源暂停/恢复接口 — FeatureDriver::Pause()/Resume() 会调用这些方法。
+    // Pull 源默认空操作（定时器取消即可暂停采集）。
+    // Push 源（IsPushMode()=true）应覆写：关闭 BPF gate、停止 poll 线程等。
+    virtual Status PauseCollection() { return Status::Ok(); }
+    virtual Status ResumeCollection() { return Status::Ok(); }
+
+    virtual bool IsStub() const { return false; }
+
 protected:
     SourceCallback callback_;
 };

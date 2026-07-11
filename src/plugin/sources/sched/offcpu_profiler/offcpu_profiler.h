@@ -292,6 +292,29 @@ public:
     }
 
     // ========================================================================
+    // PauseCollection / ResumeCollection — 通过 offcpu_cfg bit4 控制 BPF gate
+    // ========================================================================
+    // OffcpuProfiler 虽然是 Pull 模式(IsPushMode()=false)，但内部有 BPF
+    // ringbuf poll 线程。暂停时清除 bit4（全局启用标志）阻止内核发射事件。
+    Status PauseCollection() override {
+        if (stub_mode_ || cfg_fd_ < 0) return Status::Ok();
+        uint32_t k0 = 0;
+        uint32_t disabled_flags = cfg_flags_base_ & ~16u;
+        bpf_map_update_elem(cfg_fd_, &k0, &disabled_flags, BPF_ANY);
+        IL_INFO("offcpu_profiler: collection paused (cleared bit4)");
+        return Status::Ok();
+    }
+
+    Status ResumeCollection() override {
+        if (stub_mode_ || cfg_fd_ < 0) return Status::Ok();
+        uint32_t k0 = 0;
+        uint32_t enabled_flags = cfg_flags_base_ | 16u;
+        bpf_map_update_elem(cfg_fd_, &k0, &enabled_flags, BPF_ANY);
+        IL_INFO("offcpu_profiler: collection resumed (set bit4)");
+        return Status::Ok();
+    }
+
+    // ========================================================================
     // Stop — 停止追踪，释放所有 eBPF 资源
     // ========================================================================
     Status Stop() override {
