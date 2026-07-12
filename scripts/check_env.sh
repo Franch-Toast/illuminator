@@ -164,6 +164,21 @@ int main() { return 0; }' | g++ -std=c++20 -x c++ - -o /dev/null 2>&1 && echo "o
         add_suggestion "安装 Clang:\n    sudo apt-get install -y clang"
     fi
 
+    # --- bpftool (Skeleton 生成) ---
+    echo -e "\n${BLUE}[bpftool (BPF Skeleton 生成)]${NC}"
+    if command -v bpftool &>/dev/null; then
+        local bpftool_ver
+        bpftool_ver=$(bpftool version 2>/dev/null | grep -oP 'v\d+\.\d+\.\d+' | head -1)
+        if [ -n "$bpftool_ver" ]; then
+            check_pass "bpftool $bpftool_ver (用于 bpftool gen skeleton)"
+        else
+            check_pass "bpftool 已安装"
+        fi
+    else
+        check_fail "bpftool 未安装 (BPF skeleton 头文件生成必需)"
+        add_suggestion "安装 bpftool:\n    sudo apt-get install -y linux-tools-common linux-tools-generic\n    # 若 bpftool 命令报内核版本不匹配，创建软链接:\n    sudo ln -sf /usr/lib/linux-tools/\$(ls /usr/lib/linux-tools/ | head -1)/bpftool /usr/local/bin/bpftool"
+    fi
+
     # --- 系统库 ---
     echo -e "\n${BLUE}[系统开发库]${NC}"
 
@@ -390,6 +405,7 @@ print_summary() {
         echo -e "  ${BLUE}sudo apt-get update && sudo apt-get install -y \\"
         echo -e "    build-essential gcc-11 g++-11 clang \\"
         echo -e "    libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev \\"
+        echo -e "    linux-tools-common linux-tools-generic \\"
         echo -e "    python3${NC}"
         echo ""
     fi

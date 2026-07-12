@@ -34,6 +34,7 @@ cc_library(
     name = "loader",
     hdrs = [
         "loader/bpf_program_manager.h",
+        "loader/bpf_stats_reader.h",
         "loader/feature_probe.h",
     ],
     strip_include_prefix = "",
@@ -42,5 +43,6 @@ cc_library(
     linkopts = ["-lbpf", "-lelf", "-lz"],
     deps = [
         "//src/core:common",
+        "//src/plugin:api",
     ],
 )

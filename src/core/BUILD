@@ -75,6 +75,7 @@ cc_library(
         "engine/feature_bus.h",
         "engine/feature_driver.h",
         "engine/infrastructure_manager.h",
+        "engine/pid_manager.h",
         "engine/pipeline.h",
         "engine/timer_wheel.h",
         "engine/self_observability.h",
@@ -82,6 +83,7 @@ cc_library(
     strip_include_prefix = "",
     include_prefix = "core",
     visibility = ["//visibility:public"],
+    linkopts = ["-lbpf"],
     deps = [
         ":common",
         ":data",

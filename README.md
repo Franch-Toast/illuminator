@@ -8,7 +8,7 @@
 
 ## 核心特性
 
-- **eBPF 零侵入采集**：基于 libbpf + CO-RE 的现代 eBPF 模式，支持 CPU 性能剖析、内存分配追踪、网络连接监控、块 I/O 延迟分析、调度事件追踪
+- **eBPF 零侵入采集**：基于 libbpf + CO-RE + bpftool skeleton 的现代 eBPF 模式（BPF 字节码嵌入二进制），支持 CPU 性能剖析、内存分配追踪、网络连接监控、块 I/O 延迟分析、调度事件追踪
 - **事件驱动异步管道 (v3)**：`Source → AsyncChannel → Processor → Aggregator → Sink` 四阶段管道，基于 TimerWheel (timerfd+epoll) 统一调度、CollectPool 并行采集、ProcessThread 纯事件处理、SinkPool I/O 隔离，支持 Pull/Push 双模式、FlushSentinel 信号机制、水位线反压
 - **三层插件系统**：
   - **Builtin**（内建）：编译时链接，零开销
@@ -56,7 +56,7 @@
   │                               └────────────────────────────┘    │
   │                                                                  │
   │  Shared Infra: Arena + LockFreeQueue + ThreadPool                │
-  │  eBPF Subsystem: libbpf Skeleton (嵌入字节码) + Ring Buffer + BTF │
+  │  eBPF Subsystem: bpftool gen skeleton (嵌入字节码) + Ring Buffer + BTF │
   │  Plugin Manager: SO Loader + WASM Runtime + Plugin Registry      │
   │  Storage Layer: SQLite (WAL 模式)                                │
   │  Export Layer: pprof / OTLP / Prometheus / JSON                  │
@@ -236,6 +236,7 @@ illuminator/
 | **Linux 内核** | 5.8+ | eBPF Ring Buffer 支持 |
 | **Bazel** | 7.0+ | 构建系统 (推荐使用 Bazelisk) |
 | **Clang** | 14+ | BPF 探针编译 (`-target bpf`) |
+| **bpftool** | 7.0+ | BPF skeleton 头文件生成 (`bpftool gen skeleton`) |
 | **libbpf** | 1.0+ | eBPF 程序加载器 |
 | **libelf + zlib** | - | ELF 解析 (libbpf 依赖) |
 | **SQLite3** | 3.35+ | 默认存储后端 |
@@ -287,7 +288,8 @@ make dev
 sudo apt install -y npm && sudo npm install -g @bazel/bazelisk
 
 # eBPF 工具链
-sudo apt install -y clang llvm libbpf-dev libelf-dev zlib1g-dev
+sudo apt install -y clang llvm libbpf-dev libelf-dev zlib1g-dev \
+  linux-tools-common linux-tools-generic
 
 # SQLite
 sudo apt install -y libsqlite3-dev
@@ -326,10 +328,10 @@ bazel build //src/cli:illuminator --config=dbg
 
 ### 编译 BPF 探针
 
-BPF 探针可通过 Bazel 编译（推荐）：
+BPF 探针通过 Bazel 编译，使用 `bpftool gen skeleton` 生成类型安全的骨架头文件（`.skel.h`），BPF 字节码嵌入二进制无需外部 `.bpf.o` 文件：
 
 ```bash
-# 编译全部 BPF 探针
+# 编译全部 BPF 探针（含 skeleton 生成）
 bazel build //src/ebpf/probes:all
 
 # 编译单个探针
