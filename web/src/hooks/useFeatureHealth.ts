@@ -118,13 +118,13 @@ export function useFeatureHealth(featureName: string): FeatureHealthInfo {
 
         prevBpfRef.current = { total: totalEvents, full: bufferFull }
 
-        statsRef.current = {
+        const updated = {
           state: String(stats.state ?? 'unknown'),
           uptime_ms: Number(stats.uptime_ms ?? 0),
           batches_processed: Number(stats.batches_processed ?? 0),
           records_processed: Number(stats.records_processed ?? 0),
           errors: Number(stats.errors ?? 0),
-          status: 'active',
+          status: 'active' as const,
           lastUpdatedAt: Date.now(),
           bpf_total_events: totalEvents,
           bpf_buffer_full: bufferFull,
@@ -132,6 +132,8 @@ export function useFeatureHealth(featureName: string): FeatureHealthInfo {
           bpf_filtered: filtered,
           buffer_full_rate: bufferFullRate,
         }
+        statsRef.current = updated
+        setHealth(prev => ({ ...prev, ...updated }))
       } catch {
         // Keep existing stats on error; data-flow timers still report degraded/unavailable.
       }

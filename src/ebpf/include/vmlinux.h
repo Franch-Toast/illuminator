@@ -70389,7 +70389,7 @@ struct trace_event_raw_block_rq_requeue {
 	char __data[0];
 };
 
-struct trace_event_raw_block_rq_complete {
+struct trace_event_raw_block_rq_completion {
 	struct trace_entry ent;
 	dev_t dev;
 	sector_t sector;

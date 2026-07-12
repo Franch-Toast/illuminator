@@ -124,7 +124,7 @@ int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx) {
 //   中的数据在 BPF 程序执行期间保证有效
 // ============================================================================
 SEC("tracepoint/block/block_rq_complete")
-int trace_block_rq_complete(struct trace_event_raw_block_rq_complete *ctx) {
+int trace_block_rq_complete(struct trace_event_raw_block_rq_completion *ctx) {
     CHECK_GATE();
     __u64 key = ctx->sector;
     struct ns_request_start *start = bpf_map_lookup_elem(&req_starts, &key);
@@ -150,6 +150,7 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq_complete *ctx) {
     // IO 请求参数
     e->sector = ctx->sector;       // 起始扇区号
     e->nr_sector = ctx->nr_sector; // 扇区数（每个扇区通常 512 字节）
+    e->dev = ctx->dev;             // 块设备号
 
     // 拷贝进程名（__builtin_memcpy 是 BPF 编译器内置的安全 memcpy）
     __builtin_memcpy(&e->comm, &start->comm, TASK_COMM_LEN);

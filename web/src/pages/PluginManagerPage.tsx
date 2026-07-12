@@ -43,10 +43,13 @@ export default function PluginManagerPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [featRes, budgetRes] = await Promise.all([api.features(), api.budget()])
+      const featRes = await api.features()
       setFeatures(featRes.features)
-      setBudget(budgetRes)
     } catch { /* backend not available */ }
+    try {
+      const budgetRes = await api.budget()
+      setBudget(budgetRes)
+    } catch { /* budget endpoint not implemented yet */ }
   }, [])
 
   useEffect(() => {

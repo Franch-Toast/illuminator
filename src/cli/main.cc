@@ -271,6 +271,11 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                 auto* drv = bus.GetDriver(d.name);
                 if (drv) {
                     j["state"] = illuminator::DriverStateToString(drv->State());
+                    auto stats = drv->GetStats();
+                    j["batches_processed"] = stats.batches_processed;
+                    j["records_processed"] = stats.records_processed;
+                    j["errors"] = stats.errors;
+                    j["uptime_ms"] = stats.uptime_ms;
                 }
                 arr.push_back(std::move(j));
             }
@@ -477,6 +482,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                 }
                 auto stats = drv->GetStats();
                 nlohmann::json j = {
+                    {"state", illuminator::DriverStateToString(drv->State())},
                     {"batches_processed", stats.batches_processed},
                     {"records_processed", stats.records_processed},
                     {"errors", stats.errors},
