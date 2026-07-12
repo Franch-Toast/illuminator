@@ -33,9 +33,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -95,7 +97,54 @@ public:
     }
 
     void AddSink(std::unique_ptr<SinkPlugin> sink) {
-        sinks_.push_back(std::move(sink));
+        sinks_.push_back(std::shared_ptr<SinkPlugin>(sink.release()));
+    }
+
+    // ====================================================================
+    // AddSinkRuntime — 运行时动态添加 Sink
+    // ====================================================================
+    // 在 Pipeline 已经启动后安全地添加新的 Sink。方法内部会先调用 sink->Start()，
+    // 然后在写锁保护下加入 sinks_ 列表。ProcessThread 在遍历 sinks_ 时持有读锁，
+    // 因此本操作与数据处理并发安全。
+    Status AddSinkRuntime(std::unique_ptr<SinkPlugin> sink) {
+        if (!sink) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                                 "Pipeline AddSinkRuntime received null sink");
+        }
+        if (!running_.load(std::memory_order_acquire)) {
+            return Status::Error(StatusCode::kUnavailable,
+                                 "Pipeline is not running: " + name_);
+        }
+        auto status = sink->Start();
+        if (!status.ok()) return status;
+
+        std::unique_lock<std::shared_mutex> lock(sinks_mutex_);
+        sinks_.push_back(std::shared_ptr<SinkPlugin>(sink.release()));
+        return Status::Ok();
+    }
+
+    // ====================================================================
+    // RemoveSinkRuntime — 运行时动态移除 Sink
+    // ====================================================================
+    // 按 Sink::Name() 查找并移除指定 Sink。持有写锁期间将 sink 从列表中取出，
+    // 释放锁后再调用 Flush() + Stop()，避免在持有写锁时执行可能阻塞的 I/O。
+    Status RemoveSinkRuntime(const std::string& name) {
+        std::unique_lock<std::shared_mutex> lock(sinks_mutex_);
+        auto it = std::find_if(sinks_.begin(), sinks_.end(),
+                               [&name](const std::shared_ptr<SinkPlugin>& s) {
+                                   return s && s->Name() == name;
+                               });
+        if (it == sinks_.end()) {
+            return Status::Error(StatusCode::kNotFound,
+                                 "Sink not found in pipeline: " + name);
+        }
+        auto sink = std::move(*it);
+        sinks_.erase(it);
+        lock.unlock();
+
+        sink->Flush();
+        sink->Stop();
+        return Status::Ok();
     }
 
     void SetSinkPool(ThreadPool* pool) { sink_pool_ = pool; }
@@ -159,9 +208,12 @@ public:
 
         for (auto& p : processors_) p->Stop();
         if (aggregator_) aggregator_->Stop();
-        for (auto& s : sinks_) {
-            s->Flush();
-            s->Stop();
+        {
+            std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
+            for (auto& s : sinks_) {
+                s->Flush();
+                s->Stop();
+            }
         }
 
         auto& ch = ingest_channel_.stats();
@@ -241,8 +293,43 @@ public:
         return batch;
     }
 
-    const std::vector<std::unique_ptr<SinkPlugin>>& GetSinks() const {
+    const std::vector<std::shared_ptr<SinkPlugin>>& GetSinks() const {
         return sinks_;
+    }
+
+    // ========================================================================
+    // Reconfigure — 运行时动态重配置，贯穿 Pipeline 全链路
+    // ========================================================================
+    // 依次调用 Source → Processors → Aggregator → Sinks 的 Reconfigure()。
+    // 对于返回 kUnimplemented 的插件，跳过而不中断链路（向后兼容）。
+    // 其他非 ok 状态会立即返回错误。
+    Status Reconfigure(const ConfigValue& params) {
+        bool requires_restart = false;
+        if (source_) {
+            auto s = source_->Reconfigure(params);
+            if (!IsReconfigureContinueCode(s.code())) return s;
+            if (s.code() == StatusCode::kRequiresRestart) requires_restart = true;
+        }
+        for (auto& p : processors_) {
+            auto s = p->Reconfigure(params);
+            if (!IsReconfigureContinueCode(s.code())) return s;
+            if (s.code() == StatusCode::kRequiresRestart) requires_restart = true;
+        }
+        if (aggregator_) {
+            auto s = aggregator_->Reconfigure(params);
+            if (!IsReconfigureContinueCode(s.code())) return s;
+            if (s.code() == StatusCode::kRequiresRestart) requires_restart = true;
+        }
+        for (auto& s : sinks_) {
+            auto rc = s->Reconfigure(params);
+            if (!IsReconfigureContinueCode(rc.code())) return rc;
+            if (rc.code() == StatusCode::kRequiresRestart) requires_restart = true;
+        }
+        if (requires_restart) {
+            return Status(StatusCode::kRequiresRestart,
+                          "some parameters require restart to take effect");
+        }
+        return Status::Ok();
     }
 
 private:
@@ -327,6 +414,7 @@ private:
 
     void SubmitToSinks(DataBatchPtr batch) {
         if (!sink_pool_) {
+            std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
             for (auto& sink : sinks_) {
                 auto status = sink->Write(batch);
                 if (!status.ok()) {
@@ -346,10 +434,11 @@ private:
             return;
         }
 
+        std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
         for (auto& sink : sinks_) {
             sink_pool_->Submit(
-                [sink_ptr = sink.get(), batch, this]() -> void {
-                    auto status = sink_ptr->Write(batch);
+                [sink, batch, this]() -> void {
+                    auto status = sink->Write(batch);
                     if (!status.ok()) {
                         IL_WARN("Sink write error in pipeline '{}': {}",
                                 name_, status.message());
@@ -387,7 +476,8 @@ private:
     std::unique_ptr<SourcePlugin> source_;
     std::vector<std::unique_ptr<ProcessorPlugin>> processors_;
     std::unique_ptr<AggregatorPlugin> aggregator_;
-    std::vector<std::unique_ptr<SinkPlugin>> sinks_;
+    std::vector<std::shared_ptr<SinkPlugin>> sinks_;
+    mutable std::shared_mutex sinks_mutex_;
 
     AsyncChannel ingest_channel_;
     ThreadPool* sink_pool_ = nullptr;

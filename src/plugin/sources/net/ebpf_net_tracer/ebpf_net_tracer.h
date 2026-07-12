@@ -20,8 +20,9 @@
 
 namespace illuminator {
 
-IL_DEFINE_SKEL_OPS(NetTracerSkelOps, net_tracer_sk,
-                   net_events, collection_gate, "net-poll");
+IL_DEFINE_SKEL_OPS_WITH_META(NetTracerSkelOps, net_tracer_sk,
+                             net_events, collection_gate, "net-poll",
+                             meta_stats);
 
 class EbpfNetTracer : public EbpfSkeletonSource<NetTracerSkelOps> {
 public:

@@ -47,7 +47,7 @@ struct RecordingSession {
 
 class RecordingSink : public SinkPlugin {
 public:
-    const char* Name() const override { return "recording_sink"; }
+    const char* Name() const override { return "recording"; }
     const char* Version() const override { return "0.1.0"; }
 
     Status Init(const ConfigValue& config) override {

@@ -3,7 +3,7 @@ import { Routes, Route, NavLink } from 'react-router-dom'
 import TimeControls from './components/TimeControls/TimeControls'
 import StatusBar from './components/Layout/StatusBar'
 import ResourceBudget from './components/Layout/ResourceBudget'
-import ConnectionIndicator from './components/Layout/ConnectionIndicator'
+import { ConnectionStatus } from './components/shared'
 import ExportControl from './components/Layout/ExportControl'
 import RecordingControls from './components/RecordingControls'
 import TimeWindowSelector from './components/TimeWindowSelector'
@@ -150,7 +150,7 @@ export default function App() {
           <TimeWindowSelector />
           <RecordingControls featureName="cpu_utilization" compact />
           <ExportControl />
-          <ConnectionIndicator />
+          <ConnectionStatus />
           {sseConnected && <span style={{ fontSize: 10, color: '#34d399' }}>SSE</span>}
           <ResourceBudget />
         </div>

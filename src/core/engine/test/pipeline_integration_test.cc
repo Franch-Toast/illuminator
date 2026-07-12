@@ -326,5 +326,400 @@ TEST(PipelineIntegrationTest, MultiplePushModePipelinesStartIndependently) {
     p3->Stop();
 }
 
+// =========================================================================
+// 新增 Mock 组件（用于扩展集成测试场景）
+// =========================================================================
+
+// ReconfigurableSource — 记录 Reconfigure 调用和参数
+// 场景 3: Reconfigure 动态修改参数 + 验证 Source 收到
+class ReconfigurableSource : public SourcePlugin {
+public:
+    const char* Name() const override { return "reconfig_source"; }
+    const char* Version() const override { return "0.1.0"; }
+    uint32_t IntervalMs() const override { return 50; }
+
+    StatusOr<DataBatchPtr> Collect() override {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        batch->AddRecord().SetField(batch->InternString("v"), double{1.0});
+        return batch;
+    }
+
+    Status Reconfigure(const ConfigValue& params) override {
+        reconfigure_count_.fetch_add(1, std::memory_order_relaxed);
+        last_interval_ms_.store(params["interval_ms"].AsInt(IntervalMs()));
+        return Status::Ok();
+    }
+
+    uint64_t ReconfigureCount() const { return reconfigure_count_.load(); }
+    int64_t LastIntervalMs() const { return last_interval_ms_.load(); }
+
+private:
+    std::atomic<uint64_t> reconfigure_count_{0};
+    std::atomic<int64_t> last_interval_ms_{0};
+};
+
+// BackpressureSource — 记录 OnBackpressure 调用
+// 场景 6: 反压触发 + 验证 Source OnBackpressure 被调用
+class BackpressureSource : public SourcePlugin {
+public:
+    const char* Name() const override { return "bp_source"; }
+    const char* Version() const override { return "0.1.0"; }
+    uint32_t IntervalMs() const override { return 50; }
+
+    StatusOr<DataBatchPtr> Collect() override {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        batch->AddRecord();
+        return batch;
+    }
+
+    void OnBackpressure(bool active) override {
+        if (active) {
+            bp_active_count_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            bp_clear_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    uint64_t BpActiveCount() const { return bp_active_count_.load(); }
+    uint64_t BpClearCount() const { return bp_clear_count_.load(); }
+
+private:
+    std::atomic<uint64_t> bp_active_count_{0};
+    std::atomic<uint64_t> bp_clear_count_{0};
+};
+
+// SlowSink — 每次写入时 sleep，用于触发反压和丢弃
+class SlowSink : public SinkPlugin {
+public:
+    const char* Name() const override { return "slow_sink"; }
+    const char* Version() const override { return "0.1.0"; }
+
+    explicit SlowSink(int delay_ms = 100) : delay_ms_(delay_ms) {}
+
+    Status Write(DataBatchPtr batch) override {
+        if (!batch) return Status::Ok();
+        write_count_.fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
+        return Status::Ok();
+    }
+
+    uint64_t WriteCount() const { return write_count_.load(); }
+
+private:
+    int delay_ms_;
+    std::atomic<uint64_t> write_count_{0};
+};
+
+// TaggedSource — 生成带标签的数据，用于多 Pipeline 隔离测试
+class TaggedSource : public SourcePlugin {
+public:
+    explicit TaggedSource(std::string tag) : tag_(std::move(tag)) {}
+
+    const char* Name() const override { return "tagged_source"; }
+    const char* Version() const override { return "0.1.0"; }
+    uint32_t IntervalMs() const override { return 50; }
+
+    StatusOr<DataBatchPtr> Collect() override {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        auto& rec = batch->AddRecord();
+        rec.labels.push_back(
+            {batch->InternString("tag"), batch->InternString(tag_)});
+        rec.SetField(batch->InternString("value"), double{1.0});
+        return batch;
+    }
+
+private:
+    std::string tag_;
+};
+
+// TagCheckingSink — 检查收到的数据标签，验证隔离性
+class TagCheckingSink : public SinkPlugin {
+public:
+    explicit TagCheckingSink(std::string expected_tag)
+        : expected_tag_(std::move(expected_tag)) {}
+
+    const char* Name() const override { return "tag_check_sink"; }
+    const char* Version() const override { return "0.1.0"; }
+
+    Status Write(DataBatchPtr batch) override {
+        if (!batch) return Status::Ok();
+        write_count_.fetch_add(1, std::memory_order_relaxed);
+        for (const auto& rec : batch->records()) {
+            for (const auto& label : rec.labels) {
+                std::string key(label.key);
+                std::string val(label.value);
+                if (key == "tag" && val != expected_tag_) {
+                    foreign_count_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        return Status::Ok();
+    }
+
+    uint64_t WriteCount() const { return write_count_.load(); }
+    uint64_t ForeignCount() const { return foreign_count_.load(); }
+
+private:
+    std::string expected_tag_;
+    std::atomic<uint64_t> write_count_{0};
+    std::atomic<uint64_t> foreign_count_{0};
+};
+
+// PausablePushSource — 支持 PauseCollection/ResumeCollection 的 push 源
+class PausablePushSource : public SourcePlugin {
+public:
+    const char* Name() const override { return "pausable_push_source"; }
+    const char* Version() const override { return "0.1.0"; }
+    bool IsPushMode() const override { return true; }
+
+    Status Start() override {
+        running_ = true;
+        push_thread_ = std::thread([this] {
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (!paused_ && callback_) {
+                    auto batch = std::make_shared<DataBatch>(
+                        DataBatch::Type::kProfile);
+                    auto& s = batch->AddStackSample();
+                    s.pid = 1234;
+                    s.tid = 1234;
+                    s.count = 1;
+                    callback_(std::move(batch));
+                    push_count_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+        return Status::Ok();
+    }
+
+    Status Stop() override {
+        running_ = false;
+        if (push_thread_.joinable()) push_thread_.join();
+        return Status::Ok();
+    }
+
+    Status PauseCollection() override { paused_ = true; return Status::Ok(); }
+    Status ResumeCollection() override { paused_ = false; return Status::Ok(); }
+
+    uint64_t PushCount() const { return push_count_.load(); }
+    bool IsPaused() const { return paused_.load(); }
+
+private:
+    std::atomic<bool> running_{false};
+    std::atomic<bool> paused_{false};
+    std::atomic<uint64_t> push_count_{0};
+    std::thread push_thread_;
+};
+
+// =========================================================================
+// 场景 2: 动态 AddSinkRuntime + 验证新 Sink 开始接收
+// =========================================================================
+TEST(PipelineIntegrationTest, DynamicAddSinkRuntimeReceivesData) {
+    Pipeline pipe("test_dynamic_add_int");
+    pipe.SetSource(std::make_unique<MockSource>());
+
+    auto sink1 = std::make_unique<MockSink>();
+    auto* sink1_ptr = sink1.get();
+    pipe.AddSink(std::move(sink1));
+
+    ASSERT_TRUE(pipe.Start().ok());
+
+    auto batch1 = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+    batch1->AddRecord();
+    pipe.Enqueue(batch1);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_GT(sink1_ptr->WriteCount(), 0u);
+
+    // 动态添加第二个 Sink
+    auto sink2 = std::make_unique<MockSink>();
+    auto* sink2_ptr = sink2.get();
+    ASSERT_TRUE(pipe.AddSinkRuntime(std::move(sink2)).ok());
+
+    auto batch2 = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+    batch2->AddRecord();
+    pipe.Enqueue(batch2);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(pipe.Stop().ok());
+
+    EXPECT_GT(sink1_ptr->WriteCount(), 0u);
+    EXPECT_GT(sink2_ptr->WriteCount(), 0u);
+}
+
+// =========================================================================
+// 场景 3: Reconfigure 动态修改参数 + 验证 Source 收到
+// =========================================================================
+TEST(PipelineIntegrationTest, ReconfigureParamsReachSource) {
+    Pipeline pipe("test_reconfig_int");
+    auto source = std::make_unique<ReconfigurableSource>();
+    auto* source_ptr = source.get();
+    pipe.SetSource(std::move(source));
+    pipe.AddSink(std::make_unique<MockSink>());
+
+    ASSERT_TRUE(pipe.Start().ok());
+
+    ConfigValue params;
+    params.Set("interval_ms", int64_t{250});
+
+    auto status = pipe.Reconfigure(params);
+    EXPECT_TRUE(status.ok()) << status.message();
+
+    EXPECT_EQ(source_ptr->ReconfigureCount(), 1u);
+    EXPECT_EQ(source_ptr->LastIntervalMs(), 250);
+
+    ASSERT_TRUE(pipe.Stop().ok());
+}
+
+// =========================================================================
+// 场景 4: Pause/Resume 状态切换 + 验证数据流中断/恢复
+// =========================================================================
+TEST(PipelineIntegrationTest, PauseResumeStopsAndResumesDataFlow) {
+    auto& infra = InfrastructureManager::Instance();
+    if (!infra.IsStarted()) {
+        infra.Start({.collect_pool_threads = 1, .sink_pool_threads = 2});
+    }
+
+    auto pipe = std::make_unique<Pipeline>("test_pause_resume_int");
+    pipe->SetSource(std::make_unique<PausablePushSource>());
+    auto sink = std::make_unique<MockSink>();
+    auto* sink_ptr = sink.get();
+    pipe->AddSink(std::move(sink));
+    pipe->SetSinkPool(infra.GetSinkPool());
+
+    ASSERT_TRUE(pipe->Start().ok());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    uint64_t count_before = sink_ptr->WriteCount();
+    EXPECT_GT(count_before, 0u);
+
+    // 暂停采集
+    auto* src = pipe->GetSource();
+    ASSERT_TRUE(src->PauseCollection().ok());
+    EXPECT_TRUE(static_cast<PausablePushSource*>(src)->IsPaused());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // 恢复采集
+    ASSERT_TRUE(src->ResumeCollection().ok());
+    EXPECT_FALSE(static_cast<PausablePushSource*>(src)->IsPaused());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    uint64_t count_after = sink_ptr->WriteCount();
+    EXPECT_GT(count_after, count_before);
+
+    pipe->Stop();
+}
+
+// =========================================================================
+// 场景 5: 多 Pipeline 并行运行不互相干扰
+// =========================================================================
+TEST(PipelineIntegrationTest, MultiplePipelinesDoNotInterfere) {
+    auto& infra = InfrastructureManager::Instance();
+    if (!infra.IsStarted()) {
+        infra.Start({.collect_pool_threads = 2, .sink_pool_threads = 4});
+    }
+
+    auto pipe1 = std::make_unique<Pipeline>("test_isolation_A");
+    pipe1->SetSource(std::make_unique<TaggedSource>("pipeline_A"));
+    auto sink1 = std::make_unique<TagCheckingSink>("pipeline_A");
+    auto* sink1_ptr = sink1.get();
+    pipe1->AddSink(std::move(sink1));
+    pipe1->SetSinkPool(infra.GetSinkPool());
+
+    auto pipe2 = std::make_unique<Pipeline>("test_isolation_B");
+    pipe2->SetSource(std::make_unique<TaggedSource>("pipeline_B"));
+    auto sink2 = std::make_unique<TagCheckingSink>("pipeline_B");
+    auto* sink2_ptr = sink2.get();
+    pipe2->AddSink(std::move(sink2));
+    pipe2->SetSinkPool(infra.GetSinkPool());
+
+    ASSERT_TRUE(pipe1->Start().ok());
+    ASSERT_TRUE(pipe2->Start().ok());
+
+    auto batch_a = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+    auto& rec_a = batch_a->AddRecord();
+    rec_a.labels.push_back(
+        {batch_a->InternString("tag"), batch_a->InternString("pipeline_A")});
+    rec_a.SetField(batch_a->InternString("v"), double{1.0});
+    pipe1->Enqueue(batch_a);
+
+    auto batch_b = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+    auto& rec_b = batch_b->AddRecord();
+    rec_b.labels.push_back(
+        {batch_b->InternString("tag"), batch_b->InternString("pipeline_B")});
+    rec_b.SetField(batch_b->InternString("v"), double{2.0});
+    pipe2->Enqueue(batch_b);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    pipe1->Stop();
+    pipe2->Stop();
+
+    EXPECT_GT(sink1_ptr->WriteCount(), 0u);
+    EXPECT_GT(sink2_ptr->WriteCount(), 0u);
+    // 各自只收到自己 Pipeline 的数据
+    EXPECT_EQ(sink1_ptr->ForeignCount(), 0u);
+    EXPECT_EQ(sink2_ptr->ForeignCount(), 0u);
+}
+
+// =========================================================================
+// 场景 6: 反压触发 + 验证 Source OnBackpressure 被调用
+// =========================================================================
+TEST(PipelineIntegrationTest, BackpressureTriggersSourceCallback) {
+    // 小 channel + 慢 sink → channel 填满 → 反压触发
+    Pipeline pipe("test_bp_int", 8);  // capacity=8, bp_high=0.8 → bp at ~7
+    auto source = std::make_unique<BackpressureSource>();
+    auto* source_ptr = source.get();
+    pipe.SetSource(std::move(source));
+    pipe.AddSink(std::make_unique<SlowSink>(50));  // 50ms per write
+
+    ASSERT_TRUE(pipe.Start().ok());
+
+    // 快速注入大量数据，填满 channel
+    for (int i = 0; i < 30; ++i) {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        batch->AddRecord();
+        pipe.Enqueue(batch);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // OnBackpressure(true) 应该被调用
+    EXPECT_GT(source_ptr->BpActiveCount(), 0u);
+    EXPECT_GT(pipe.ChannelBackpressureEvents(), 0u);
+
+    // 等待数据排空
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    ASSERT_TRUE(pipe.Stop().ok());
+}
+
+// =========================================================================
+// 场景 7: Channel 满时数据丢弃 + 统计正确
+// =========================================================================
+TEST(PipelineIntegrationTest, ChannelFullDropsDataAndUpdatesStats) {
+    // 极小 channel + 慢 sink → 数据被丢弃
+    Pipeline pipe("test_drop_int", 4);  // capacity=4
+    pipe.SetSource(std::make_unique<MockSource>());
+    pipe.AddSink(std::make_unique<SlowSink>(100));  // 100ms per write
+
+    ASSERT_TRUE(pipe.Start().ok());
+
+    // 快速注入超过 channel 容量的数据
+    for (int i = 0; i < 30; ++i) {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        batch->AddRecord();
+        pipe.Enqueue(batch);
+    }
+
+    // 应该有数据被丢弃
+    EXPECT_GT(pipe.ChannelDropped(), 0u);
+    EXPECT_GT(pipe.ChannelEnqueued(), 0u);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(pipe.Stop().ok());
+}
+
 }  // namespace
 }  // namespace illuminator

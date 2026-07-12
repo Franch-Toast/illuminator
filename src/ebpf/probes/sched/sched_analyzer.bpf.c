@@ -54,6 +54,8 @@ struct {
     __type(value, __u64);
 } wakeup_ts SEC(".maps");
 
+DECLARE_META_STATS();
+
 // ---- 辅助函数 ----
 
 // 读取用户态配置的位标志（默认值为 3 = 详细事件 + 迁移追踪）
@@ -103,9 +105,13 @@ int sched_analyzer_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
     // 仅当 bit0=1 时输出详细事件
     if (!(sched_analyzer_flags() & 1)) return 0;
 
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_sched_event *e =
         bpf_ringbuf_reserve(&sched_analyzer_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     e->timestamp_ns = ts;
     e->next_pid = pid;
@@ -146,9 +152,13 @@ int sched_analyzer_switch(struct trace_event_raw_sched_switch *ctx) {
     // 仅当 bit0=1 时输出详细事件
     if (!(sched_analyzer_flags() & 1)) return 0;
 
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_sched_event *e =
         bpf_ringbuf_reserve(&sched_analyzer_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     e->timestamp_ns = ts;
     e->prev_pid = ctx->prev_pid;
@@ -187,9 +197,13 @@ int sched_analyzer_migrate(struct trace_event_raw_sched_migrate_task *ctx) {
     // 仅当 bit0=1 时同时输出详细迁移事件
     if (!(sched_analyzer_flags() & 1)) return 0;
 
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_sched_event *e =
         bpf_ringbuf_reserve(&sched_analyzer_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     e->timestamp_ns = bpf_ktime_get_ns();
     e->prev_pid = pid;

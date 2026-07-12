@@ -88,6 +88,7 @@
 #include "core/common/string_util.h"
 #include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
+#include "ebpf/loader/bpf_stats_reader.h"
 #include "ebpf/loader/stack_trace_util.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
@@ -182,7 +183,12 @@ public:
     const char* Version() const override { return "0.2.0"; }
 
     bool IsPushMode() const override { return stream_mode_; }
+    bool HasBpfProbe() const override { return !stub_mode_; }
     bool IsStub() const override { return stub_mode_; }
+
+    MetaStats GetBpfStats() const override {
+        return ReadBpfMetaStats(meta_stats_fd_);
+    }
 
     // ========================================================================
     // Collect — 采集方法（聚合模式下的 Pull 入口）
@@ -218,7 +224,8 @@ public:
     // Init — 初始化插件，读取并缓存所有配置参数
     // ========================================================================
     Status Init(const ConfigValue& config) override {
-        frequency_hz_ = static_cast<int>(config["frequency_hz"].AsInt(49));
+        frequency_hz_ = static_cast<int>(
+            config["sample_freq"].AsInt(config["frequency_hz"].AsInt(49)));
         aggregate_interval_ms_ =
             static_cast<uint32_t>(config["aggregate_interval_ms"].AsInt(1000));
         stack_depth_ = static_cast<int>(config["stack_depth"].AsInt(128));
@@ -230,8 +237,11 @@ public:
 
         target_pids_ =
             ParseCommaSeparated<uint32_t>(config["target_pids"].AsString(""));
-        ParseCommaSeparatedStrings(config["target_comms"].AsString(""),
-                                   &target_comms_);
+        // target_process_names 是 target_comms 的别名，优先使用 target_process_names
+        ParseCommaSeparatedStrings(
+            config["target_process_names"].AsString(
+                config["target_comms"].AsString("")),
+            &target_comms_);
 
         // 限制最大栈深度
         if (stack_depth_ > MAX_STACK_DEPTH)
@@ -261,6 +271,11 @@ public:
             return Status::Ok();
         }
 
+        // 在 load 前写入 rodata 配置：采样频率
+        if (cpu_skel_->rodata) {
+            cpu_skel_->rodata->sample_freq = static_cast<uint64_t>(frequency_hz_);
+        }
+
         int err = cpu_profiler_sk_bpf__load(cpu_skel_);
         if (err) {
             cpu_profiler_sk_bpf__destroy(cpu_skel_);
@@ -278,6 +293,7 @@ public:
         }
         stacks_fd_ = stacks_fd;
         counts_fd_ = counts_fd;
+        meta_stats_fd_ = bpf_map__fd(cpu_skel_->maps.meta_stats);
 
         ApplyFilterMaps();
 
@@ -405,7 +421,8 @@ public:
     // 线程安全：BPF map 操作是原子的。
     Status Reconfigure(const ConfigValue& params) override {
         auto pid_str = params["target_pids"].AsString("");
-        auto comm_str = params["target_comms"].AsString("");
+        auto comm_str = params["target_process_names"].AsString(
+            params["target_comms"].AsString(""));
 
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
         target_comms_.clear();
@@ -625,6 +642,8 @@ private:
                 std::chrono::milliseconds(aggregate_interval_ms_));
             if (!running_.load())
                 break;
+            if (paused_.load())
+                continue;
             FlushAggregatedCounts();
         }
     }
@@ -793,44 +812,65 @@ private:
 
     // PID 映射预留点（容器环境如需 PID namespace 转换可在此扩展）
 
-    // ---- Push 模式暂停/恢复 ----
-    // stream_mode_ 时 IsPushMode()=true，通过 disable/enable perf events 实现暂停。
-    // 同时清除 cfg bit0 使 BPF 停止向 ringbuf 发射事件。
+    // ---- 暂停/恢复 ----
+    // 无论 stream 还是 aggregated 模式，都通过 PERF_EVENT_IOC_DISABLE/ENABLE
+    // 真正停止/恢复内核 perf_event 采样；stream 模式额外停止/重启 ringbuf poll
+    // 线程，并清除/恢复 cfg bit0 以阻止/允许 BPF 向 ringbuf 发射事件。
     Status PauseCollection() override {
-        if (stub_mode_ || !stream_mode_) return Status::Ok();
-        int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
-        if (cfg_fd >= 0) {
-            uint32_t k = 0, val = 0;
-            bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
+        if (stub_mode_ || perf_fds_.empty()) return Status::Ok();
+
+        // stream 模式：先关 BPF gate，停止 poll 线程，再 disable perf events
+        if (stream_mode_) {
+            int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
+            if (cfg_fd >= 0) {
+                uint32_t k = 0, val = 0;
+                bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
+            }
+            paused_.store(true);
+            if (poll_thread_.joinable())
+                poll_thread_.join();
         }
+
         for (int fd : perf_fds_)
             ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+
         paused_.store(true);
-        if (poll_thread_.joinable())
-            poll_thread_.join();
-        IL_INFO("cpu_profiler: collection paused");
+        IL_INFO("cpu_profiler: collection paused ({} perf events disabled)",
+                perf_fds_.size());
         return Status::Ok();
     }
 
     Status ResumeCollection() override {
-        if (stub_mode_ || !stream_mode_) return Status::Ok();
+        if (stub_mode_ || perf_fds_.empty()) return Status::Ok();
+
         paused_.store(false);
-        poll_thread_ = std::thread([this] {
-            SetThreadName("cpuprofiler-poll");
-            while (running_.load() && !paused_.load())
-                ring_buffer__poll(ring_buf_, 100);
-        });
-        for (int fd : perf_fds_)
-            ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-        int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
-        if (cfg_fd >= 0) {
-            uint32_t k = 0;
-            uint32_t flags = 1u |
-                (!target_pids_.empty() ? 2u : 0u) |
-                (!target_comms_.empty() ? 4u : 0u);
-            bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
+
+        // stream 模式：先 enable perf events，再重启 poll 线程，最后恢复 BPF gate
+        if (stream_mode_) {
+            for (int fd : perf_fds_)
+                ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+
+            poll_thread_ = std::thread([this] {
+                SetThreadName("cpuprofiler-poll");
+                while (running_.load() && !paused_.load())
+                    ring_buffer__poll(ring_buf_, 100);
+            });
+
+            int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
+            if (cfg_fd >= 0) {
+                uint32_t k = 0;
+                uint32_t flags = 1u |
+                    (!target_pids_.empty() ? 2u : 0u) |
+                    (!target_comms_.empty() ? 4u : 0u);
+                bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
+            }
+        } else {
+            for (int fd : perf_fds_)
+                ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
         }
-        IL_INFO("cpu_profiler: collection resumed");
+
+        IL_INFO("cpu_profiler: collection resumed ({} perf events enabled)",
+                perf_fds_.size());
         return Status::Ok();
     }
 
@@ -866,6 +906,7 @@ private:
     struct cpu_profiler_sk_bpf* cpu_skel_ = nullptr;
     int stacks_fd_ = -1;
     int counts_fd_ = -1;                      // stack_counts map 的文件描述符
+    int meta_stats_fd_ = -1;
     std::vector<int> perf_fds_;               // 所有 perf_event 的文件描述符
     struct ring_buffer* ring_buf_ = nullptr;  // BPF ring buffer 句柄
     std::thread poll_thread_;                 // 流式轮询线程

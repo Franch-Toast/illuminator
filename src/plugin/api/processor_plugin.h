@@ -37,6 +37,12 @@ public:
     // - 返回 nullptr 表示丢弃整个批次
     // - 返回 error Status 表示处理失败
     virtual StatusOr<DataBatchPtr> Process(DataBatchPtr input) = 0;
+
+    // 运行时动态修改处理参数（如过滤规则、符号化开关）。
+    // 默认返回 Ok()（空操作），子类按需覆写。
+    virtual Status Reconfigure(const ConfigValue& /*params*/) {
+        return Status::Ok();
+    }
 };
 
 }  // namespace illuminator

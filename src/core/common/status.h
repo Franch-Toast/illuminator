@@ -56,6 +56,7 @@ enum class StatusCode {
     kUnimplemented,           // 功能未实现
     kUnavailable,             // 服务不可用
     kDataLoss,                // 数据丢失/损坏
+    kRequiresRestart,         // 参数已保存，但需要重启 Feature 才能生效
 };
 
 // ---- Status: 错误状态封装 ----
@@ -149,5 +150,14 @@ private:
     // variant 内部存储要么是成功的 T，要么是失败的 Status
     std::variant<T, Status> data_;
 };
+
+// 判断 Reconfigure 链路上某个组件的返回码是否应被视为“可继续”
+//（kUnimplemented 表示该插件不参与重配置；kRequiresRestart 表示已保存，
+//  但需要重启才能生效，均不应中断链路）。
+inline bool IsReconfigureContinueCode(StatusCode code) {
+    return code == StatusCode::kOk ||
+           code == StatusCode::kUnimplemented ||
+           code == StatusCode::kRequiresRestart;
+}
 
 }  // namespace illuminator

@@ -65,8 +65,8 @@
                          │ HTTP (cpp-httplib) / WebSocket (独立端口)
   ┌──────────────────────▼─────────────────────────────────────────┐
   │              Web 可视化平台 (React + TypeScript + Zustand)         │
-  │  TimeControls │ Dashboard │ Profiler │ Scheduler │ Compare       │
-  │  Query Console │ System │ StatusBar │ Keyboard Shortcuts          │
+  │  TimeControls │ Overview │ CPU │ Memory │ IO │ Network │ GPU    │
+  │  Query Console │ Plugins │ System │ Replay │ Keyboard Shortcuts  │
   └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -645,13 +645,16 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 
 | 页面 | 路由 | 核心功能 |
 |------|------|----------|
-| **Dashboard** | `/` | CPU 利用率趋势图、Per-core 热力图、**Core Activity Timeline**（per-core 历史热力图）、Stats Cards、Pipeline Health 表格 |
-| **Processes** | `/processes` | 进程/线程 CPU 排行（Top-N）、排序/过滤 |
-| **Profiler** | `/profiler` | On-CPU / Off-CPU 火焰图（d3-flame-graph）、函数搜索、SVG 导出、快照缓存 |
-| **Scheduler** | `/scheduler` | Overview（延迟分布/Top 进程/统计表格）、Time Series（趋势图）、**Gantt Chart**（CPU 泳道甘特图/散点图双模式）、Wakeups |
-| **Compare** | `/compare` | 双 Profile 捕获（Base/Compare，On-CPU/Off-CPU）、**差异火焰图**（红/灰/绿色映射）、Function Diff 表格（1000+ 函数对比） |
+| **Overview** | `/` | 系统概览：版本信息、Feature 状态表格、统计卡片 |
+| **CPU** | `/cpu` | CPU 利用率趋势图、Per-core 热力图、进程/线程 CPU 排行（System/Process 双 Tab） |
+| **Memory** | `/memory` | 内存监控（WIP） |
+| **IO** | `/io` | IOPS、IO 延迟监控（依赖 io_monitor feature） |
+| **Network** | `/network` | 网络流量、TCP 连接、重传统计（依赖 net_tracer feature） |
+| **GPU** | `/gpu` | GPU 监控（WIP） |
+| **Replay** | `/replay` | 录制回放 |
 | **Query** | `/query` | SQL 查询控制台（只读 SELECT）、示例查询、执行耗时统计 |
-| **System** | `/system` | 系统健康状态、聚合统计、管道详情表格、内部指标 JSON |
+| **Plugins** | `/plugins` | Feature Health Dashboard、热插拔管理 |
+| **System** | `/system` | 系统健康状态、Pipeline 详情表格（RUN/STOP/batch/record 计数）、内部指标 JSON |
 
 ---
 

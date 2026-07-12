@@ -1,6 +1,13 @@
 #include "../include/common.bpf.h"
 
 // ============================================================================
+// rodata 配置（由用户态在 skeleton load 前写入）
+// ============================================================================
+// sample_freq：与 userspace perf_event_attr.sample_freq 保持一致，便于 BPF
+// 程序在运行时感知当前采样频率（例如用于阈值计算或校验）。
+volatile const __u64 sample_freq = 49;
+
+// ============================================================================
 // 文件：illuminator/src/ebpf/probes/cpu_profiler.bpf.c
 // ============================================================================
 //
@@ -114,6 +121,8 @@ struct {
     __type(value, struct il_pidns_config);
 } cpu_pidns_cfg SEC(".maps");
 
+DECLARE_META_STATS();
+
 // ============================================================================
 // on_cpu_sample：CPU 采样处理函数（perf_event 类型）
 //
@@ -131,6 +140,11 @@ struct {
 // ============================================================================
 SEC("perf_event")
 int on_cpu_sample(struct bpf_perf_event_data *ctx) {
+    // rodata 配置引用，确保 sample_freq 被链接进 .rodata 并可在 load 前配置。
+    // 当前仅作存在性校验：freq=0 表示未正确配置，直接跳过。
+    if (sample_freq == 0)
+        return 0;
+
     // ---------------------------------------------------------------
     // 步骤 1：获取当前进程/线程标识
     // bpf_get_current_pid_tgid() 返回 (tgid << 32) | pid 的 64 位值
@@ -179,8 +193,10 @@ int on_cpu_sample(struct bpf_perf_event_data *ctx) {
     // 此时 pid 已经是 namespace-local PID（如果配置了 pidns）
     // ---------------------------------------------------------------
     if (cfg_flags & 2) {
-        if (!bpf_map_lookup_elem(&target_pids, &pid))
+        if (!bpf_map_lookup_elem(&target_pids, &pid)) {
+            INC_STAT(STAT_FILTERED);
             return 0;
+        }
     }
 
     // ---------------------------------------------------------------
@@ -190,8 +206,10 @@ int on_cpu_sample(struct bpf_perf_event_data *ctx) {
     if (cfg_flags & 4) {
         char cur_comm[TASK_COMM_LEN];
         bpf_get_current_comm(&cur_comm, sizeof(cur_comm));
-        if (!bpf_map_lookup_elem(&target_comms, &cur_comm))
+        if (!bpf_map_lookup_elem(&target_comms, &cur_comm)) {
+            INC_STAT(STAT_FILTERED);
             return 0;
+        }
     }
 
     // ---------------------------------------------------------------
@@ -239,10 +257,13 @@ int on_cpu_sample(struct bpf_perf_event_data *ctx) {
     // 如果 ring buffer 满（返回 NULL），静默丢弃本次采样
     // bpf_ringbuf_submit() 提交事件，使其对用户态可见
     // ---------------------------------------------------------------
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_cpu_sample_event *e =
         bpf_ringbuf_reserve(&cpu_events, sizeof(*e), 0);
-    if (!e)
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
         return 0;
+    }
 
     e->timestamp_ns = bpf_ktime_get_ns();  // 纳秒级时间戳
     e->pid = pid;

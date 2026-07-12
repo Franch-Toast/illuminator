@@ -16,7 +16,7 @@ export interface DataSource {
   destroy(): void
 }
 
-export type ConnectionStatus = 'connected' | 'connecting' | 'disconnected'
+export type ConnectionStatus = 'connected' | 'connecting' | 'reconnecting' | 'stale' | 'error' | 'disconnected'
 
 export interface DataSourceEvents {
   onConnectionChange?: (status: ConnectionStatus) => void

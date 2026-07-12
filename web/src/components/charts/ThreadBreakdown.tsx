@@ -1,3 +1,4 @@
+import { useState, useRef, useMemo, useCallback } from 'react'
 import { colors } from '../../styles/theme'
 
 export interface ThreadEntry {
@@ -27,7 +28,30 @@ function MiniSparkline({ value, max = 100 }: { value: number; max?: number }) {
   )
 }
 
+const ROW_HEIGHT = 32
+const VIRTUALIZE_THRESHOLD = 100
+const OVERSCAN = 5
+
 export default function ThreadBreakdown({ threads, processComm }: ThreadBreakdownProps) {
+  const [scrollTop, setScrollTop] = useState(0)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const maxVisibleHeight = 400
+
+  const sorted = useMemo(() =>
+    [...threads].sort((a, b) => b.cpu_total_pct - a.cpu_total_pct),
+    [threads]
+  )
+
+  const useVirtual = sorted.length > VIRTUALIZE_THRESHOLD
+  const visibleCount = Math.ceil(maxVisibleHeight / ROW_HEIGHT)
+
+  const startIdx = useVirtual ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN) : 0
+  const endIdx = useVirtual ? Math.min(sorted.length, startIdx + visibleCount + OVERSCAN * 2) : sorted.length
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(e.currentTarget.scrollTop)
+  }, [])
+
   if (threads.length === 0) {
     return (
       <div style={{ padding: 16, textAlign: 'center', color: colors.textMuted, fontSize: 12 }}>
@@ -35,8 +59,6 @@ export default function ThreadBreakdown({ threads, processComm }: ThreadBreakdow
       </div>
     )
   }
-
-  const sorted = [...threads].sort((a, b) => b.cpu_total_pct - a.cpu_total_pct)
 
   return (
     <div style={{ overflowX: 'auto' }}>
@@ -52,28 +74,56 @@ export default function ThreadBreakdown({ threads, processComm }: ThreadBreakdow
             <th style={th}>State</th>
           </tr>
         </thead>
-        <tbody>
-          {sorted.map(t => (
-            <tr key={t.tid} style={{ borderBottom: `1px solid ${colors.cardBorder}22` }}>
-              <td style={{ ...td, color: colors.textMuted, fontFamily: 'monospace' }}>{t.tid}</td>
-              <td style={{ ...td, color: colors.textPrimary, fontWeight: 500 }}>
-                {t.comm || processComm}
-              </td>
-              <td style={{ ...td, color: cpuColor(t.cpu_total_pct), fontWeight: 600, fontFamily: 'monospace' }}>
-                {t.cpu_total_pct.toFixed(1)}%
-              </td>
-              <td style={td}><MiniSparkline value={t.cpu_total_pct} /></td>
-              <td style={{ ...td, color: colors.textSecondary, fontFamily: 'monospace' }}>
-                {t.cpu_user_pct.toFixed(1)}%
-              </td>
-              <td style={{ ...td, color: colors.textSecondary, fontFamily: 'monospace' }}>
-                {t.cpu_sys_pct.toFixed(1)}%
-              </td>
-              <td style={{ ...td, color: stateColor(t.state) }}>{t.state}</td>
-            </tr>
-          ))}
-        </tbody>
       </table>
+
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        style={{
+          overflowY: useVirtual ? 'auto' : 'visible',
+          maxHeight: useVirtual ? maxVisibleHeight : undefined,
+        }}
+      >
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <tbody>
+            {useVirtual && startIdx > 0 && (
+              <tr style={{ height: startIdx * ROW_HEIGHT }}>
+                <td colSpan={7} />
+              </tr>
+            )}
+            {sorted.slice(startIdx, endIdx).map(t => (
+              <tr key={t.tid} style={{ borderBottom: `1px solid ${colors.cardBorder}22`, height: ROW_HEIGHT }}>
+                <td style={{ ...td, color: colors.textMuted, fontFamily: 'monospace' }}>{t.tid}</td>
+                <td style={{ ...td, color: colors.textPrimary, fontWeight: 500 }}>
+                  {t.comm || processComm}
+                </td>
+                <td style={{ ...td, color: cpuColor(t.cpu_total_pct), fontWeight: 600, fontFamily: 'monospace' }}>
+                  {t.cpu_total_pct.toFixed(1)}%
+                </td>
+                <td style={td}><MiniSparkline value={t.cpu_total_pct} /></td>
+                <td style={{ ...td, color: colors.textSecondary, fontFamily: 'monospace' }}>
+                  {t.cpu_user_pct.toFixed(1)}%
+                </td>
+                <td style={{ ...td, color: colors.textSecondary, fontFamily: 'monospace' }}>
+                  {t.cpu_sys_pct.toFixed(1)}%
+                </td>
+                <td style={{ ...td, color: stateColor(t.state) }}>{t.state}</td>
+              </tr>
+            ))}
+            {useVirtual && endIdx < sorted.length && (
+              <tr style={{ height: (sorted.length - endIdx) * ROW_HEIGHT }}>
+                <td colSpan={7} />
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {useVirtual && (
+        <div style={{ fontSize: 10, color: colors.textMuted, padding: '4px 10px', textAlign: 'right' }}>
+          Showing {endIdx - startIdx} of {sorted.length} threads (virtualized)
+        </div>
+      )}
     </div>
   )
 }

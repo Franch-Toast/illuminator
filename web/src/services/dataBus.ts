@@ -3,9 +3,14 @@
  *
  * 替代 LiveDataSource 的 Link Chain 架构，使用 SSE 单连接接收所有 Feature 数据。
  * 同时实现 DataSource 接口，让现有页面 hooks 无缝迁移。
+ *
+ * 优化点：
+ * - 批量缓冲：100ms 内的消息合并为一个 rAF 帧内通知，降低 React re-render 次数。
+ * - 逆向背压检测：上一批处理耗时 >200ms 时设置 backpressured 标志。
+ * - Page Visibility 感知：后台只保留最新快照，切回前台立即 flush。
  */
 
-import { SseLink, SseFrame } from './sseLink'
+import { SseLink, SseFrame, ConnectionState } from './sseLink'
 import type { DataBatch, DataCallback as DsCallback, DataSource, ConnectionStatus } from './dataSource'
 
 export type DataCallback = (data: unknown) => void
@@ -28,8 +33,15 @@ interface PendingFrame {
   createdAt: number
 }
 
+export interface DataBusConfig {
+  batchIntervalMs: number
+  backpressureThresholdMs: number
+}
+
 const FRAME_TIMEOUT_MS = 10000
 const DEFAULT_RING_BUFFER_SIZE = 300
+const DEFAULT_BATCH_INTERVAL_MS = 100
+const DEFAULT_BACKPRESSURE_THRESHOLD_MS = 200
 
 export class DataBus implements DataSource {
   private sseLink: SseLink | null = null
@@ -42,8 +54,22 @@ export class DataBus implements DataSource {
   private status: ConnectionStatus = 'disconnected'
   private windowSeconds = 60
 
-  constructor(baseUrl = '') {
+  // 批量通知状态
+  private pendingBatches = new Map<string, DataBatch[]>()
+  private batchTimer: ReturnType<typeof setTimeout> | null = null
+  private rafId: number | null = null
+  private lastBatchProcessTime = 0
+  private backpressured = false
+  private backgroundMode = false
+  private config: DataBusConfig
+
+  constructor(baseUrl = '', config: Partial<DataBusConfig> = {}) {
     this.baseUrl = baseUrl
+    this.config = {
+      batchIntervalMs: config.batchIntervalMs ?? DEFAULT_BATCH_INTERVAL_MS,
+      backpressureThresholdMs: config.backpressureThresholdMs ?? DEFAULT_BACKPRESSURE_THRESHOLD_MS,
+    }
+    this.bindVisibilityListener()
   }
 
   /**
@@ -66,6 +92,7 @@ export class DataBus implements DataSource {
       sub!.callbacks.delete(cb as DataCallback)
       if (sub!.callbacks.size === 0) {
         this.subs.delete(feature)
+        this.pendingBatches.delete(feature)
         this.syncSubscription()
       }
     }
@@ -83,7 +110,9 @@ export class DataBus implements DataSource {
   destroy(): void {
     this.disconnect()
     this.subs.clear()
+    this.pendingBatches.clear()
     this.statusListeners.clear()
+    this.removeVisibilityListener()
   }
 
   getStatus(): ConnectionStatus {
@@ -128,6 +157,33 @@ export class DataBus implements DataSource {
     return this.subs.get(feature)?.ringBuffer ?? []
   }
 
+  /**
+   * 批量通知配置
+   */
+  setConfig(config: Partial<DataBusConfig>): void {
+    this.config = { ...this.config, ...config }
+    // 配置变更时立即刷新当前批次，避免旧间隔造成不可预期的延迟
+    this.flushBatch()
+  }
+
+  getConfig(): DataBusConfig {
+    return { ...this.config }
+  }
+
+  /**
+   * 当前是否处于背压状态
+   */
+  isBackpressured(): boolean {
+    return this.backpressured
+  }
+
+  /**
+   * 当前是否处于后台模式
+   */
+  isBackgroundMode(): boolean {
+    return this.backgroundMode
+  }
+
   async connect(): Promise<void> {
     this.setStatus('connecting')
 
@@ -151,7 +207,8 @@ export class DataBus implements DataSource {
       onData: (feature, payload) => this.handleData(feature, payload),
       onFrame: (frame) => this.handleFrame(frame),
       onOpen: () => this.setStatus('connected'),
-      onError: () => this.setStatus('disconnected'),
+      onError: () => this.setStatus('error'),
+      onStateChange: (state) => this.setStatus(mapConnectionState(state)),
     })
 
     this.sseLink.connect()
@@ -167,15 +224,32 @@ export class DataBus implements DataSource {
 
   disconnect(): void {
     this.stopFrameCleanup()
+    this.cancelBatchFlush()
     this.sseLink?.disconnect()
     this.sseLink = null
     this.subscriptionId = null
     this.pendingFrames.clear()
+    this.pendingBatches.clear()
+    this.backpressured = false
     this.setStatus('disconnected')
   }
 
   get connected(): boolean {
     return this.sseLink?.connected ?? false
+  }
+
+  reconnectNow(): void {
+    this.sseLink?.reconnectNow()
+  }
+
+  getConnectionStats(): { reconnectCount: number; lastConnectedAt: number | null; nextReconnectDelayMs: number | null; nextReconnectAt: number | null } {
+    const stats = this.sseLink?.getStats()
+    return {
+      reconnectCount: stats?.reconnectCount ?? 0,
+      lastConnectedAt: stats?.lastConnectedAt ?? null,
+      nextReconnectDelayMs: stats?.nextReconnectDelayMs ?? null,
+      nextReconnectAt: stats?.nextReconnectAt ?? null,
+    }
   }
 
   private setStatus(s: ConnectionStatus): void {
@@ -214,14 +288,89 @@ export class DataBus implements DataSource {
       data: payload,
     }
 
+    if (this.backgroundMode) {
+      // 后台模式：ringBuffer 保持最新，pending 只保留最新快照
+      this.storeInRingBuffer(sub, batch)
+      this.pendingBatches.set(feature, [batch])
+      return
+    }
+
+    let queue = this.pendingBatches.get(feature)
+    if (!queue) {
+      queue = []
+      this.pendingBatches.set(feature, queue)
+    }
+    queue.push(batch)
+
+    this.scheduleBatchFlush()
+  }
+
+  private storeInRingBuffer(sub: FeatureSubscription, batch: DataBatch): void {
     sub.ringBuffer.push(batch)
     if (sub.ringBuffer.length > sub.maxBufferSize) {
       sub.ringBuffer.shift()
     }
+  }
 
-    for (const cb of sub.callbacks) {
-      try { (cb as DsCallback)(batch) } catch { /* subscriber error */ }
+  private scheduleBatchFlush(): void {
+    if (this.batchTimer) return
+    this.batchTimer = setTimeout(() => {
+      this.batchTimer = null
+      this.scheduleRAF()
+    }, this.config.batchIntervalMs)
+  }
+
+  private scheduleRAF(): void {
+    if (this.rafId !== null) return
+    this.rafId = requestAnimationFrame(() => {
+      this.rafId = null
+      this.flushBatch()
+    })
+  }
+
+  private cancelBatchFlush(): void {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer)
+      this.batchTimer = null
     }
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId)
+      this.rafId = null
+    }
+  }
+
+  /**
+   * 立即刷新批量缓冲。用于切回前台时立即推送最新数据。
+   */
+  flushBatch(): void {
+    if (this.pendingBatches.size === 0) return
+    // 后台模式下保留 pendingBatches 中的最新快照，待切回前台后再 flush 通知。
+    if (this.backgroundMode) return
+
+    const start = performance.now()
+    const batches = this.pendingBatches
+    this.pendingBatches = new Map()
+
+    for (const [feature, queue] of batches) {
+      const sub = this.subs.get(feature)
+      if (!sub) continue
+
+      for (const batch of queue) {
+        this.storeInRingBuffer(sub, batch)
+      }
+
+      // 后台模式下只保留最新快照，切回前台前不通知订阅者
+      if (this.backgroundMode) continue
+
+      for (const batch of queue) {
+        for (const cb of sub.callbacks) {
+          try { (cb as DsCallback)(batch) } catch { /* subscriber error */ }
+        }
+      }
+    }
+
+    this.lastBatchProcessTime = performance.now() - start
+    this.backpressured = this.lastBatchProcessTime > this.config.backpressureThresholdMs
   }
 
   private handleFrame(frame: SseFrame): void {
@@ -272,6 +421,42 @@ export class DataBus implements DataSource {
       this.frameCleanupTimer = null
     }
   }
+
+  private visibilityHandler = (): void => {
+    if (document.hidden) {
+      this.backgroundMode = true
+      this.cancelBatchFlush()
+    } else {
+      this.backgroundMode = false
+      this.flushBatch()
+    }
+  }
+
+  private bindVisibilityListener(): void {
+    if (typeof document === 'undefined') return
+    document.addEventListener('visibilitychange', this.visibilityHandler)
+  }
+
+  private removeVisibilityListener(): void {
+    if (typeof document === 'undefined') return
+    document.removeEventListener('visibilitychange', this.visibilityHandler)
+  }
 }
 
 export const dataBus = new DataBus()
+
+function mapConnectionState(state: ConnectionState): ConnectionStatus {
+  switch (state) {
+    case ConnectionState.Connected:
+      return 'connected'
+    case ConnectionState.Reconnecting:
+      return 'reconnecting'
+    case ConnectionState.Stale:
+      return 'stale'
+    case ConnectionState.Error:
+      return 'error'
+    case ConnectionState.Disconnected:
+    default:
+      return 'disconnected'
+  }
+}

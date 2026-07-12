@@ -7,6 +7,9 @@ export default function ConnectionIndicator() {
   const config = {
     connected: { color: colors.success, label: 'SSE Connected', icon: '●' },
     connecting: { color: colors.warnText, label: 'Connecting...', icon: '○' },
+    reconnecting: { color: colors.warnText, label: 'Reconnecting...', icon: '○' },
+    stale: { color: colors.warnText, label: 'Stale', icon: '○' },
+    error: { color: '#ef4444', label: 'Error', icon: '○' },
     disconnected: { color: '#6b7280', label: 'Disconnected', icon: '○' },
   }[status]
 

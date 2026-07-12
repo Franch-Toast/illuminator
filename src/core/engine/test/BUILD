@@ -57,3 +57,43 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "pid_manager_test",
+    srcs = ["pid_manager_test.cc"],
+    deps = [
+        "//src/core:engine",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "pipeline_dynamic_sink_test",
+    srcs = ["pipeline_dynamic_sink_test.cc"],
+    deps = [
+        "//src/core:engine",
+        "//src/plugin:api",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "recording_lifecycle_test",
+    srcs = ["recording_lifecycle_test.cc"],
+    deps = [
+        "//src/core:engine",
+        "//src/plugin:api",
+        "//src/plugin/sinks:recording_sink",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "stress_test",
+    srcs = ["stress_test.cc"],
+    deps = [
+        "//src/core:engine",
+        "//src/plugin:api",
+        "@googletest//:gtest_main",
+    ],
+)

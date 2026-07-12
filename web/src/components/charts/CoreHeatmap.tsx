@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import EChart from './EChart'
 import type { EChartsOption } from './EChart'
+import { downsample } from '../../utils/downsample'
 
 export interface CoreDataPoint {
   timestamp: number
@@ -13,19 +14,37 @@ interface CoreHeatmapProps {
   height?: number
 }
 
-export default function CoreHeatmap({ data, width = '100%', height }: CoreHeatmapProps) {
-  const option = useMemo((): EChartsOption => {
-    if (data.length === 0) return {}
+const DOWNSAMPLE_THRESHOLD = 1000
 
-    const coreNames = data[0].cores.map(c => c.name)
+function formatTime(ts: number): string {
+  const date = new Date(ts)
+  return `${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
+}
+
+export default function CoreHeatmap({ data, width = '100%', height }: CoreHeatmapProps) {
+  const displayData = useMemo(() => {
+    if (data.length <= DOWNSAMPLE_THRESHOLD) return data
+    const indexed = data.map((d, i) => {
+      const avgBusy = d.cores.length > 0
+        ? d.cores.reduce((sum, c) => sum + c.busy_pct, 0) / d.cores.length
+        : 0
+      return { x: i, y: avgBusy }
+    })
+    const sampled = downsample(indexed, { threshold: DOWNSAMPLE_THRESHOLD, algorithm: 'interval' })
+    return sampled.map(p => data[p.x])
+  }, [data])
+
+  const coreNames = useMemo(() => data[0]?.cores.map(c => c.name) ?? [], [data])
+
+  const option = useMemo((): EChartsOption => {
+    if (displayData.length === 0) return {}
 
     const heatmapData: [number, number, number][] = []
     const times: string[] = []
 
-    for (let xi = 0; xi < data.length; xi++) {
-      const d = data[xi]
-      const date = new Date(d.timestamp)
-      times.push(`${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`)
+    for (let xi = 0; xi < displayData.length; xi++) {
+      const d = displayData[xi]
+      times.push(formatTime(d.timestamp))
       for (let yi = 0; yi < d.cores.length; yi++) {
         heatmapData.push([xi, yi, Math.round(d.cores[yi].busy_pct)])
       }
@@ -72,7 +91,7 @@ export default function CoreHeatmap({ data, width = '100%', height }: CoreHeatma
       }],
       animation: false,
     } as EChartsOption
-  }, [data])
+  }, [displayData, coreNames])
 
   const computedHeight = height ?? Math.max(160, (data[0]?.cores.length ?? 4) * 18 + 60)
 

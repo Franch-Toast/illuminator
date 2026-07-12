@@ -12,7 +12,7 @@ export interface StackSample {
 }
 
 export interface WorkerMessage {
-  type: 'build' | 'diff' | 'search'
+  type: 'build' | 'diff' | 'search' | 'merge'
   id: string
   payload: unknown
 }
@@ -31,6 +31,10 @@ export interface SearchPayload {
   pattern: string
 }
 
+export interface MergePayload {
+  roots: FlameNode[]
+}
+
 export interface WorkerResponse {
   type: 'result'
   id: string
@@ -39,6 +43,9 @@ export interface WorkerResponse {
 
 function buildFlameTree(samples: StackSample[]): FlameNode {
   const root: FlameNode = { name: 'root', value: 0, selfValue: 0, children: [], depth: 0 }
+  // 使用 Map 缓存子节点，避免每层 O(n) 线性查找
+  const childMap = new Map<FlameNode, Map<string, FlameNode>>()
+  childMap.set(root, new Map())
 
   for (const sample of samples) {
     let node = root
@@ -46,10 +53,17 @@ function buildFlameTree(samples: StackSample[]): FlameNode {
 
     for (let i = 0; i < sample.stack.length; i++) {
       const name = sample.stack[i]
-      let child = node.children.find(c => c.name === name)
+      let children = childMap.get(node)
+      if (!children) {
+        children = new Map()
+        childMap.set(node, children)
+      }
+      let child = children.get(name)
       if (!child) {
         child = { name, value: 0, selfValue: 0, children: [], depth: i + 1 }
+        children.set(name, child)
         node.children.push(child)
+        childMap.set(child, new Map())
       }
       child.value += sample.count
       node = child
@@ -58,6 +72,49 @@ function buildFlameTree(samples: StackSample[]): FlameNode {
   }
 
   return root
+}
+
+/**
+ * 合并多棵火焰图树。用于把多个时间窗口/进程的 profile 聚合到一棵树。
+ */
+function mergeFlameTrees(roots: FlameNode[]): FlameNode {
+  const merged: FlameNode = { name: 'root', value: 0, selfValue: 0, children: [], depth: 0 }
+  const childMap = new Map<FlameNode, Map<string, FlameNode>>()
+  childMap.set(merged, new Map())
+
+  function addNode(target: FlameNode, source: FlameNode) {
+    target.value += source.value
+    target.selfValue += source.selfValue
+
+    let targetChildren = childMap.get(target)
+    if (!targetChildren) {
+      targetChildren = new Map()
+      childMap.set(target, targetChildren)
+    }
+
+    for (const sourceChild of source.children) {
+      let targetChild = targetChildren.get(sourceChild.name)
+      if (!targetChild) {
+        targetChild = {
+          name: sourceChild.name,
+          value: 0,
+          selfValue: 0,
+          children: [],
+          depth: target.depth + 1,
+        }
+        targetChildren.set(sourceChild.name, targetChild)
+        target.children.push(targetChild)
+        childMap.set(targetChild, new Map())
+      }
+      addNode(targetChild, sourceChild)
+    }
+  }
+
+  for (const root of roots) {
+    addNode(merged, root)
+  }
+
+  return merged
 }
 
 function buildDiffTree(baseline: StackSample[], current: StackSample[]): FlameNode & { diff?: number } {
@@ -134,6 +191,9 @@ self.onmessage = (e: MessageEvent<WorkerMessage>) => {
         (payload as SearchPayload).root,
         (payload as SearchPayload).pattern
       )
+      break
+    case 'merge':
+      result = mergeFlameTrees((payload as MergePayload).roots)
       break
   }
 

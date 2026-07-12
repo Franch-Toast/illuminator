@@ -64,6 +64,8 @@ struct {
     __type(value, __u64);
 } stack_counts SEC(".maps");
 
+DECLARE_META_STATS();
+
 // ============================================================================
 // on_cpu_sample：CPU 采样处理函数（perf_event 类型）
 //
@@ -97,9 +99,13 @@ int on_cpu_sample(struct bpf_perf_event_data *ctx) {
     // sizeof(il_cpu_sample_event) ≈ 48 字节
     // 预留失败（返回 NULL）表示 ring buffer 已满，本次采样静默丢弃
     // ---------------------------------------------------------------
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_cpu_sample_event *e;
     e = bpf_ringbuf_reserve(&cpu_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     // ---------------------------------------------------------------
     // 步骤 3：填充事件字段

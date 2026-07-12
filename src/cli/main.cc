@@ -355,7 +355,8 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                             }
                         }
                         auto reconf_status = bus.Reconfigure(name, cfg);
-                        if (!reconf_status.ok()) {
+                        if (!reconf_status.ok() &&
+                            reconf_status.code() != illuminator::StatusCode::kRequiresRestart) {
                             IL_WARN("FeatureBus: reconfigure '{}' after start failed: {}", name, reconf_status.message());
                         }
                     } catch (const std::exception& e) {
@@ -404,6 +405,67 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                 res.set_content(R"({"ok":true})", "application/json");
             });
 
+        // ========================================================================
+        // POST /api/v2/features/:name/reconfigure — 运行时动态重配置
+        // ========================================================================
+        // 接收 JSON body，解析为 ConfigValue，调用 driver->Reconfigure()。
+        // Reconfigure 贯穿 Pipeline 全链路（Source → Processor → Aggregator → Sink）。
+        // 常见参数：target_pids, target_process_names, add_pid, remove_pid 等。
+        svr.Post(R"(/api/v2/features/([a-zA-Z0-9_-]+)/reconfigure)",
+            [&bus](const httplib::Request& req, httplib::Response& res) {
+                auto name = req.matches[1].str();
+                if (req.body.empty()) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"empty request body"})", "application/json");
+                    return;
+                }
+                illuminator::ConfigValue cfg;
+                try {
+                    auto body = nlohmann::json::parse(req.body);
+                    for (auto& [key, val] : body.items()) {
+                        if (val.is_array()) {
+                            // JSON 数组转换为逗号分隔字符串（与 /start 端点一致）
+                            std::string joined;
+                            for (size_t i = 0; i < val.size(); ++i) {
+                                if (i > 0) joined += ",";
+                                if (val[i].is_number()) {
+                                    joined += std::to_string(val[i].get<int64_t>());
+                                } else {
+                                    joined += val[i].get<std::string>();
+                                }
+                            }
+                            cfg.Set(key, joined);
+                        } else if (val.is_number_integer()) {
+                            cfg.Set(key, static_cast<int64_t>(val.get<int64_t>()));
+                        } else if (val.is_number()) {
+                            cfg.Set(key, std::to_string(val.get<double>()));
+                        } else if (val.is_boolean()) {
+                            cfg.Set(key, val.get<bool>() ? "true" : "false");
+                        } else if (val.is_string()) {
+                            cfg.Set(key, val.get<std::string>());
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    res.status = 400;
+                    nlohmann::json err = {{"error", std::string("invalid JSON: ") + e.what()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                auto status = bus.Reconfigure(name, cfg);
+                if (!status.ok() &&
+                    status.code() != illuminator::StatusCode::kRequiresRestart) {
+                    res.status = (status.code() == illuminator::StatusCode::kNotFound) ? 404 : 400;
+                    nlohmann::json err = {{"error", status.message()}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                nlohmann::json resp = {{"ok", true}};
+                if (status.code() == illuminator::StatusCode::kRequiresRestart) {
+                    resp["requires_restart"] = true;
+                }
+                res.set_content(resp.dump(), "application/json");
+            });
+
         svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/stats)",
             [&bus](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.matches[1].str();
@@ -418,7 +480,11 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
                     {"batches_processed", stats.batches_processed},
                     {"records_processed", stats.records_processed},
                     {"errors", stats.errors},
-                    {"uptime_ms", stats.uptime_ms}
+                    {"uptime_ms", stats.uptime_ms},
+                    {"bpf_total_events", stats.bpf_total_events},
+                    {"bpf_buffer_full", stats.bpf_buffer_full},
+                    {"bpf_dropped", stats.bpf_dropped},
+                    {"bpf_filtered", stats.bpf_filtered}
                 };
                 res.set_content(j.dump(), "application/json");
             });

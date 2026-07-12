@@ -37,7 +37,7 @@ function Sparkline({ values, width = 80, height = 20 }: { values: number[]; widt
 }
 
 const ROW_HEIGHT = 37
-const VIRTUALIZE_THRESHOLD = 40
+const VIRTUALIZE_THRESHOLD = 100
 const OVERSCAN = 5
 
 export default function ProcessTable({ processes, onSelect, selectedPid }: ProcessTableProps) {

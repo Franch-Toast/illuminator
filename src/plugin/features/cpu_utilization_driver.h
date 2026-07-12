@@ -65,10 +65,10 @@ public:
     }
 
     Status Reconfigure(const ConfigValue& params) override {
-        if (!pipeline_ || !pipeline_->GetSource()) {
+        if (!pipeline_) {
             return Status::Error(StatusCode::kUnavailable, "not running");
         }
-        return pipeline_->GetSource()->Reconfigure(params);
+        return pipeline_->Reconfigure(params);
     }
 
 protected:

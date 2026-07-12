@@ -27,7 +27,7 @@ export function useRecording() {
       await fetch(`/api/v1/features/${feature}/record/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file_path: `illuminator_${feature}_${Date.now()}.ilr` }),
+        body: JSON.stringify({ output_dir: '/tmp/illuminator_data' }),
       })
       setState({ isRecording: true, startTime: Date.now(), feature })
     } catch (e) {

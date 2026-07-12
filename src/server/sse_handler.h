@@ -23,12 +23,15 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "httplib.h"
@@ -43,6 +46,7 @@ namespace illuminator {
 
 static constexpr size_t kSseFrameMaxBytes = 64 * 1024;
 static constexpr size_t kSseQueueMaxSize = 256;
+static constexpr size_t kSseRecentCacheSize = 256;
 
 struct SseSubscription {
     std::string id;
@@ -50,7 +54,9 @@ struct SseSubscription {
     std::mutex mu;
     std::condition_variable cv;
     std::queue<std::string> outbox;
+    std::deque<std::pair<uint64_t, std::string>> recent_messages;
     std::atomic<bool> active{true};
+    std::atomic<bool> replay_done{false};
 };
 
 class SseHandler {
@@ -127,13 +133,34 @@ public:
     }
 
     // 处理 SSE GET 请求（阻塞式，由 httplib 线程执行）
-    void HandleSseConnection(const std::string& subscription_id,
+    void HandleSseConnection(const httplib::Request& req,
+                             const std::string& subscription_id,
                              httplib::Response& res) {
         auto sub = GetSubscription(subscription_id);
         if (!sub) {
             res.status = 404;
             res.set_content(R"({"error":"subscription not found"})", "application/json");
             return;
+        }
+
+        // Parse Last-Event-ID from header (standard SSE) or query param (manual reconnect).
+        uint64_t resume_after_id = 0;
+        bool has_resume_id = false;
+        auto last_event_it = req.headers.find("Last-Event-ID");
+        if (last_event_it != req.headers.end()) {
+            try {
+                resume_after_id = std::stoull(last_event_it->second);
+                has_resume_id = true;
+            } catch (...) {
+                // Ignore malformed header.
+            }
+        } else if (req.has_param("lastEventId")) {
+            try {
+                resume_after_id = std::stoull(req.get_param_value("lastEventId"));
+                has_resume_id = true;
+            } catch (...) {
+                // Ignore malformed param.
+            }
         }
 
         res.set_header("Content-Type", "text/event-stream");
@@ -143,7 +170,26 @@ public:
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [sub](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+            [sub, has_resume_id, resume_after_id](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                // Replay cached messages that the client missed since Last-Event-ID.
+                if (!sub->replay_done.load() && has_resume_id) {
+                    sub->replay_done.store(true);
+                    std::vector<std::string> replay;
+                    {
+                        std::lock_guard lock(sub->mu);
+                        for (const auto& [event_id, msg] : sub->recent_messages) {
+                            if (event_id > resume_after_id) {
+                                replay.push_back(msg);
+                            }
+                        }
+                    }
+                    for (const auto& msg : replay) {
+                        if (!sink.write(msg.c_str(), msg.size())) {
+                            return false;
+                        }
+                    }
+                }
+
                 while (sub->active.load()) {
                     std::string message;
                     {
@@ -155,9 +201,9 @@ public:
                         if (!sub->active.load()) return false;
 
                         if (sub->outbox.empty()) {
-                            // Send keepalive comment
-                            std::string keepalive = ": keepalive\n\n";
-                            sink.write(keepalive.c_str(), keepalive.size());
+                            // Send heartbeat comment every 15s to keep the connection alive
+                            std::string heartbeat = ":heartbeat\n\n";
+                            sink.write(heartbeat.c_str(), heartbeat.size());
                             continue;
                         }
 
@@ -187,7 +233,7 @@ public:
         server.Get(R"(/api/v1/events/([a-zA-Z0-9_-]+))",
             [this](const httplib::Request& req, httplib::Response& res) {
                 auto id = req.matches[1].str();
-                HandleSseConnection(id, res);
+                HandleSseConnection(req, id, res);
             });
 
         server.Post(R"(/api/v1/events/([a-zA-Z0-9_-]+)/update)",
@@ -201,6 +247,12 @@ public:
     size_t ActiveSubscriptions() const {
         std::lock_guard lock(mu_);
         return subscriptions_.size();
+    }
+
+    std::shared_ptr<SseSubscription> GetSubscription(const std::string& id) {
+        std::lock_guard lock(mu_);
+        auto it = subscriptions_.find(id);
+        return (it != subscriptions_.end()) ? it->second : nullptr;
     }
 
 private:
@@ -258,26 +310,25 @@ private:
         }
     }
 
-    std::shared_ptr<SseSubscription> GetSubscription(const std::string& id) {
-        std::lock_guard lock(mu_);
-        auto it = subscriptions_.find(id);
-        return (it != subscriptions_.end()) ? it->second : nullptr;
-    }
-
     void EnqueueMessage(std::shared_ptr<SseSubscription>& sub,
                         const std::string& feature,
                         const std::string& json_data) {
+        // Assign a monotonic event id so EventSource can send Last-Event-ID on reconnect.
+        uint64_t event_id = seq_counter_.fetch_add(1);
         if (json_data.size() <= kSseFrameMaxBytes) {
-            std::string msg = "event: data\ndata: " + json_data + "\n\n";
+            std::string msg = "id: " + std::to_string(event_id) + "\nevent: data\ndata: " + json_data + "\n\n";
             std::lock_guard lock(sub->mu);
             if (sub->outbox.size() < kSseQueueMaxSize) {
-                sub->outbox.push(std::move(msg));
+                sub->outbox.push(msg);
+                CacheRecentMessage(sub, event_id, msg);
                 sub->cv.notify_one();
             }
         } else {
             // Split into frames
             size_t total_frames = (json_data.size() + kSseFrameMaxBytes - 1) / kSseFrameMaxBytes;
-            uint64_t seq = seq_counter_.fetch_add(1);
+            uint64_t seq = event_id;
+            std::vector<std::string> frames;
+            frames.reserve(total_frames);
 
             for (size_t i = 0; i < total_frames; ++i) {
                 size_t offset = i * kSseFrameMaxBytes;
@@ -292,14 +343,27 @@ private:
                     {"payload", chunk}
                 };
 
-                std::string msg = "event: frame\ndata: " + frame.dump() + "\n\n";
-                std::lock_guard lock(sub->mu);
+                std::string msg = "id: " + std::to_string(event_id) + "\nevent: frame\ndata: " + frame.dump() + "\n\n";
+                frames.push_back(std::move(msg));
+            }
+
+            std::lock_guard lock(sub->mu);
+            for (auto& msg : frames) {
                 if (sub->outbox.size() < kSseQueueMaxSize) {
-                    sub->outbox.push(std::move(msg));
+                    sub->outbox.push(msg);
+                    CacheRecentMessage(sub, event_id, msg);
                 }
             }
-            std::lock_guard lock(sub->mu);
             sub->cv.notify_one();
+        }
+    }
+
+    void CacheRecentMessage(std::shared_ptr<SseSubscription>& sub,
+                            uint64_t event_id,
+                            const std::string& msg) {
+        sub->recent_messages.emplace_back(event_id, msg);
+        if (sub->recent_messages.size() > kSseRecentCacheSize) {
+            sub->recent_messages.pop_front();
         }
     }
 

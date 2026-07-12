@@ -49,6 +49,7 @@ struct {
 } wakeup_ts SEC(".maps");
 
 DECLARE_COLLECTION_GATE();
+DECLARE_META_STATS();
 
 // ---- sched_wakeup tracepoint ----
 SEC("tracepoint/sched/sched_wakeup")
@@ -60,8 +61,12 @@ int trace_sched_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
 
     CHECK_GATE();
 
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_sched_event *e = bpf_ringbuf_reserve(&sched_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     // 填充事件信息
     e->timestamp_ns = ts;
@@ -88,8 +93,12 @@ int trace_sched_wakeup(struct trace_event_raw_sched_wakeup_template *ctx) {
 SEC("tracepoint/sched/sched_switch")
 int trace_sched_switch(struct trace_event_raw_sched_switch *ctx) {
     CHECK_GATE();
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_sched_event *e = bpf_ringbuf_reserve(&sched_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     __u64 ts = bpf_ktime_get_ns();
     e->timestamp_ns = ts;

@@ -10,3 +10,14 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "reconfigure_test",
+    srcs = ["reconfigure_test.cc"],
+    deps = [
+        "//src/core:engine",
+        "//src/plugin:api",
+        "//src/plugin/sinks:recording_sink",
+        "@googletest//:gtest_main",
+    ],
+)

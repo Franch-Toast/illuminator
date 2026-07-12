@@ -44,6 +44,12 @@ public:
     // 毫秒单位，默认 10 秒刷一次。设为 0 表示每来一批刷一批
     // （行为类似于无缓冲的 Processor）
     virtual uint32_t FlushIntervalMs() const { return 10000; }
+
+    // 运行时动态修改聚合参数（如窗口大小、百分位配置）。
+    // 默认返回 Ok()（空操作），子类按需覆写。
+    virtual Status Reconfigure(const ConfigValue& /*params*/) {
+        return Status::Ok();
+    }
 };
 
 }  // namespace illuminator

@@ -1,8 +1,9 @@
-import { useMemo, useEffect, useRef } from 'react'
+import { useMemo, useEffect, useRef, useCallback } from 'react'
 import EChart, { echarts } from './EChart'
 import type { EChartsOption } from './EChart'
 import type { TimeSelection } from './ProfileSnapshot'
 import { useTimeStore } from '../../stores/useTimeStore'
+import { downsample } from '../../utils/downsample'
 
 interface TimelinePoint {
   timestamp: number
@@ -16,6 +17,13 @@ interface ProcessCpuTimelineProps {
   onTimeSelect?: (selection: TimeSelection | null) => void
   width?: number | string
   height?: number
+}
+
+const DOWNSAMPLE_THRESHOLD = 1000
+
+function formatTime(ts: number): string {
+  const date = new Date(ts)
+  return `${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
 }
 
 export default function ProcessCpuTimeline({
@@ -35,6 +43,18 @@ export default function ProcessCpuTimeline({
     modeRef.current = mode
     onTimeSelectRef.current = onTimeSelect
   })
+
+  const displayData = useMemo(() => {
+    if (data.length <= DOWNSAMPLE_THRESHOLD) return data
+    const indexed = data.map((d, i) => ({ x: i, y: d.cpu_user_pct + d.cpu_sys_pct }))
+    const sampled = downsample(indexed, { threshold: DOWNSAMPLE_THRESHOLD, algorithm: 'lttb' })
+    return sampled.map(p => data[p.x])
+  }, [data])
+
+  const times = useMemo(
+    () => displayData.map(d => formatTime(d.timestamp)),
+    [displayData]
+  )
 
   useEffect(() => {
     const chart = chartRef.current
@@ -72,9 +92,9 @@ export default function ProcessCpuTimeline({
     })
   }, [])
 
-  const handleInit = (chart: echarts.ECharts) => {
+  const handleInit = useCallback((chart: echarts.ECharts) => {
     chartRef.current = chart
-  }
+  }, [])
 
   useEffect(() => {
     const chart = chartRef.current
@@ -89,15 +109,10 @@ export default function ProcessCpuTimeline({
       } catch { /* ignore */ }
       if (onTimeSelect) onTimeSelect(null)
     }
-  }, [mode])
+  }, [mode, onTimeSelect])
 
   const option = useMemo((): EChartsOption => {
-    const times = data.map(d => {
-      const date = new Date(d.timestamp)
-      return `${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
-    })
-
-    const base: EChartsOption = {
+    return {
       toolbox: { show: false, feature: { brush: { type: ['lineX', 'clear'] } } },
       brush: {
         toolbox: ['lineX', 'clear'],
@@ -140,7 +155,7 @@ export default function ProcessCpuTimeline({
           areaStyle: { opacity: 0.6, color: '#3b82f6' },
           lineStyle: { width: 2, color: '#3b82f6' },
           symbol: 'none',
-          data: data.map(d => Number(d.cpu_user_pct.toFixed(1))),
+          data: displayData.map(d => Number(d.cpu_user_pct.toFixed(1))),
           itemStyle: { color: '#3b82f6' },
         },
         {
@@ -150,15 +165,13 @@ export default function ProcessCpuTimeline({
           areaStyle: { opacity: 0.6, color: '#ef4444' },
           lineStyle: { width: 2, color: '#ef4444' },
           symbol: 'none',
-          data: data.map(d => Number(d.cpu_sys_pct.toFixed(1))),
+          data: displayData.map(d => Number(d.cpu_sys_pct.toFixed(1))),
           itemStyle: { color: '#ef4444' },
         },
       ],
       animation: false,
     }
-
-    return base
-  }, [data])
+  }, [times, displayData])
 
   return (
     <div>

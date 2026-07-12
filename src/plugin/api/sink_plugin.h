@@ -36,6 +36,12 @@ public:
     // 将内部缓冲的数据刷出到目标。
     // 默认空实现：无内部缓冲的 Sink 不需要此操作。
     virtual Status Flush() { return Status::Ok(); }
+
+    // 运行时动态修改输出参数（如文件路径、导出格式）。
+    // 默认返回 Ok()（空操作），子类按需覆写。
+    virtual Status Reconfigure(const ConfigValue& /*params*/) {
+        return Status::Ok();
+    }
 };
 
 }  // namespace illuminator

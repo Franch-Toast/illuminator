@@ -92,5 +92,55 @@ TEST_F(SseHandlerTest, SseSinkNameAndVersion) {
     EXPECT_STREQ(sink.Version(), "1.0.0");
 }
 
+TEST_F(SseHandlerTest, ReplaysMessagesAfterLastEventId) {
+    auto& handler = SseHandler::Instance();
+    auto id = handler.Subscribe({"test_feature"});
+
+    handler.Publish("test_feature", R"({"seq":1})");
+    handler.Publish("test_feature", R"({"seq":2})");
+    handler.Publish("test_feature", R"({"seq":3})");
+
+    uint64_t last_event_id = 0;
+    {
+        auto sub = handler.GetSubscription(id);
+        std::lock_guard lock(sub->mu);
+        ASSERT_EQ(sub->recent_messages.size(), 3);
+        last_event_id = sub->recent_messages[1].first;
+        // Simulate that the original connection already consumed the outbox.
+        while (!sub->outbox.empty()) sub->outbox.pop();
+        sub->replay_done.store(false);
+    }
+
+    httplib::Request req;
+    req.path = "/api/v1/events/" + id;
+    req.headers.insert({"Last-Event-ID", std::to_string(last_event_id)});
+    httplib::Response res;
+    handler.HandleSseConnection(req, id, res);
+
+    std::string body;
+    httplib::DataSink sink;
+    sink.write = [&body](const char* data, size_t len) {
+        body.append(data, len);
+        return true;
+    };
+    sink.is_writable = []() { return true; };
+
+    auto sub = handler.GetSubscription(id);
+    std::thread provider_thread([&res, &sink]() {
+        res.content_provider_(0, 0, sink);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    sub->active.store(false);
+    sub->cv.notify_all();
+    provider_thread.join();
+
+    EXPECT_NE(body.find(R"("seq":3)"), std::string::npos);
+    EXPECT_EQ(body.find(R"("seq":1)"), std::string::npos);
+    EXPECT_EQ(body.find(R"("seq":2)"), std::string::npos);
+
+    handler.Unsubscribe(id);
+}
+
 }  // namespace
 }  // namespace illuminator

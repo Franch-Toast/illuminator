@@ -73,4 +73,36 @@
     if (!_gate_val || !*_gate_val) return 0; \
 } while(0)
 
+// ============================================================================
+// Self-observability counters for BPF ring buffer loss and filtering
+// ============================================================================
+// Each probe that wishes to expose loss statistics declares a PERCPU_ARRAY
+// map named "meta_stats" with 4 u64 slots. The user-space side sums the
+// per-CPU values to produce cumulative counters.
+//
+// Slots:
+//   0 - total_events   : events that reached the ringbuf send path
+//   1 - buffer_full    : ringbuf_reserve failed (buffer full)
+//   2 - dropped        : events discarded after reserve (e.g. state filter)
+//   3 - filtered       : events dropped by PID/comm filters
+
+#define STAT_TOTAL_EVENTS   0
+#define STAT_BUFFER_FULL    1
+#define STAT_DROPPED        2
+#define STAT_FILTERED       3
+
+#define DECLARE_META_STATS() \
+    struct { \
+        __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); \
+        __uint(max_entries, 4); \
+        __type(key, __u32); \
+        __type(value, __u64); \
+    } meta_stats SEC(".maps")
+
+#define INC_STAT(stat_key) do { \
+    __u32 _key = (stat_key); \
+    __u64 *_val = bpf_map_lookup_elem(&meta_stats, &_key); \
+    if (_val) __sync_fetch_and_add(_val, 1); \
+} while(0)
+
 #endif /* __ILLUMINATOR_COMMON_BPF_H */

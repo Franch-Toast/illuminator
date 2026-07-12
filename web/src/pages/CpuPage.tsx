@@ -1,6 +1,5 @@
 import { useState, useRef } from 'react'
 import { colors } from '../styles/theme'
-import SubTabBar from '../components/SubTabBar'
 import { useCpuUtilization, useCpuProcesses } from '../hooks/useCpuData'
 import { useProcessDetail } from '../hooks/useProcessDetail'
 import { useUrlState } from '../hooks/useUrlState'
@@ -12,31 +11,28 @@ import ProcessTable from '../components/charts/ProcessTable'
 import ProcessCpuTimeline from '../components/charts/ProcessCpuTimeline'
 import ProfileSnapshot from '../components/charts/ProfileSnapshot'
 import ThreadBreakdown from '../components/charts/ThreadBreakdown'
-import FeatureHealthBadge from '../components/FeatureHealthBadge'
+import { FeaturePageTemplate, type TabConfig } from '../components/shared'
 
-const SUB_TABS = [
-  { id: 'system', label: 'System' },
-  { id: 'process', label: 'Process' },
+const SUB_TABS: TabConfig[] = [
+  { key: 'system', label: 'System' },
+  { key: 'process', label: 'Process' },
 ]
 
 export default function CpuPage() {
-  const { subTab, setUrlState } = useUrlState()
-  const activeTab = subTab || 'system'
-
-  const handleTabChange = (tab: string) => {
-    setUrlState({ subTab: tab })
-  }
-
   return (
-    <div style={{ padding: 24, display: 'flex', flexDirection: 'column' }}>
-      <h2 style={{ margin: '0 0 16px', fontSize: 20, color: colors.textPrimary, display: 'flex', alignItems: 'center', gap: 8 }}>
-        CPU <FeatureHealthBadge featureName="cpu_utilization" />
-      </h2>
-      <SubTabBar tabs={SUB_TABS} active={activeTab} onChange={handleTabChange} />
-
-      {activeTab === 'system' && <SystemSubTab />}
-      {activeTab === 'process' && <ProcessSubTab />}
-    </div>
+    <FeaturePageTemplate
+      featureName="cpu_utilization"
+      displayName="CPU"
+      description="CPU 性能分析"
+      tabs={SUB_TABS}
+    >
+      {(activeTab: string) => (
+        <>
+          {activeTab === 'system' && <SystemSubTab />}
+          {activeTab === 'process' && <ProcessSubTab />}
+        </>
+      )}
+    </FeaturePageTemplate>
   )
 }
 

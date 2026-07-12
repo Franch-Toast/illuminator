@@ -29,6 +29,8 @@ vi.mock('./services/dataBus', () => ({
     disconnect: vi.fn(),
     getStatus: vi.fn(() => 'disconnected'),
     getBuffer: vi.fn(() => []),
+    reconnectNow: vi.fn(),
+    getConnectionStats: vi.fn(() => ({ reconnectCount: 0, lastConnectedAt: null, nextReconnectDelayMs: null, nextReconnectAt: null })),
   },
 }))
 
@@ -91,6 +93,6 @@ describe('App', () => {
 
   it('shows connection indicator', () => {
     renderApp()
-    expect(screen.getByText('Disconnected')).toBeInTheDocument()
+    expect(screen.getByText('已断开')).toBeInTheDocument()
   })
 })

@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { TimeSeriesBuffer } from './useFeatureStream'
 import { useTimeStore } from '../stores/useTimeStore'
-import { getDataSource } from './useDataSource'
+import { useDataSource } from './useDataSource'
 import type { DataBatch, DataSource } from '../services/dataSource'
 import type { CpuDataPoint } from '../components/charts/StackedAreaChart'
 import type { CoreDataPoint } from '../components/charts/CoreHeatmap'
@@ -10,7 +10,13 @@ import type { CpuSummary } from '../components/charts/SummaryCards'
 
 import { extractRecords, type SseRecord } from '../utils/ssePayload'
 
-function parseCpuUtilization(records: SseRecord[], now: number) {
+export interface CpuUtilizationPayload {
+  point: CpuDataPoint | null
+  corePoint: CoreDataPoint | null
+  summary: CpuSummary
+}
+
+function parseCpuUtilization(records: SseRecord[], now: number): CpuUtilizationPayload {
   let totalRec: Record<string, number> | null = null
   const cores: { name: string; busy_pct: number }[] = []
   let ctxSwitches = 0
@@ -63,6 +69,12 @@ function parseCpuUtilization(records: SseRecord[], now: number) {
   }
 }
 
+function transformCpuUtilization(batch: DataBatch): CpuUtilizationPayload | null {
+  const records = extractRecords(batch.data)
+  if (records.length === 0) return null
+  return parseCpuUtilization(records, batch.timestamp)
+}
+
 export function useCpuUtilization(active = true, replaySource?: DataSource) {
   const [areaData, setAreaData] = useState<CpuDataPoint[]>([])
   const [coreData, setCoreData] = useState<CoreDataPoint[]>([])
@@ -71,30 +83,25 @@ export function useCpuUtilization(active = true, replaySource?: DataSource) {
   const coreBuffer = useRef(new TimeSeriesBuffer<CoreDataPoint>(120))
   const mode = useTimeStore(s => s.mode)
 
-  const ingestBatch = useCallback((records: SseRecord[], ts: number) => {
-    const parsed = parseCpuUtilization(records, ts)
-    if (parsed.point) {
-      areaBuffer.current.push(parsed.point)
-      setAreaData([...areaBuffer.current.getAll()])
-    }
-    if (parsed.corePoint) {
-      coreBuffer.current.push(parsed.corePoint)
-      setCoreData([...coreBuffer.current.getAll()])
-    }
-    setSummary(parsed.summary)
-  }, [])
+  const { latest } = useDataSource({
+    feature: 'cpu_utilization',
+    transform: transformCpuUtilization,
+    active: active && mode !== 'paused',
+    replaySource,
+  })
 
   useEffect(() => {
-    const source = replaySource ?? getDataSource()
-
-    if (!active || mode === 'paused') return
-
-    const unsub = source.subscribe('cpu_utilization', (batch: DataBatch) => {
-      const records = extractRecords(batch.data)
-      if (records.length > 0) ingestBatch(records, batch.timestamp)
-    })
-    return unsub
-  }, [active, mode, replaySource, ingestBatch])
+    if (!latest) return
+    if (latest.point) {
+      areaBuffer.current.push(latest.point)
+      setAreaData([...areaBuffer.current.getAll()])
+    }
+    if (latest.corePoint) {
+      coreBuffer.current.push(latest.corePoint)
+      setCoreData([...coreBuffer.current.getAll()])
+    }
+    setSummary(latest.summary)
+  }, [latest])
 
   const clear = useCallback(() => {
     areaBuffer.current.clear()
@@ -134,24 +141,29 @@ function parseCpuProcesses(records: SseRecord[], historyMap: Map<number, number[
   return result
 }
 
+function transformCpuProcesses(batch: DataBatch, historyMap: Map<number, number[]>): ProcessEntry[] | null {
+  const records = extractRecords(batch.data)
+  if (records.length === 0) return null
+  return parseCpuProcesses(records, historyMap)
+}
+
 export function useCpuProcesses(active = true, replaySource?: DataSource) {
   const [processes, setProcesses] = useState<ProcessEntry[]>([])
   const historyMap = useRef<Map<number, number[]>>(new Map())
   const mode = useTimeStore(s => s.mode)
 
+  const historyMapRef = historyMap.current
+  const { latest } = useDataSource({
+    feature: 'process_cpu',
+    transform: useCallback((batch: DataBatch) => transformCpuProcesses(batch, historyMapRef), [historyMapRef]),
+    active: active && mode !== 'paused',
+    replaySource,
+  })
+
   useEffect(() => {
-    const source = replaySource ?? getDataSource()
-
-    if (!active || mode === 'paused') return
-
-    const unsub = source.subscribe('process_cpu', (batch: DataBatch) => {
-      const records = extractRecords(batch.data)
-      if (records.length > 0) {
-        setProcesses(parseCpuProcesses(records, historyMap.current))
-      }
-    })
-    return unsub
-  }, [active, mode, replaySource])
+    if (!latest) return
+    setProcesses(latest)
+  }, [latest])
 
   const clear = useCallback(() => {
     historyMap.current.clear()

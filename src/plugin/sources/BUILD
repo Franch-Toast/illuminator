@@ -15,6 +15,7 @@ cc_library(
     linkopts = ["-lbpf", "-lelf", "-lz"],
     deps = [
         "//src/core:common",
+        "//src/core:engine",
         "//src/core:threading",
         "//src/ebpf:loader",
         "//src/plugin:api",

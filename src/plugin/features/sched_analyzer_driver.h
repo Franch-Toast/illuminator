@@ -34,16 +34,17 @@ public:
   "type": "object",
   "properties": {
     "detailed_mode": { "type": "boolean", "default": false },
-    "target_pids": { "type": "array", "items": { "type": "integer" } }
+    "target_pids": { "type": "array", "items": { "type": "integer" }, "format": "pid_list" },
+    "target_process_names": { "type": "array", "items": { "type": "string" }, "format": "pid_list" }
   }
 })";
     }
 
     Status Reconfigure(const ConfigValue& params) override {
-        if (!pipeline_ || !pipeline_->GetSource()) {
+        if (!pipeline_) {
             return Status::Error(StatusCode::kUnavailable, "not running");
         }
-        return pipeline_->GetSource()->Reconfigure(params);
+        return pipeline_->Reconfigure(params);
     }
 
 protected:

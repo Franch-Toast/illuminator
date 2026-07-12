@@ -20,8 +20,9 @@
 
 namespace illuminator {
 
-IL_DEFINE_SKEL_OPS(BioLatencySkelOps, bio_latency_sk,
-                   bio_events, collection_gate, "io-poll");
+IL_DEFINE_SKEL_OPS_WITH_META(BioLatencySkelOps, bio_latency_sk,
+                             bio_events, collection_gate, "io-poll",
+                             meta_stats);
 
 class EbpfIoMonitor : public EbpfSkeletonSource<BioLatencySkelOps> {
 public:

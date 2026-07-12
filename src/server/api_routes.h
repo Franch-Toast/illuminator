@@ -255,17 +255,28 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
     srv.Post("/api/v1/features/:name/record/start",
              [](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
-                 auto sink = RecordingSinkRegistry::Instance().Get(name);
-                 if (!sink) {
-                     JsonError(res, "No recording sink for feature: " + name, 404);
+                 auto& bus = FeatureBus::Instance();
+                 auto* drv = bus.GetDriver(name);
+                 if (!drv) {
+                     JsonError(res, "Feature not found: " + name, 404);
                      return;
                  }
-                 auto status = sink->StartRecording();
+                 std::string output_dir = "/tmp/illuminator_data";
+                 try {
+                     auto j = json::parse(req.body);
+                     if (j.contains("output_dir") && j["output_dir"].is_string()) {
+                         output_dir = j["output_dir"];
+                     }
+                 } catch (...) {
+                     // 解析失败时使用默认目录
+                 }
+                 auto status = drv->StartRecording(output_dir);
                  if (!status.ok()) {
                      JsonError(res, status.message(), 400);
                      return;
                  }
-                 auto session = sink->GetSession();
+                 auto sink = RecordingSinkRegistry::Instance().Get(name);
+                 auto session = sink ? sink->GetSession() : RecordingSession{};
                  res.set_content(
                      json{{"status", "ok"}, {"feature", name},
                           {"file", session.file_path}}.dump() + "\n",
@@ -275,17 +286,19 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
     srv.Post("/api/v1/features/:name/record/stop",
              [](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
-                 auto sink = RecordingSinkRegistry::Instance().Get(name);
-                 if (!sink) {
-                     JsonError(res, "No recording sink for feature: " + name, 404);
+                 auto& bus = FeatureBus::Instance();
+                 auto* drv = bus.GetDriver(name);
+                 if (!drv) {
+                     JsonError(res, "Feature not found: " + name, 404);
                      return;
                  }
-                 auto status = sink->StopRecording();
+                 auto sink = RecordingSinkRegistry::Instance().Get(name);
+                 auto session = sink ? sink->GetSession() : RecordingSession{};
+                 auto status = drv->StopRecording();
                  if (!status.ok()) {
                      JsonError(res, status.message(), 400);
                      return;
                  }
-                 auto session = sink->GetSession();
                  res.set_content(
                      json{{"status", "ok"}, {"feature", name},
                           {"file", session.file_path},
@@ -297,23 +310,22 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
     srv.Get("/api/v1/features/:name/record/status",
             [](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.path_params.at("name");
-                auto sink = RecordingSinkRegistry::Instance().Get(name);
-                if (!sink) {
+                auto& bus = FeatureBus::Instance();
+                auto* drv = bus.GetDriver(name);
+                if (!drv || !drv->IsRecording()) {
                     res.set_content(
                         json{{"feature", name}, {"recording", false}}.dump() + "\n",
                         "application/json");
                     return;
                 }
-                bool recording = sink->IsRecording();
-                auto session = sink->GetSession();
+                auto sink = RecordingSinkRegistry::Instance().Get(name);
+                auto session = sink ? sink->GetSession() : RecordingSession{};
                 json j;
                 j["feature"] = name;
-                j["recording"] = recording;
-                if (recording) {
-                    j["file"] = session.file_path;
-                    j["bytes_written"] = session.bytes_written;
-                    j["batches_written"] = session.batches_written;
-                }
+                j["recording"] = true;
+                j["file"] = session.file_path;
+                j["bytes_written"] = session.bytes_written;
+                j["batches_written"] = session.batches_written;
                 res.set_content(j.dump() + "\n", "application/json");
             });
 
@@ -321,20 +333,29 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
     // 全局录制 API
     // ========================================================================
     srv.Post("/api/v1/recording/start",
-             [](const httplib::Request&, httplib::Response& res) {
-                 auto& registry = RecordingSinkRegistry::Instance();
+             [](const httplib::Request& req, httplib::Response& res) {
+                 std::string output_dir = "/tmp/illuminator_data";
+                 try {
+                     auto j = json::parse(req.body);
+                     if (j.contains("output_dir") && j["output_dir"].is_string()) {
+                         output_dir = j["output_dir"];
+                     }
+                 } catch (...) {
+                     // 解析失败时使用默认目录
+                 }
+                 auto& bus = FeatureBus::Instance();
                  json started = json::array();
                  json errors = json::array();
-                 for (const auto& name : registry.ListNames()) {
-                     auto sink = registry.Get(name);
-                     if (!sink) continue;
-                     if (sink->IsRecording()) {
-                         started.push_back(name);
+                 for (auto& info : bus.ListDrivers()) {
+                     auto* drv = bus.GetDriver(info.name);
+                     if (!drv) continue;
+                     if (drv->IsRecording()) {
+                         started.push_back(info.name);
                          continue;
                      }
-                     auto st = sink->StartRecording();
-                     if (st.ok()) started.push_back(name);
-                     else errors.push_back({{"feature", name}, {"error", st.message()}});
+                     auto st = drv->StartRecording(output_dir);
+                     if (st.ok()) started.push_back(info.name);
+                     else errors.push_back({{"feature", info.name}, {"error", st.message()}});
                  }
                  res.set_content(
                      json{{"status", "ok"}, {"recording_features", started},
@@ -344,13 +365,17 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
 
     srv.Post("/api/v1/recording/stop",
              [](const httplib::Request&, httplib::Response& res) {
+                 auto& bus = FeatureBus::Instance();
                  auto& registry = RecordingSinkRegistry::Instance();
                  json stopped = json::array();
                  for (const auto& name : registry.ListNames()) {
                      auto sink = registry.Get(name);
                      if (!sink || !sink->IsRecording()) continue;
-                     sink->StopRecording();
                      auto session = sink->GetSession();
+                     auto* drv = bus.GetDriver(name);
+                     if (!drv) continue;
+                     auto st = drv->StopRecording();
+                     if (!st.ok()) continue;
                      stopped.push_back({
                          {"feature", name},
                          {"file", session.file_path},
@@ -364,17 +389,18 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
 
     srv.Get("/api/v1/recording/status",
             [](const httplib::Request&, httplib::Response& res) {
-                auto& registry = RecordingSinkRegistry::Instance();
+                auto& bus = FeatureBus::Instance();
                 bool any_recording = false;
                 json recording_features = json::array();
                 uint64_t total_bytes = 0;
-                for (const auto& name : registry.ListNames()) {
-                    auto sink = registry.Get(name);
-                    if (!sink || !sink->IsRecording()) continue;
+                for (auto& info : bus.ListDrivers()) {
+                    auto* drv = bus.GetDriver(info.name);
+                    if (!drv || !drv->IsRecording()) continue;
                     any_recording = true;
-                    auto session = sink->GetSession();
+                    auto sink = RecordingSinkRegistry::Instance().Get(info.name);
+                    auto session = sink ? sink->GetSession() : RecordingSession{};
                     recording_features.push_back({
-                        {"feature", name},
+                        {"feature", info.name},
                         {"bytes_written", session.bytes_written},
                     });
                     total_bytes += session.bytes_written;

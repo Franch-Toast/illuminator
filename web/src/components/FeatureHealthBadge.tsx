@@ -7,6 +7,13 @@ const statusConfig: Record<FeatureHealthStatus, { color: string; icon: string; l
   active: { color: colors.success, icon: '●', label: 'Data flowing', hint: 'Data is being received normally.' },
   degraded: { color: colors.warnText, icon: '◐', label: 'No data (>5s)', hint: 'No data received for >5s. Backend may be under heavy load or eBPF probe encountered a transient error.' },
   unavailable: { color: '#ef4444', icon: '○', label: 'Unavailable (>15s)', hint: 'No data for >15s. Check: (1) daemon is running, (2) SSE connection, (3) eBPF probe loaded correctly.' },
+  error: { color: '#ef4444', icon: '⚠', label: 'Feature error', hint: 'Backend reported errors for this feature. Check daemon logs for details.' },
+}
+
+function overflowIndicator(rate: number): { icon: string; color: string; level: 'none' | 'warn' | 'critical' } {
+  if (rate > 5) return { icon: '▲', color: '#ef4444', level: 'critical' }
+  if (rate > 1) return { icon: '▲', color: '#f59e0b', level: 'warn' }
+  return { icon: '', color: 'transparent', level: 'none' }
 }
 
 interface Props {
@@ -16,10 +23,11 @@ interface Props {
 
 export default function FeatureHealthBadge({ featureName, showLabel = false }: Props) {
   const health = useFeatureHealth(featureName)
-  const cfg = statusConfig[health]
+  const cfg = statusConfig[health.status]
+  const overflow = overflowIndicator(health.buffer_full_rate)
   const [expanded, setExpanded] = useState(false)
   const [featureDetail, setFeatureDetail] = useState<{
-    state?: string; tier?: number; errors?: number; uptime_ms?: number; batches_processed?: number
+    state?: string; tier?: number; errors?: number; uptime_ms?: number; batches_processed?: number; records_processed?: number
   } | null>(null)
   const panelRef = useRef<HTMLDivElement>(null)
 
@@ -51,9 +59,14 @@ export default function FeatureHealthBadge({ featureName, showLabel = false }: P
           color: cfg.color, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px',
           borderRadius: 4,
         }}
-        title={`${featureName}: ${cfg.label}`}
+        title={`${featureName}: ${cfg.label}${overflow.level !== 'none' ? ` | BPF overflow ${health.buffer_full_rate.toFixed(2)}%` : ''}`}
       >
         <span>{cfg.icon}</span>
+        {overflow.level !== 'none' && (
+          <span style={{ color: overflow.color, fontSize: 10, marginLeft: 2 }} title={`BPF ringbuf overflow: ${health.buffer_full_rate.toFixed(2)}% (${health.bpf_buffer_full.toLocaleString()} / ${health.bpf_total_events.toLocaleString()})`}>
+            {overflow.icon}
+          </span>
+        )}
         {showLabel && <span>{cfg.label}</span>}
       </button>
 
@@ -86,26 +99,98 @@ export default function FeatureHealthBadge({ featureName, showLabel = false }: P
                   </span>
                 </div>
                 <div style={{ marginBottom: 2 }}>
+                  <span style={{ color: colors.textMuted }}>Uptime: </span>
+                  {Math.round((featureDetail.uptime_ms ?? 0) / 1000).toLocaleString()}s
+                </div>
+                <div style={{ marginBottom: 2 }}>
                   <span style={{ color: colors.textMuted }}>Batches: </span>
                   {featureDetail.batches_processed?.toLocaleString()}
+                </div>
+                <div style={{ marginBottom: 2 }}>
+                  <span style={{ color: colors.textMuted }}>Records: </span>
+                  {featureDetail.records_processed?.toLocaleString()}
                 </div>
                 {(featureDetail.errors ?? 0) > 0 && (
                   <div style={{ color: '#ef4444' }}>
                     Errors: {featureDetail.errors}
                   </div>
                 )}
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${colors.cardBorder}` }}>
+                  <div style={{ marginBottom: 2, color: colors.textMuted }}>BPF self-observability</div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Total events: </span>
+                    {health.bpf_total_events.toLocaleString()}
+                  </div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Buffer full: </span>
+                    <span style={{ color: health.buffer_full_rate > 5 ? '#ef4444' : health.buffer_full_rate > 1 ? '#f59e0b' : colors.textSecondary }}>
+                      {health.bpf_buffer_full.toLocaleString()} ({health.buffer_full_rate.toFixed(2)}%)
+                    </span>
+                  </div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Dropped: </span>
+                    {health.bpf_dropped.toLocaleString()}
+                  </div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Filtered: </span>
+                    {health.bpf_filtered.toLocaleString()}
+                  </div>
+                </div>
+              </>
+            )}
+            {!featureDetail && (
+              <>
+                <div style={{ marginBottom: 2 }}>
+                  <span style={{ color: colors.textMuted }}>State: </span>
+                  <span style={{ color: health.state === 'active' ? colors.success : '#f59e0b' }}>{health.state}</span>
+                </div>
+                <div style={{ marginBottom: 2 }}>
+                  <span style={{ color: colors.textMuted }}>Batches: </span>
+                  {health.batches_processed.toLocaleString()}
+                </div>
+                <div style={{ marginBottom: 2 }}>
+                  <span style={{ color: colors.textMuted }}>Records: </span>
+                  {health.records_processed.toLocaleString()}
+                </div>
+                {health.errors > 0 && (
+                  <div style={{ color: '#ef4444' }}>
+                    Errors: {health.errors}
+                  </div>
+                )}
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${colors.cardBorder}` }}>
+                  <div style={{ marginBottom: 2, color: colors.textMuted }}>BPF self-observability</div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Total events: </span>
+                    {health.bpf_total_events.toLocaleString()}
+                  </div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Buffer full: </span>
+                    <span style={{ color: health.buffer_full_rate > 5 ? '#ef4444' : health.buffer_full_rate > 1 ? '#f59e0b' : colors.textSecondary }}>
+                      {health.bpf_buffer_full.toLocaleString()} ({health.buffer_full_rate.toFixed(2)}%)
+                    </span>
+                  </div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Dropped: </span>
+                    {health.bpf_dropped.toLocaleString()}
+                  </div>
+                  <div style={{ marginBottom: 2 }}>
+                    <span style={{ color: colors.textMuted }}>Filtered: </span>
+                    {health.bpf_filtered.toLocaleString()}
+                  </div>
+                </div>
               </>
             )}
           </div>
 
-          {health !== 'active' && (
+          {health.status !== 'active' && (
             <div style={{
               marginTop: 10, padding: '6px 8px', background: 'rgba(96,165,250,0.05)',
               border: '1px solid rgba(96,165,250,0.15)', borderRadius: 4, fontSize: 10, color: colors.accent,
             }}>
               Suggested actions:<br />
-              {health === 'degraded' && '• Wait a few seconds — may be transient\n• Check Feature Health Dashboard for errors'}
-              {health === 'unavailable' && '• Verify daemon is running (curl /healthz)\n• Check SSE connection in browser DevTools\n• Review daemon logs for eBPF errors'}
+              {health.status === 'degraded' && '• Wait a few seconds — may be transient\n• Check Feature Health Dashboard for errors'}
+              {health.status === 'unavailable' && '• Verify daemon is running (curl /healthz)\n• Check SSE connection in browser DevTools\n• Review daemon logs for eBPF errors'}
+              {health.status === 'error' && '• Review daemon logs for feature errors\n• Restart the feature if errors persist'}
             </div>
           )}
         </div>

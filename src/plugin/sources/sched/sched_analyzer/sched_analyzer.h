@@ -66,6 +66,7 @@
 #include "core/common/string_util.h"
 #include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
+#include "ebpf/loader/bpf_stats_reader.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/manager/plugin_registry.h"
 
@@ -105,7 +106,12 @@ public:
     const char* Version() const override { return "0.2.0"; }
 
     bool IsPushMode() const override { return detailed_mode_; }
+    bool HasBpfProbe() const override { return !stub_mode_; }
     bool IsStub() const override { return stub_mode_; }
+
+    MetaStats GetBpfStats() const override {
+        return ReadBpfMetaStats(meta_stats_fd_);
+    }
 
     uint32_t IntervalMs() const override { return aggregate_interval_ms_; }
 
@@ -172,6 +178,7 @@ public:
         }
 
         agg_fd_ = bpf_map__fd(sched_skel_->maps.sched_agg);
+        meta_stats_fd_ = bpf_map__fd(sched_skel_->maps.meta_stats);
 
         if (detailed_mode_) {
             int rb_fd = bpf_map__fd(sched_skel_->maps.sched_analyzer_events);
@@ -552,6 +559,7 @@ private:
     struct ring_buffer* ring_buf_ = nullptr;
     std::thread poll_thread_;
     int agg_fd_ = -1;
+    int meta_stats_fd_ = -1;
 
     // ---- 历史和缓存 ----
     static constexpr size_t kMaxHistory = 360;

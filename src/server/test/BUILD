@@ -24,6 +24,7 @@ cc_test(
         "//src/core:common",
         "//src/core:data",
         "//src/plugin:api",
+        "//third_party/cpp-httplib",
         "@nlohmann_json//:json",
         "@googletest//:gtest_main",
     ],

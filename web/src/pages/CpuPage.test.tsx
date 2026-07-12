@@ -6,6 +6,9 @@ vi.mock('../services/apiClient', () => ({
   api: {
     featureStart: vi.fn().mockResolvedValue({ status: 'ok' }),
     featureStop: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featurePause: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featureResume: vi.fn().mockResolvedValue({ status: 'ok' }),
+    featureStats: vi.fn().mockResolvedValue({}),
     features: vi.fn().mockResolvedValue({ features: [] }),
   },
 }))
@@ -26,8 +29,29 @@ vi.mock('../hooks/useDataSource', () => ({
   }),
 }))
 
+vi.mock('../hooks/useFeatureHealth', () => ({
+  useFeatureHealth: () => ({
+    status: 'active',
+    state: 'active',
+    uptime_ms: 0,
+    batches_processed: 0,
+    records_processed: 0,
+    errors: 0,
+    lastUpdatedAt: Date.now(),
+    bpf_total_events: 0,
+    bpf_buffer_full: 0,
+    bpf_dropped: 0,
+    bpf_filtered: 0,
+    buffer_full_rate: 0,
+  }),
+}))
+
 vi.mock('../components/FeatureHealthBadge', () => ({
   default: () => <span data-testid="health-badge" />,
+}))
+
+vi.mock('../components/RecordingControls', () => ({
+  default: () => <span data-testid="recording-controls" />,
 }))
 
 vi.mock('../components/charts/ProfileSnapshot', () => ({

@@ -81,6 +81,7 @@ using json = nlohmann::json;
 #include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
 
+#include "ebpf/loader/bpf_stats_reader.h"
 #include "ebpf/loader/stack_trace_util.h"
 #include "plugin/processors/stack_symbolizer/stack_symbolizer.h"
 #include "plugin/api/source_plugin.h"
@@ -99,6 +100,10 @@ public:
     bool IsPushMode() const override { return false; }
     bool HasBpfProbe() const override { return !stub_mode_; }
     bool IsStub() const override { return stub_mode_; }
+
+    MetaStats GetBpfStats() const override {
+        return ReadBpfMetaStats(meta_stats_fd_);
+    }
 
     StatusOr<DataBatchPtr> Collect() override {
         // 双通道保障：ring buffer 信号可能丢失，主动拉取 BPF stats map
@@ -136,8 +141,9 @@ public:
     // Init — 初始化 Off-CPU 剖析器配置
     // ========================================================================
     Status Init(const ConfigValue& config) override {
-        min_duration_us_ =
-            static_cast<uint32_t>(config["min_duration_us"].AsInt(10000));
+        // min_block_us 是用户侧 schema 名称，min_duration_us 为内部字段名
+        min_duration_us_ = static_cast<uint32_t>(
+            config["min_block_us"].AsInt(config["min_duration_us"].AsInt(10000)));
         user_stacks_ = config["user_stacks"].AsBool(true);
         kernel_stacks_ = config["kernel_stacks"].AsBool(true);
         start_delay_seconds_ =
@@ -145,8 +151,9 @@ public:
         target_pids_ = ParseCommaSeparated<uint32_t>(
             config["target_pids"].AsString(""));
 
-        // 解析进程名白名单
-        auto comms_str = config["target_comms"].AsString("");
+        // 解析进程名白名单（target_process_names 是 target_comms 的别名）
+        auto comms_str = config["target_process_names"].AsString(
+            config["target_comms"].AsString(""));
         target_comms_.clear();
         if (!comms_str.empty()) {
             auto parts = ParseCommaSeparated<std::string>(comms_str);
@@ -171,6 +178,12 @@ public:
             return Status::Ok();
         }
 
+        // 在 load 前写入 rodata 配置：最小阻塞时长阈值
+        if (offcpu_skel_->rodata) {
+            offcpu_skel_->rodata->min_duration_ns =
+                static_cast<uint64_t>(min_duration_us_) * 1000ULL;
+        }
+
         int err = offcpu_profiler_sk_bpf__load(offcpu_skel_);
         if (err) {
             offcpu_profiler_sk_bpf__destroy(offcpu_skel_);
@@ -183,7 +196,7 @@ public:
         // skeleton loaded — direct map/prog access below
         Status st = Status::Ok();
 
-        // 写入运行时配置到 offcpu_cfg BPF map（3 个 slot）
+        // 写入运行时配置到 offcpu_cfg BPF map（flags）
         cfg_fd_ = bpf_map__fd(offcpu_skel_->maps.offcpu_cfg);
         if (cfg_fd_ >= 0) {
             uint32_t k0 = 0;
@@ -194,14 +207,6 @@ public:
                                | (!target_comms_.empty() ? 8u : 0u);
             cfg_flags_base_ = cfg_flags;
             bpf_map_update_elem(cfg_fd_, &k0, &cfg_flags, BPF_ANY);
-
-            // slot 1+2: min_duration_ns (64-bit split into two 32-bit)
-            uint64_t min_ns = static_cast<uint64_t>(min_duration_us_) * 1000ULL;
-            uint32_t k1 = 1, k2 = 2;
-            uint32_t lo = static_cast<uint32_t>(min_ns & 0xFFFFFFFF);
-            uint32_t hi = static_cast<uint32_t>(min_ns >> 32);
-            bpf_map_update_elem(cfg_fd_, &k1, &lo, BPF_ANY);
-            bpf_map_update_elem(cfg_fd_, &k2, &hi, BPF_ANY);
 
             IL_INFO("offcpu_profiler: cfg_flags=0x{:x} min_duration={}us "
                     "(user_stacks={}, kernel_stacks={}, pid_filter={}, "
@@ -254,6 +259,7 @@ public:
             return st;
 
         stacks_fd_ = bpf_map__fd(offcpu_skel_->maps.offcpu_stacks);
+        meta_stats_fd_ = bpf_map__fd(offcpu_skel_->maps.meta_stats);
 
         int rb_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_events);
         if (rb_fd < 0) {
@@ -352,7 +358,8 @@ public:
     // ========================================================================
     Status Reconfigure(const ConfigValue& params) override {
         auto pid_str = params["target_pids"].AsString("");
-        auto comm_str = params["target_comms"].AsString("");
+        auto comm_str = params["target_process_names"].AsString(
+            params["target_comms"].AsString(""));
 
         target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
 
@@ -431,6 +438,14 @@ public:
         {
             std::lock_guard<std::mutex> lk(snapshot_mu_);
             latest_json_snapshot_ = "{\"stack_samples\":[]}";
+        }
+
+        // min_block_us / min_duration_us 已迁移到 .rodata，运行时无法修改，
+        // 需要重启 Feature 才能生效。
+        if (!params["min_block_us"].AsString("").empty() ||
+            !params["min_duration_us"].AsString("").empty()) {
+            return Status(StatusCode::kRequiresRestart,
+                          "min_block_us is stored in BPF rodata and requires restart");
         }
 
         IL_INFO("offcpu_profiler: reconfigured filters (pids={}, comms={})",
@@ -891,6 +906,7 @@ private:
     std::atomic<bool> running_{false};
     struct offcpu_profiler_sk_bpf* offcpu_skel_ = nullptr;
     int stacks_fd_ = -1;
+    int meta_stats_fd_ = -1;
     int cfg_fd_ = -1;
     uint32_t cfg_flags_base_ = 0;
     struct ring_buffer* ring_buf_ = nullptr;

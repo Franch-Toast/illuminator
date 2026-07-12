@@ -67,6 +67,7 @@ struct {
 } req_starts SEC(".maps");
 
 DECLARE_COLLECTION_GATE();
+DECLARE_META_STATS();
 
 // ============================================================================
 // trace_block_rq_issue：IO 请求提交 tracepoint 处理函数
@@ -130,9 +131,11 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq_complete *ctx) {
     if (!start) return 0;  // 找不到开始记录（可能来自非 block_rq_issue 路径）
 
     // 预留 ring buffer 空间
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_bio_event *e = bpf_ringbuf_reserve(&bio_events, sizeof(*e), 0);
     if (!e) {
         // ring buffer 满：静默丢弃事件，但必须清理 map 记录防止泄漏
+        INC_STAT(STAT_BUFFER_FULL);
         bpf_map_delete_elem(&req_starts, &key);
         return 0;
     }

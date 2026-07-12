@@ -1,6 +1,13 @@
 #include "../include/common.bpf.h"
 
 // ============================================================================
+// rodata 配置（由用户态在 skeleton load 前写入）
+// ============================================================================
+// min_duration_ns：只记录阻塞时长不低于此阈值的 off-CPU 事件。
+// 使用 volatile const 使其成为 .rodata，只能在 BPF 加载前配置。
+volatile const __u64 min_duration_ns = 10000000;  // 默认 10ms
+
+// ============================================================================
 // 文件：illuminator/src/ebpf/probes/offcpu_profiler.bpf.c
 // ============================================================================
 //
@@ -33,7 +40,7 @@
 // 3. 最小值过滤：
 //    min_duration_ns 默认 100 微秒（100000ns），过滤掉极短暂的调度
 //    （如时间片到期导致的正常切换），只关注有意义的阻塞等待。
-//    用户态可通过此 volatile 变量动态调整阈值。
+//    该值为 .rodata，用户态需在 BPF load 前通过 skeleton 配置，运行时不可修改。
 //
 // 4. 与 sched_analyzer/sched_tracer 的区别：
 //    - offcpu_profiler：关注阻塞的原因和时长（调用栈视角）
@@ -126,12 +133,10 @@ struct {
 //     bit2 = PID 白名单过滤启用
 //     bit3 = 进程名白名单过滤启用
 //     bit4 = 全局启用标志（0=禁用所有采集，用于启动延迟期）
-//   index 1: min_duration_ns 低 32 位
-//   index 2: min_duration_ns 高 32 位
 // ============================================================================
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 3);
+    __uint(max_entries, 1);
     __type(key, __u32);
     __type(value, __u32);
 } offcpu_cfg SEC(".maps");
@@ -160,21 +165,13 @@ struct {
     __type(value, struct il_pidns_config);
 } offcpu_pidns_cfg SEC(".maps");
 
+DECLARE_META_STATS();
+
 static __always_inline __u32 offcpu_cfg_flags(void) {
     __u32 k = 0;
     __u32 *p = bpf_map_lookup_elem(&offcpu_cfg, &k);
     if (p) return *p;
     return 0;  // 默认: 全部禁用（需要用户态显式启用 bit4）
-}
-
-// 从 offcpu_cfg map（index 1/2）读取用户态配置的阈值，避免编译时固定
-static __always_inline __u64 offcpu_get_min_duration(void) {
-    __u32 k1 = 1, k2 = 2;
-    __u32 *lo = bpf_map_lookup_elem(&offcpu_cfg, &k1);
-    __u32 *hi = bpf_map_lookup_elem(&offcpu_cfg, &k2);
-    if (lo && hi)
-        return ((__u64)*hi << 32) | (__u64)*lo;
-    return 10000000;  // 默认 10ms
 }
 
 // ============================================================================
@@ -236,8 +233,10 @@ int trace_offcpu(struct trace_event_raw_sched_switch *ctx) {
     // PID 白名单过滤（flags bit2=4）：用 tgid 匹配，捕获进程的所有线程
     // 此时 prev_tgid 已经是 namespace-local PID（如果配置了 pidns）
     if (flags & 4) {
-        if (!bpf_map_lookup_elem(&offcpu_target_pids, &prev_tgid))
+        if (!bpf_map_lookup_elem(&offcpu_target_pids, &prev_tgid)) {
+            INC_STAT(STAT_FILTERED);
             goto phase2;
+        }
     }
 
     // 进程名白名单过滤（flags bit3=8）：读取 group_leader->comm（主线程名）
@@ -248,8 +247,10 @@ int trace_offcpu(struct trace_event_raw_sched_switch *ctx) {
         __builtin_memset(leader_comm, 0, sizeof(leader_comm));
         bpf_probe_read_kernel_str(&leader_comm, sizeof(leader_comm),
                                   BPF_CORE_READ(task, group_leader, comm));
-        if (!bpf_map_lookup_elem(&offcpu_target_comms, &leader_comm))
+        if (!bpf_map_lookup_elem(&offcpu_target_comms, &leader_comm)) {
+            INC_STAT(STAT_FILTERED);
             goto phase2;
+        }
     }
 
     {
@@ -303,7 +304,7 @@ phase2:
 
     __u64 duration = ts - start->timestamp_ns;
 
-    __u64 threshold = offcpu_get_min_duration();
+    __u64 threshold = min_duration_ns;
     if (duration < threshold) {
         bpf_map_delete_elem(&offcpu_start, &next_key);
         return 0;
@@ -334,6 +335,7 @@ phase2:
     __u32 sig_k = 0;
     __u64 *last_signal = bpf_map_lookup_elem(&offcpu_signal_ts, &sig_k);
     if (!last_signal || (ts - *last_signal) >= 1000000000ULL) {
+        INC_STAT(STAT_TOTAL_EVENTS);
         struct il_offcpu_event *e =
             bpf_ringbuf_reserve(&offcpu_events, sizeof(*e), 0);
         if (e) {
@@ -341,6 +343,8 @@ phase2:
             e->timestamp_ns = ts;
             e->pid = 0;  // pid=0 标识为聚合信号
             bpf_ringbuf_submit(e, 0);
+        } else {
+            INC_STAT(STAT_BUFFER_FULL);
         }
         __u64 now = ts;
         bpf_map_update_elem(&offcpu_signal_ts, &sig_k, &now, BPF_ANY);

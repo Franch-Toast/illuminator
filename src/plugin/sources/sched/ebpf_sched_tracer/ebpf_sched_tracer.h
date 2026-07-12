@@ -19,8 +19,9 @@
 
 namespace illuminator {
 
-IL_DEFINE_SKEL_OPS(SchedTracerSkelOps, sched_tracer_sk,
-                   sched_events, collection_gate, "schedtrc-poll");
+IL_DEFINE_SKEL_OPS_WITH_META(SchedTracerSkelOps, sched_tracer_sk,
+                             sched_events, collection_gate, "schedtrc-poll",
+                             meta_stats);
 
 class EbpfSchedTracer : public EbpfSkeletonSource<SchedTracerSkelOps> {
 public:

@@ -45,6 +45,7 @@ struct {
 } net_events SEC(".maps");
 
 DECLARE_COLLECTION_GATE();
+DECLARE_META_STATS();
 
 // ============================================================================
 // trace_inet_sock_set_state：TCP 连接状态变迁处理函数
@@ -74,8 +75,12 @@ int trace_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
     if (family != 2 /* AF_INET */) return 0;
 
     // 预留 ring buffer 空间
+    INC_STAT(STAT_TOTAL_EVENTS);
     struct il_net_event *e = bpf_ringbuf_reserve(&net_events, sizeof(*e), 0);
-    if (!e) return 0;
+    if (!e) {
+        INC_STAT(STAT_BUFFER_FULL);
+        return 0;
+    }
 
     // ---------------------------------------------------------------
     // 填充进程和网络标识信息
@@ -113,6 +118,7 @@ int trace_inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
     }
     // 其他中间状态（SYN_SENT, SYN_RECV, FIN_WAIT 等）→ 丢弃
     else {
+        INC_STAT(STAT_DROPPED);
         bpf_ringbuf_discard(e, 0);
         return 0;
     }

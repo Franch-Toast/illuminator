@@ -1,6 +1,7 @@
-import { useMemo } from 'react'
+import { useMemo, useCallback } from 'react'
 import EChart from './EChart'
 import type { EChartsOption } from './EChart'
+import { downsample } from '../../utils/downsample'
 
 export interface CpuDataPoint {
   timestamp: number
@@ -29,13 +30,41 @@ const LAYERS = [
   { key: 'steal_pct' as const, color: '#9333ea', label: 'Steal' },
 ]
 
-export default function StackedAreaChart({ data, width = '100%', height = 240, group }: StackedAreaChartProps) {
-  const option = useMemo((): EChartsOption => {
-    const times = data.map(d => {
-      const date = new Date(d.timestamp)
-      return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
-    })
+const DOWNSAMPLE_THRESHOLD = 1000
 
+function formatTime(ts: number): string {
+  const date = new Date(ts)
+  return `${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}`
+}
+
+export default function StackedAreaChart({ data, width = '100%', height = 240, group }: StackedAreaChartProps) {
+  const displayData = useMemo(() => {
+    if (data.length <= DOWNSAMPLE_THRESHOLD) return data
+    const indexed = data.map((d, i) => ({ x: i, y: d.user_pct + d.system_pct + d.iowait_pct + d.irq_pct + d.softirq_pct + d.steal_pct }))
+    const sampled = downsample(indexed, { threshold: DOWNSAMPLE_THRESHOLD, algorithm: 'interval' })
+    return sampled.map(p => data[p.x])
+  }, [data])
+
+  const times = useMemo(
+    () => displayData.map(d => formatTime(d.timestamp)),
+    [displayData]
+  )
+
+  const handleFormatter = useCallback((params: unknown) => {
+    const items = params as Array<{ seriesName: string; value: number; color: string; dataIndex: number }>
+    if (!items?.length) return ''
+    const idx = items[0].dataIndex ?? 0
+    const time = times[idx] ?? ''
+    let html = `<div style="font-size:11px;color:#888">${time}</div>`
+    for (const item of items) {
+      if (item.value > 0.1) {
+        html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${item.color};margin-right:4px"></span>${item.seriesName}: ${item.value.toFixed(1)}%</div>`
+      }
+    }
+    return html
+  }, [times])
+
+  const option = useMemo((): EChartsOption => {
     return {
       tooltip: {
         trigger: 'axis',
@@ -43,17 +72,7 @@ export default function StackedAreaChart({ data, width = '100%', height = 240, g
         backgroundColor: '#1a1d23',
         borderColor: '#2a2d35',
         textStyle: { color: '#e0e0e0', fontSize: 12 },
-        formatter: (params: unknown) => {
-          const items = params as Array<{ seriesName: string; value: number; color: string }>
-          if (!items?.length) return ''
-          let html = `<div style="font-size:11px;color:#888">${items[0].seriesName ? times[0] : ''}</div>`
-          for (const item of items) {
-            if (item.value > 0.1) {
-              html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${item.color};margin-right:4px"></span>${item.seriesName}: ${item.value.toFixed(1)}%</div>`
-            }
-          }
-          return html
-        },
+        formatter: handleFormatter,
       },
       legend: {
         data: LAYERS.map(l => l.label),
@@ -84,12 +103,12 @@ export default function StackedAreaChart({ data, width = '100%', height = 240, g
         areaStyle: { opacity: 0.7 },
         lineStyle: { width: 0 },
         symbol: 'none',
-        data: data.map(d => d[layer.key] || 0),
+        data: displayData.map(d => d[layer.key] || 0),
         itemStyle: { color: layer.color },
       })),
       animation: false,
     }
-  }, [data])
+  }, [times, displayData, handleFormatter])
 
   return <EChart option={option} width={width} height={height} group={group} />
 }

@@ -36,6 +36,18 @@ namespace illuminator {
 using SourceCallback = std::function<void(DataBatchPtr)>;
 using QueryParams = std::unordered_map<std::string, std::string>;
 
+// ============================================================================
+// MetaStats — eBPF 侧自观测累计计数器
+// ============================================================================
+// 由 eBPF 探针的 meta_stats PERCPU_ARRAY map 汇总而来，用于在用户态展示
+// ring buffer 溢出、PID 过滤丢弃等情况。
+struct MetaStats {
+    uint64_t total_events = 0;
+    uint64_t buffer_full = 0;
+    uint64_t dropped = 0;
+    uint64_t filtered = 0;
+};
+
 class SourcePlugin : public Plugin {
 public:
     PluginType Type() const override { return PluginType::kSource; }
@@ -49,6 +61,9 @@ public:
     virtual bool IsPushMode() const { return false; }
     virtual bool HasBpfProbe() const { return false; }
     virtual uint32_t IntervalMs() const { return 1000; }
+
+    // 读取 eBPF 侧自观测计数器（仅 HasBpfProbe() == true 时有效）
+    virtual MetaStats GetBpfStats() const { return MetaStats{}; }
 
     // 反压通知：当下游处理速度跟不上时，Pipeline 会调用此方法。
     // active=true 表示进入反压状态，Source 应降低采集频率或丢弃低优先级数据。
