@@ -684,8 +684,8 @@ src/
 │       └── recording_sink/        # 录制 Sink（供 API 录制回放）
 └── server/
     ├── http_server.h              # HTTP 服务器封装
-    ├── api_routes.h               # REST API 路由 + WebSocket 管理
-    ├── sse_handler.h              # SSE 订阅管理 + SseSink 推送
+    ├── api_routes.h               # REST API 路由 (控制面)
+    ├── sse_handler.h              # SSE 订阅管理 + SseSink 推送 (数据面)
     └── storage/                   # 存储后端抽象 + SQLite 实现
 ```
 
@@ -783,7 +783,7 @@ timer_.AddRepeating(std::chrono::seconds(10), [this] {
 | 出队策略 | 简单阻塞 | 三级自适应退避（spin→yield→sleep） | 低延迟 + 低 CPU |
 | 线程数 (10管道) | ~15 | 1 + 2 + 10 + 4 = 17 | +2 (CollectPool) |
 | 最大 I/O 阻塞线程 | ProcessThread (单Sink快路径) | 无 (全部池化) | 完全隔离 |
-| 用户层 | 无 | FeatureManager (按需启停/暂停/录制/重配) | 新增 |
+| 用户层 | 无 | FeatureBus/FeatureDriver (按需启停/暂停/录制/重配) | 新增 |
 | 资源检查 | 无 | 每 100 次循环检查内存限制 | 新增 |
 | 优雅停机 | 基本 | 完整 Drain 流程 | 更可靠 |
 
@@ -810,8 +810,8 @@ timer_.AddRepeating(std::chrono::seconds(10), [this] {
 | Phase 3 | Pipeline 重构 ProcessLoop（三级退避出队） | ✅ 已完成 |
 | Phase 4 | InfrastructureManager 集成（CollectPool + SinkPool） | ✅ 已完成 |
 | Phase 5 | 配置 + 构建 | ✅ 已完成 |
-| Phase 6 | FeatureManager 按需启停管理 | ✅ 已完成 |
-| Phase 7 | 自动注入 StreamSink + WebSocketSink + RecordingSink | ✅ 已完成 |
+| Phase 6 | FeatureBus/FeatureDriver 按需启停管理 | ✅ 已完成 |
+| Phase 7 | 自动注入 SseSink + RecordingSink | ✅ 已完成 |
 | Phase 8 | 优雅停机 Drain 流程 | ✅ 已完成 |
 | Phase 9 | 过载保护 + 资源限制检查 | ✅ 已完成 |
 

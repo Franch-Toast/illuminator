@@ -1,7 +1,7 @@
 # Illuminator 系统架构全景分析
 
-> **版本**: 1.0  
-> **日期**: 2026-07-03  
+> **版本**: 2.0  
+> **日期**: 2026-07-12  
 > **状态**: 当前实现 (Implemented)  
 > **目标读者**: 架构师、核心开发者、技术评审
 
@@ -54,7 +54,7 @@ Illuminator 采用 **Linux 驱动模型风格的三层架构**，结合 **事件
 │  │                         eBPF Subsystem (内核级采集)                           ││
 │  │   libbpf Skeleton (嵌入字节码) + CO-RE                                      ││
 │  │   ├── cpu_profiler.bpf.c    (perf_event + BPF tgid 过滤)                   ││
-│  │   ├── offcpu.bpf.c          (sched tracepoint + tgid 过滤)                 ││
+│  │   ├── offcpu_profiler.bpf.c  (sched tracepoint + tgid 过滤)                 ││
 │  │   ├── bio_latency.bpf.c     (block I/O 追踪)                               ││
 │  │   ├── net_tracer.bpf.c      (TCP/UDP 连接追踪)                             ││
 │  │   └── sched_*.bpf.c         (调度器分析)                                    ││
@@ -1075,7 +1075,7 @@ illuminator.yaml.example
 | ProcessCpuDriver | process_cpu | Monitoring | Pull | /proc/[pid]/stat | ✅ |
 | CpuProfilerDriver | cpu_profiler | Profiling | Push (eBPF) | perf_event + BPF | ❌ (手动) |
 | OffcpuProfilerDriver | offcpu_profiler | Profiling | Push (eBPF) | sched tracepoint | ❌ (手动) |
-| IoMonitorDriver | io_monitor | Tracing | Pull | /proc/diskstats | ✅ |
+| IoMonitorDriver | io_monitor | Tracing | Push (eBPF) | block I/O tracepoint | ✅ |
 | NetTracerDriver | net_tracer | Tracing | Push (eBPF) | TCP tracepoint | ✅ |
 | SchedAnalyzerDriver | sched_analyzer | Tracing | Push (eBPF) | sched tracepoint | ✅ |
 
@@ -1104,6 +1104,7 @@ src/
 │   │   ├── pipeline.h                 Pipeline 类 (AsyncChannel + ProcessThread)
 │   │   ├── timer_wheel.h              全局定时调度 (timerfd + epoll + eventfd)
 │   │   ├── async_channel.h            无锁通道 (variant<Data, Sentinel>)
+│   │   ├── pid_manager.h             PID 管理器 (进程发现 + BPF map 同步)
 │   │   └── self_observability.h       自监控 (InternalMetrics + ResourceLimiter)
 │   ├── memory/                        内存管理
 │   │   ├── arena.h                    碰撞指针内存分配器
@@ -1114,7 +1115,7 @@ src/
 ├── ebpf/                              BPF C 程序 + 加载器
 │   ├── include/                       vmlinux.h, event_types.h, bpf_compat.h
 │   ├── probes/                        BPF 程序 (cpu/sched/io/net/memory)
-│   └── loader/                        BpfProgramManager, FeatureProbe, StackTraceUtil
+│   └── loader/                        BpfProgramManager, FeatureProbe, StackTraceUtil, BpfStatsReader
 ├── plugin/                            完整插件体系
 │   ├── api/                           插件接口定义
 │   │   ├── plugin_api.h               Plugin 基类 + C ABI (IlPluginDescriptor)

@@ -6,7 +6,7 @@
 >
 > **预计阅读时间**：30 分钟精读 + 2-3 天实操探索
 >
-> **更新日期**：2026-07-02
+> **更新日期**：2026-07-12
 
 ---
 
@@ -60,7 +60,8 @@ Illuminator 是一个 **高性能、插件化的全栈可观测性平台**。它
 
 ```bash
 # 安装系统依赖 (Ubuntu 22.04+)
-sudo apt install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev
+sudo apt install -y clang llvm libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev \
+  linux-tools-common linux-tools-generic
 
 # 安装 Bazel (推荐 Bazelisk)
 sudo npm install -g @bazel/bazelisk
@@ -506,7 +507,7 @@ SSE 订阅和控制面 API 均走 `/api/` 路径，通过 `SetupAuthMiddleware` 
 | 2 | `docs/pipeline_v3_design.md` (前 200 行) | v3 设计动机和架构决策 |
 | 3 | `illuminator.yaml.example` | 配置全貌，理解系统能力边界 |
 | 4 | `src/cli/main.cc` | 程序入口，daemon/collect/top 启动流程 |
-| 5 | `docs/code_review_report.md` | 全栈架构审查，了解已完成的改进 |
+| 5 | `docs/architecture_overview.md` | 系统架构全景分析 |
 
 ### 第二轮：核心数据结构（1.5 小时）
 
@@ -873,7 +874,7 @@ server:
 | 火焰图实现 | `web/src/components/charts/ProfileSnapshot.tsx` |
 | REST 客户端 | `web/src/services/apiClient.ts` |
 | 完整配置参考 | `illuminator.yaml.example` |
-| 审计报告 | `docs/code_review_report.md` |
+| 架构总览 | `docs/architecture_overview.md` |
 | 架构设计 | `docs/pipeline_v3_design.md` |
 
 ---
