@@ -1,72 +1,33 @@
 // ============================================================================
-// OffcpuProfilerSource — Off-CPU 性能剖析器（进程等待时间追踪）
+// OffcpuProfilerSource — Off-CPU 性能剖析器（Pull 模式）
 // ============================================================================
 //
-// 通过 eBPF 追踪进程在非 CPU 执行状态下的等待时间（Off-CPU 时间）。
-// 与 cpu_profiler（on-CPU 采样）互补，用于回答"进程大部分时间不在 CPU 上时
-// 到底在等什么"的问题。典型等待场景包括：磁盘 I/O、网络 I/O、锁竞争、
-// 定时休眠、等待子进程等。
+// 通过 eBPF 追踪进程在非 CPU 执行状态下的等待时间。
+// 与 cpu_profiler（On-CPU 采样）互补。
 //
-// On-CPU vs Off-CPU 的区别：
-// ===========================
-// - On-CPU（cpu_profiler）：进程正在 CPU 上执行的时间分布
-//   回答"CPU 热点在哪里"→ 适合优化计算密集型程序
+// 基于 EbpfSkeletonPullSource 模板，该模板统一管理：
+//   - Skeleton 生命周期（open/load/attach/destroy）
+//   - 多 bit 配置 gate + 延迟启动
+//   - PID/进程名/PID Namespace 过滤
+//   - Ring buffer poll 线程
+//   - 缓存管理 + Collect()
+//   - Pause/Resume/Reconfigure
 //
-// - Off-CPU（本插件）：进程不在 CPU 上执行的时间分布
-//   回答"瓶颈在等什么"→ 适合优化 IO 密集型程序、锁竞争问题
-//
-// 采集指标：
-// ==========
-// 每条 off-CPU 事件记录一次进程从离开 CPU（sched_switch）到重新被调度
-// 上 CPU（sched_wakeup）的完整等待周期：
-//
-// - pid / tid：等待进程的 PID 和 TID
-// - comm：进程名称
-// - cpu：进程离开的 CPU 核心号
-// - duration_ns：等待持续时间（纳秒）
-// - kernel_stack_id / user_stack_id：进程离开 CPU 时的内核/用户调用栈 ID
-// - kernel_stack / user_stack：解析后的完整等待栈帧地址
-// - sample_type：kOffCpu（标识为 Off-CPU 采样）
-//
-// 工作原理：
-// ==========
-// 1. 挂载 eBPF 程序到内核关键调度事件：
-//    - sched/sched_switch：捕获进程离开 CPU 的时刻，记录当时的内核/用户调用栈
-//      和时间戳，将 (pid, timestamp, stack) 存入 offcpu_map 等待匹配
-//    - sched/sched_wakeup / sched/sched_wakeup_new：捕获进程被唤醒的时刻，
-//      从 offcpu_map 中查找同一进程的上一次离 CPU 记录，计算等待时长
-//       duration = 唤醒时间 - 离开 CPU 时间，然后推送事件到 ring buffer
-//
-// 2. 仅在 duration >= min_duration_us（默认 100μs）时才推送事件，
-//    避免大量快速调度的短等待事件淹没有效数据。
-//
-// 3. 当前为 Pull 模式（IsPushMode=false），通过 ring buffer 收集事件
-//    并在 Collect() 时返回（适合定期轮询场景）。
-//
-// 配置参数：
-// ==========
-// - min_duration_us：最小等待时长阈值（默认 100μs，低于此值的事件不记录）
-// - user_stacks：是否采集用户态堆栈（默认 true）
-// - kernel_stacks：是否采集内核态堆栈（默认 true）
-// - target_pids：逗号分隔的 PID 白名单（空 = 追踪所有进程）
+// 本子类仅需关注 offcpu 特有的逻辑：
+//   - rodata 配置（min_duration_ns）
+//   - 聚合数据读取（ReadAndClearStats）
+//   - JSON 快照生成（QueryExtra("snapshot")）
 // ============================================================================
 
 #pragma once
 
-#include <atomic>
-#include <cerrno>
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cxxabi.h>
 #include <elf.h>
 #include <fstream>
-#include <mutex>
 #include <string>
-#include <thread>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <unordered_map>
 #include <vector>
 
@@ -77,57 +38,27 @@ using json = nlohmann::json;
 
 #include "offcpu_profiler_sk.skel.h"
 #include "core/common/logging.h"
-#include "core/common/string_util.h"
-#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
-
-#include "ebpf/loader/bpf_stats_reader.h"
 #include "ebpf/loader/stack_trace_util.h"
 #include "plugin/processors/stack_symbolizer/stack_symbolizer.h"
-#include "plugin/api/source_plugin.h"
+#include "plugin/sources/ebpf_skeleton_pull_source.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
+IL_DEFINE_SKEL_OPS_WITH_META(OffcpuSkelOps, offcpu_profiler_sk,
+                             offcpu_events, offcpu_cfg, "offcpu-poll",
+                             meta_stats);
+
 // ============================================================================
-// OffcpuProfilerSource 类 — Off-CPU 剖析插件主体
+// OffcpuProfilerSource — 继承 Pull 模板，实现 offcpu 特有逻辑
 // ============================================================================
-class OffcpuProfilerSource : public SourcePlugin {
+class OffcpuProfilerSource
+    : public EbpfSkeletonPullSource<OffcpuSkelOps> {
 public:
     const char* Name() const override { return "offcpu_profiler"; }
     const char* Version() const override { return "0.1.0"; }
 
-    bool IsPushMode() const override { return false; }
-    bool HasBpfProbe() const override { return !stub_mode_; }
-    bool IsStub() const override { return stub_mode_; }
-
-    MetaStats GetBpfStats() const override {
-        return ReadBpfMetaStats(meta_stats_fd_);
-    }
-
-    StatusOr<DataBatchPtr> Collect() override {
-        // 双通道保障：ring buffer 信号可能丢失，主动拉取 BPF stats map
-        if (!stub_mode_) {
-            bool need_fallback = false;
-            {
-                std::lock_guard<std::mutex> lk(cache_mu_);
-                need_fallback = !cached_batch_ ||
-                                cached_batch_->stack_samples().empty();
-            }
-            if (need_fallback) {
-                ReadAndClearStats();
-            }
-        }
-
-        std::lock_guard<std::mutex> lk(cache_mu_);
-        auto result = cached_batch_
-            ? cached_batch_
-            : std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        return result;
-    }
-
-    // HTTP API 查询入口：返回最近一轮聚合数据的 JSON 快照
     StatusOr<std::string> QueryExtra(
         const std::string& query, const QueryParams& /*params*/) override {
         if (query == "snapshot") {
@@ -137,375 +68,69 @@ public:
         return Status::Error(StatusCode::kUnimplemented, "unknown query");
     }
 
-    // ========================================================================
-    // Init — 初始化 Off-CPU 剖析器配置
-    // ========================================================================
-    Status Init(const ConfigValue& config) override {
-        // min_block_us 是用户侧 schema 名称，min_duration_us 为内部字段名
+protected:
+    // ---- 子类专有配置 ----
+    Status InitExtra(const ConfigValue& config) override {
         min_duration_us_ = static_cast<uint32_t>(
-            config["min_block_us"].AsInt(config["min_duration_us"].AsInt(10000)));
-        user_stacks_ = config["user_stacks"].AsBool(true);
-        kernel_stacks_ = config["kernel_stacks"].AsBool(true);
-        start_delay_seconds_ =
-            static_cast<int>(config["start_delay_seconds"].AsInt(3));
-        target_pids_ = ParseCommaSeparated<uint32_t>(
-            config["target_pids"].AsString(""));
-
-        // 解析进程名白名单（target_process_names 是 target_comms 的别名）
-        auto comms_str = config["target_process_names"].AsString(
-            config["target_comms"].AsString(""));
-        target_comms_.clear();
-        if (!comms_str.empty()) {
-            auto parts = ParseCommaSeparated<std::string>(comms_str);
-            for (auto& s : parts) {
-                if (!s.empty()) target_comms_.push_back(s);
-            }
-        }
-
+            config["min_block_us"].AsInt(
+                config["min_duration_us"].AsInt(10000)));
         return Status::Ok();
     }
 
-    // ========================================================================
-    // Start — 加载 eBPF 程序并开始追踪 Off-CPU 等待
-    // ========================================================================
-    Status Start() override {
-        // Skeleton 模式：从嵌入的字节码加载
-        offcpu_skel_ = offcpu_profiler_sk_bpf__open();
-        if (!offcpu_skel_) {
-            IL_WARN("offcpu_profiler: skeleton open failed; idle mode");
-            stub_mode_ = true;
-            running_.store(false);
-            return Status::Ok();
-        }
-
-        // 在 load 前写入 rodata 配置：最小阻塞时长阈值
-        if (offcpu_skel_->rodata) {
-            offcpu_skel_->rodata->min_duration_ns =
+    // ---- rodata 配置：min_duration_ns ----
+    void ConfigureSkeleton(skel_type* skel) override {
+        if (skel->rodata) {
+            skel->rodata->min_duration_ns =
                 static_cast<uint64_t>(min_duration_us_) * 1000ULL;
         }
-
-        int err = offcpu_profiler_sk_bpf__load(offcpu_skel_);
-        if (err) {
-            offcpu_profiler_sk_bpf__destroy(offcpu_skel_);
-            offcpu_skel_ = nullptr;
-            return Status::Error(StatusCode::kInternal,
-                "offcpu_profiler: skeleton load failed (err=" +
-                std::to_string(err) + ")");
-        }
-
-        // skeleton loaded — direct map/prog access below
-        Status st = Status::Ok();
-
-        // 写入运行时配置到 offcpu_cfg BPF map（flags）
-        cfg_fd_ = bpf_map__fd(offcpu_skel_->maps.offcpu_cfg);
-        if (cfg_fd_ >= 0) {
-            uint32_t k0 = 0;
-            // 启用 BPF-side PID 过滤（bit2）— pidns 翻译使其在容器中也能正确工作
-            uint32_t cfg_flags = (user_stacks_ ? 1u : 0u)
-                               | (kernel_stacks_ ? 2u : 0u)
-                               | (!target_pids_.empty() ? 4u : 0u)
-                               | (!target_comms_.empty() ? 8u : 0u);
-            cfg_flags_base_ = cfg_flags;
-            bpf_map_update_elem(cfg_fd_, &k0, &cfg_flags, BPF_ANY);
-
-            IL_INFO("offcpu_profiler: cfg_flags=0x{:x} min_duration={}us "
-                    "(user_stacks={}, kernel_stacks={}, pid_filter={}, "
-                    "comm_filter={}) — will enable after {}s delay",
-                    cfg_flags, min_duration_us_, user_stacks_, kernel_stacks_,
-                    !target_pids_.empty(), !target_comms_.empty(),
-                    start_delay_seconds_);
-        }
-
-        // 配置 PID Namespace 翻译
-        ConfigurePidNamespace();
-
-        // 写入目标 PID 到 offcpu_target_pids BPF map（namespace-local PID）
-        if (!target_pids_.empty()) {
-            int pids_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_pids);
-            if (pids_fd >= 0) {
-                uint8_t val = 1;
-                for (uint32_t pid : target_pids_) {
-                    bpf_map_update_elem(pids_fd, &pid, &val, BPF_ANY);
-                }
-                IL_INFO("offcpu_profiler: loaded {} target PIDs into BPF map",
-                        target_pids_.size());
-            }
-        }
-
-        // 写入目标进程名到 offcpu_target_comms BPF map
-        if (!target_comms_.empty()) {
-            int comms_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_comms);
-            if (comms_fd >= 0) {
-                uint8_t val = 1;
-                for (const auto& comm : target_comms_) {
-                    char key[16] = {};
-                    std::memcpy(key, comm.c_str(),
-                                std::min(comm.size(), sizeof(key) - 1));
-                    bpf_map_update_elem(comms_fd, key, &val, BPF_ANY);
-                }
-                IL_INFO("offcpu_profiler: loaded {} target comms into BPF map",
-                        target_comms_.size());
-            }
-        }
-
-        // 挂载 Off-CPU 追踪 eBPF 程序
-        {
-            int att_err = offcpu_profiler_sk_bpf__attach(offcpu_skel_);
-            if (att_err)
-                st = Status::Error(StatusCode::kInternal,
-                    "offcpu: attach failed (err=" + std::to_string(att_err) + ")");
-        }
-        if (!st.ok())
-            return st;
-
-        stacks_fd_ = bpf_map__fd(offcpu_skel_->maps.offcpu_stacks);
-        meta_stats_fd_ = bpf_map__fd(offcpu_skel_->maps.meta_stats);
-
-        int rb_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_events);
-        if (rb_fd < 0) {
-            return Status::Error(StatusCode::kInternal,
-                                 "offcpu_events ringbuf missing");
-        }
-
-        ring_buf_ = ring_buffer__new(rb_fd, HandleEvent, this, nullptr);
-        if (!ring_buf_) {
-            return Status::Error(StatusCode::kInternal,
-                                 "offcpu ring buffer init failed");
-        }
-
-        running_.store(true);
-        poll_thread_ = std::thread([this] {
-            SetThreadName("offcpu-poll");
-            while (running_.load()) {
-                int err = ring_buffer__poll(ring_buf_, 100);
-                if (err < 0 && err != -EINTR)
-                    IL_WARN("offcpu_profiler: ringbuf poll err {}", err);
-            }
-        });
-
-        // 启动延迟线程：等待系统稳定后再启用 BPF 采集（参考 perf_ebpf start_delay_seconds）
-        delay_thread_ = std::thread([this] {
-            SetThreadName("offcpu-delay");
-            for (int i = 0; i < start_delay_seconds_ && running_.load(); ++i) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-            if (running_.load() && cfg_fd_ >= 0) {
-                uint32_t k0 = 0;
-                uint32_t enabled_flags = cfg_flags_base_ | 16u;  // 设置 bit4 启用
-                bpf_map_update_elem(cfg_fd_, &k0, &enabled_flags, BPF_ANY);
-                IL_INFO("offcpu_profiler: enabled after {}s delay "
-                        "(flags=0x{:x})", start_delay_seconds_, enabled_flags);
-            }
-        });
-
-        IL_INFO("offcpu_profiler started (min_duration={}us, "
-                "target_pids={}, target_comms={}, delay={}s)",
-                min_duration_us_, target_pids_.size(),
-                target_comms_.size(), start_delay_seconds_);
-        return Status::Ok();
     }
 
-    // ========================================================================
-    // PauseCollection / ResumeCollection — 通过 offcpu_cfg bit4 控制 BPF gate
-    // ========================================================================
-    // OffcpuProfiler 虽然是 Pull 模式(IsPushMode()=false)，但内部有 BPF
-    // ringbuf poll 线程。暂停时清除 bit4（全局启用标志）阻止内核发射事件。
-    Status PauseCollection() override {
-        if (stub_mode_ || cfg_fd_ < 0) return Status::Ok();
-        uint32_t k0 = 0;
-        uint32_t disabled_flags = cfg_flags_base_ & ~16u;
-        bpf_map_update_elem(cfg_fd_, &k0, &disabled_flags, BPF_ANY);
-        IL_INFO("offcpu_profiler: collection paused (cleared bit4)");
-        return Status::Ok();
+    // ---- Map FD 提供者 ----
+    int GetStacksMapFd() const override {
+        return bpf_map__fd(skel_->maps.offcpu_stacks);
+    }
+    int GetTargetPidsMapFd() const override {
+        return bpf_map__fd(skel_->maps.offcpu_target_pids);
+    }
+    int GetTargetCommsMapFd() const override {
+        return bpf_map__fd(skel_->maps.offcpu_target_comms);
+    }
+    int GetPidnsMapFd() const override {
+        return bpf_map__fd(skel_->maps.offcpu_pidns_cfg);
     }
 
-    Status ResumeCollection() override {
-        if (stub_mode_ || cfg_fd_ < 0) return Status::Ok();
-        uint32_t k0 = 0;
-        uint32_t enabled_flags = cfg_flags_base_ | 16u;
-        bpf_map_update_elem(cfg_fd_, &k0, &enabled_flags, BPF_ANY);
-        IL_INFO("offcpu_profiler: collection resumed (set bit4)");
-        return Status::Ok();
+    ring_buffer_sample_fn EventCallback() const override {
+        return HandleEvent;
     }
 
-    // ========================================================================
-    // Stop — 停止追踪，释放所有 eBPF 资源
-    // ========================================================================
-    Status Stop() override {
-        running_.store(false);
-        if (delay_thread_.joinable())
-            delay_thread_.join();
-        if (poll_thread_.joinable())
-            poll_thread_.join();
-        if (ring_buf_) {
-            ring_buffer__free(ring_buf_);
-            ring_buf_ = nullptr;
-        }
-        // skeleton destroy handles detach
-        stacks_fd_ = -1;
-        cfg_fd_ = -1;
-
-        if (offcpu_skel_) {
-            offcpu_profiler_sk_bpf__destroy(offcpu_skel_);
-            offcpu_skel_ = nullptr;
-        }
-
-        return Status::Ok();
+    DataBatchPtr MakeEmptyBatch() const override {
+        return std::make_shared<DataBatch>(DataBatch::Type::kProfile);
     }
 
-    // ========================================================================
-    // Reconfigure — 运行时更新目标 PID/进程名过滤器
-    // ========================================================================
-    Status Reconfigure(const ConfigValue& params) override {
-        auto pid_str = params["target_pids"].AsString("");
-        auto comm_str = params["target_process_names"].AsString(
-            params["target_comms"].AsString(""));
+    bool IsCacheEmpty() const override {
+        return !cached_batch_ || cached_batch_->stack_samples().empty();
+    }
 
-        target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
-
-        target_comms_.clear();
-        if (!comm_str.empty()) {
-            auto parts = ParseCommaSeparated<std::string>(comm_str);
-            for (auto& s : parts)
-                if (!s.empty()) target_comms_.push_back(s);
-        }
-
-        // Clear and repopulate BPF PID map
-        int pids_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_pids);
-        if (pids_fd >= 0) {
-            uint32_t cur{}, next{};
-            std::vector<uint32_t> old_keys;
-            int err = bpf_map_get_next_key(pids_fd, nullptr, &cur);
-            while (err == 0) {
-                old_keys.push_back(cur);
-                err = bpf_map_get_next_key(pids_fd, &cur, &next);
-                cur = next;
-            }
-            for (auto k : old_keys)
-                bpf_map_delete_elem(pids_fd, &k);
-
-            uint8_t val = 1;
-            for (uint32_t pid : target_pids_)
-                bpf_map_update_elem(pids_fd, &pid, &val, BPF_ANY);
-        }
-
-        // Clear and repopulate BPF comm map
-        int comms_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_target_comms);
-        if (comms_fd >= 0) {
-            char cur_key[16] = {}, next_key[16] = {};
-            std::vector<std::string> old_comms;
-            int err = bpf_map_get_next_key(comms_fd, nullptr, cur_key);
-            while (err == 0) {
-                old_comms.emplace_back(cur_key);
-                err = bpf_map_get_next_key(comms_fd, cur_key, next_key);
-                std::memcpy(cur_key, next_key, 16);
-            }
-            for (auto& c : old_comms) {
-                char k[16] = {};
-                std::memcpy(k, c.c_str(), std::min(c.size(), sizeof(k) - 1));
-                bpf_map_delete_elem(comms_fd, k);
-            }
-
-            uint8_t val = 1;
-            for (const auto& comm : target_comms_) {
-                char key[16] = {};
-                std::memcpy(key, comm.c_str(), std::min(comm.size(), sizeof(key) - 1));
-                bpf_map_update_elem(comms_fd, key, &val, BPF_ANY);
-            }
-        }
-
-        // 配置 PID Namespace 翻译并启用 BPF-side PID 过滤
-        ConfigurePidNamespace();
-
-        if (cfg_fd_ >= 0) {
-            uint32_t k0 = 0;
-            uint32_t new_flags = (user_stacks_ ? 1u : 0u)
-                               | (kernel_stacks_ ? 2u : 0u)
-                               | (!target_pids_.empty() ? 4u : 0u)
-                               | (!target_comms_.empty() ? 8u : 0u)
-                               | 16u;  // keep enabled (bit4)
-            cfg_flags_base_ = new_flags & ~16u;
-            bpf_map_update_elem(cfg_fd_, &k0, &new_flags, BPF_ANY);
-            IL_INFO("offcpu_profiler: BPF flags=0x{:x} (BPF-side PID filter, "
-                    "ns-aware)", new_flags);
-        }
-
-        // 清空内部数据缓存，避免旧目标的样本残留
-        {
-            std::lock_guard<std::mutex> lk(cache_mu_);
-            cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        }
+    // ---- Reconfigure 扩展：min_block_us 需要重启 ----
+    Status OnReconfigureExtra(const ConfigValue& params) override {
         {
             std::lock_guard<std::mutex> lk(snapshot_mu_);
             latest_json_snapshot_ = "{\"stack_samples\":[]}";
         }
 
-        // min_block_us / min_duration_us 已迁移到 .rodata，运行时无法修改，
-        // 需要重启 Feature 才能生效。
         if (!params["min_block_us"].AsString("").empty() ||
             !params["min_duration_us"].AsString("").empty()) {
             return Status(StatusCode::kRequiresRestart,
-                          "min_block_us is stored in BPF rodata and requires restart");
+                "min_block_us is stored in BPF rodata and requires restart");
         }
-
-        IL_INFO("offcpu_profiler: reconfigured filters (pids={}, comms={})",
-                target_pids_.size(), target_comms_.size());
         return Status::Ok();
-    }
-
-private:
-    // ========================================================================
-    // ConfigurePidNamespace — 将当前进程的 PID namespace dev/ino 写入 BPF map
-    // ========================================================================
-    // BPF 使用 bpf_get_ns_current_pid_tgid(dev, ino) 将内核态 root-ns PID
-    // 翻译为目标 namespace 的 local PID，实现零开销 namespace 透明过滤。
-    void ConfigurePidNamespace() {
-        int ns_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_pidns_cfg);
-        if (ns_fd < 0) return;
-
-        struct stat st = {};
-        if (::stat("/proc/self/ns/pid", &st) != 0) {
-            IL_WARN("offcpu_profiler: stat(/proc/self/ns/pid) failed: {}",
-                    strerror(errno));
-            return;
-        }
-
-        il_pidns_config cfg = {};
-        cfg.dev = static_cast<uint64_t>(st.st_dev);
-        cfg.ino = static_cast<uint64_t>(st.st_ino);
-
-        uint32_t k = 0;
-        if (bpf_map_update_elem(ns_fd, &k, &cfg, BPF_ANY) == 0) {
-            IL_INFO("offcpu_profiler: configured pidns (dev={}, ino={}) for "
-                    "bpf_get_ns_current_pid_tgid", cfg.dev, cfg.ino);
-        }
-    }
-
-    // ========================================================================
-    // HandleEvent — ring buffer 信号回调（静态函数）
-    // ========================================================================
-    // 聚合模式：BPF 层仅发送低频信号（pid=0），收到后批量读取 offcpu_stats map
-    static int HandleEvent(void* ctx, void* data, size_t size) {
-        auto* self = static_cast<OffcpuProfilerSource*>(ctx);
-        if (size < sizeof(il_offcpu_event))
-            return 0;
-        auto* ev = static_cast<il_offcpu_event*>(data);
-
-        if (ev->pid == 0) {
-            // 聚合信号：触发 batch 读取
-            self->ReadAndClearStats();
-            return 0;
-        }
-
-        // 兼容旧模式（理论上不应触发）
-        return 0;
     }
 
     // ========================================================================
     // ReadAndClearStats — 批量读取 offcpu_stats BPF map 并转换为 DataBatch
     // ========================================================================
-    void ReadAndClearStats() {
-        int stats_fd = bpf_map__fd(offcpu_skel_->maps.offcpu_stats);
+    void ReadAndClearStats() override {
+        int stats_fd = bpf_map__fd(skel_->maps.offcpu_stats);
         if (stats_fd < 0) return;
 
         struct offcpu_stat_key {
@@ -521,7 +146,7 @@ private:
             char comm[16];
         };
 
-        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        auto batch = MakeEmptyBatch();
         offcpu_stat_key key = {}, next_key = {};
         offcpu_stat_val val = {};
 
@@ -558,40 +183,50 @@ private:
 
         GenerateSymbolizedSnapshot(batch);
 
-        // Pull 模式：累积到 cached_batch_ 供 Collect() 取用
-        // 不调用 callback_（pull 模式由 TimerWheel 驱动 Collect()）
-        {
-            std::lock_guard<std::mutex> lk(cache_mu_);
-            if (!cached_batch_)
-                cached_batch_ = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-            for (const auto& s : batch->stack_samples()) {
-                auto& dst = cached_batch_->AddStackSample();
-                dst.pid = s.pid;
-                dst.tid = s.tid;
-                dst.cpu = s.cpu;
-                dst.count = s.count;
-                dst.duration_ns = s.duration_ns;
-                dst.sample_type = s.sample_type;
-                dst.kernel_stack_id = s.kernel_stack_id;
-                dst.user_stack_id = s.user_stack_id;
-                dst.kernel_stack = s.kernel_stack;
-                dst.user_stack = s.user_stack;
-                dst.comm = cached_batch_->InternString(s.comm);
-            }
+        std::lock_guard<std::mutex> lk(cache_mu_);
+        if (!cached_batch_)
+            cached_batch_ = MakeEmptyBatch();
+        for (const auto& s : batch->stack_samples()) {
+            auto& dst = cached_batch_->AddStackSample();
+            dst.pid = s.pid;
+            dst.tid = s.tid;
+            dst.cpu = s.cpu;
+            dst.count = s.count;
+            dst.duration_ns = s.duration_ns;
+            dst.sample_type = s.sample_type;
+            dst.kernel_stack_id = s.kernel_stack_id;
+            dst.user_stack_id = s.user_stack_id;
+            dst.kernel_stack = s.kernel_stack;
+            dst.user_stack = s.user_stack;
+            dst.comm = cached_batch_->InternString(s.comm);
         }
     }
 
+private:
     // ========================================================================
-    // GenerateSymbolizedSnapshot — 生成符号化的 JSON 快照供 HTTP API 使用
+    // HandleEvent — ring buffer 信号回调
+    // ========================================================================
+    static int HandleEvent(void* ctx, void* data, size_t size) {
+        auto* self = static_cast<OffcpuProfilerSource*>(ctx);
+        if (size < sizeof(il_offcpu_event))
+            return 0;
+        auto* ev = static_cast<il_offcpu_event*>(data);
+        if (ev->pid == 0) {
+            self->ReadAndClearStats();
+        }
+        return 0;
+    }
+
+    // ========================================================================
+    // GenerateSymbolizedSnapshot — 生成符号化 JSON 快照供 HTTP API 使用
     // ========================================================================
     void GenerateSymbolizedSnapshot(const DataBatchPtr& batch) {
         std::lock_guard<std::mutex> lk(snapshot_mu_);
 
-        // 延迟加载内核符号
         if (!kernel_resolver_loaded_) {
             auto st = kernel_resolver_.Load();
             if (st.ok())
-                IL_INFO("offcpu_profiler: kernel symbols loaded for snapshot");
+                IL_INFO("offcpu_profiler: kernel symbols loaded");
             kernel_resolver_loaded_ = true;
         }
 
@@ -607,7 +242,6 @@ private:
             sj["comm"] = std::string(s.comm.data(), s.comm.size());
             sj["sample_type"] = static_cast<int>(s.sample_type);
 
-            // 内核栈 — 使用 kallsyms 符号解析
             json ks = json::array();
             for (auto& f : s.kernel_stack) {
                 json fj;
@@ -623,7 +257,6 @@ private:
                 ks.push_back(std::move(fj));
             }
 
-            // 用户栈 — 使用 /proc/<pid>/maps + ELF 符号解析
             json us = json::array();
             for (auto& f : s.user_stack) {
                 json fj;
@@ -636,7 +269,7 @@ private:
                     if (sym.empty()) {
                         char buf[64];
                         std::snprintf(buf, sizeof(buf), "[0x%llx]",
-                                      static_cast<unsigned long long>(f.address));
+                            static_cast<unsigned long long>(f.address));
                         sym = buf;
                     }
                 }
@@ -654,12 +287,10 @@ private:
     }
 
     // ========================================================================
-    // ResolveUserSymbol — 解析用户态地址到函数名
+    // 用户态符号解析
     // ========================================================================
     std::string ResolveUserSymbol(uint32_t pid, uint64_t addr) {
         auto now = std::chrono::steady_clock::now();
-
-        // 自 PID 检测：使用规范化的 key 确保自分析始终使用 /proc/self/maps
         uint32_t cache_key = IsSelfPid(pid) ? self_pid_ : pid;
 
         auto it = maps_cache_.find(cache_key);
@@ -672,21 +303,14 @@ private:
         } else {
             auto age = std::chrono::duration_cast<std::chrono::seconds>(
                 now - it->second.loaded_at).count();
-            if (age > 30) {
-                LoadProcMaps(cache_key, it->second);
-            }
+            if (age > 30) LoadProcMaps(cache_key, it->second);
         }
 
         for (const auto& m : it->second.maps) {
-            if (addr < m.start || addr >= m.end)
-                continue;
-
-            // 处理特殊映射：[vdso], [vsyscall], [heap], [stack] 等
+            if (addr < m.start || addr >= m.end) continue;
             if (!m.path.empty() && m.path[0] == '[') {
-                if (m.path == "[vdso]")
-                    return "__vdso_clock_gettime [vdso]";
-                if (m.path == "[vsyscall]")
-                    return "[vsyscall]";
+                if (m.path == "[vdso]") return "__vdso_clock_gettime [vdso]";
+                if (m.path == "[vsyscall]") return "[vsyscall]";
                 return m.path;
             }
 
@@ -697,13 +321,13 @@ private:
                 ElfSymbolCache cache;
                 if (!cache.Load(m.path)) {
                     if (!TryLoadDebugInfo(m.path, cache)) {
-                        std::string annotation = AnnotateLibraryOffset(m.path, file_off, map_off);
-                        if (!annotation.empty())
-                            return annotation;
+                        std::string ann =
+                            AnnotateLibraryOffset(m.path, file_off, map_off);
+                        if (!ann.empty()) return ann;
                         char buf[256];
                         std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
-                                      m.path.c_str(),
-                                      static_cast<unsigned long long>(map_off));
+                            m.path.c_str(),
+                            static_cast<unsigned long long>(map_off));
                         return std::string(buf);
                     }
                 }
@@ -712,55 +336,45 @@ private:
             }
             std::string sym = elf_it->second.Resolve(file_off);
             if (!sym.empty()) {
-                // 如果是 "+gap" 标记的近似归属，清理后返回
                 if (sym.size() > 4 && sym.substr(sym.size() - 4) == "+gap") {
                     sym = sym.substr(0, sym.size() - 4);
                     return DemangleSymbol(sym) + " [+gap]";
                 }
                 return DemangleSymbol(sym);
             }
-            // 尝试已知库函数近似标注
-            std::string annotation = AnnotateLibraryOffset(m.path, file_off, map_off);
-            if (!annotation.empty())
-                return annotation;
+            std::string ann =
+                AnnotateLibraryOffset(m.path, file_off, map_off);
+            if (!ann.empty()) return ann;
             char buf[256];
             std::snprintf(buf, sizeof(buf), "[%s+0x%llx]",
-                          m.path.c_str(),
-                          static_cast<unsigned long long>(map_off));
+                m.path.c_str(),
+                static_cast<unsigned long long>(map_off));
             return std::string(buf);
         }
         return {};
     }
 
-    // 判断 BPF 报告的 PID 是否为当前进程（考虑 PID namespace 差异）
     bool IsSelfPid(uint32_t pid) const {
         if (pid == self_pid_) return true;
-        // 如果 /proc/<pid> 不存在但 comm 匹配，视为自身
         std::string status_path = "/proc/" + std::to_string(pid) + "/status";
         std::ifstream f(status_path);
-        return !f.good();  // PID 不存在意味着可能是 namespace 差异
+        return !f.good();
     }
 
-    // PID 命名空间感知的 maps 加载
     bool LoadProcMaps(uint32_t pid, MapsCacheEntry& entry) {
         entry.maps.clear();
-
-        std::string path;
-        if (pid == self_pid_) {
-            path = "/proc/self/maps";
-        } else {
-            path = "/proc/" + std::to_string(pid) + "/maps";
-        }
+        std::string path = (pid == self_pid_)
+            ? "/proc/self/maps"
+            : "/proc/" + std::to_string(pid) + "/maps";
 
         std::ifstream f(path);
         if (!f) {
-            // PID namespace fallback: 当 /proc/<pid>/maps 不可读时尝试 /proc/self/maps
             if (pid != self_pid_) {
                 f.open("/proc/self/maps");
                 if (!f) return false;
                 if (!self_maps_logged_) {
-                    IL_INFO("offcpu_profiler: using /proc/self/maps for pid {} "
-                            "(pid namespace or stale PID)", pid);
+                    IL_INFO("offcpu_profiler: using /proc/self/maps for pid {}",
+                            pid);
                     self_maps_logged_ = true;
                 }
             } else {
@@ -771,7 +385,6 @@ private:
         while (std::getline(f, line)) {
             ProcMapEntry m{};
             if (!ParseProcMapsLine(line, &m)) continue;
-            // 保留 / 开头的文件路径和 [ 开头的特殊映射（[vdso] 等）
             if (m.path.empty()) continue;
             if (m.path[0] != '/' && m.path[0] != '[') continue;
             entry.maps.push_back(std::move(m));
@@ -780,23 +393,20 @@ private:
         return !entry.maps.empty();
     }
 
-    // 尝试从 /usr/lib/debug/.build-id/ 或 debuglink 加载外部调试符号
-    bool TryLoadDebugInfo(const std::string& elf_path, ElfSymbolCache& cache) {
-        // 策略 1: build-id 查找（最准确且与路径无关）
+    bool TryLoadDebugInfo(const std::string& elf_path,
+                          ElfSymbolCache& cache) {
         std::string build_id = ExtractBuildId(elf_path);
         if (build_id.size() >= 4) {
             std::string bid_path = "/usr/lib/debug/.build-id/"
-                + build_id.substr(0, 2) + "/" + build_id.substr(2) + ".debug";
+                + build_id.substr(0, 2) + "/"
+                + build_id.substr(2) + ".debug";
             if (cache.Load(bid_path)) return true;
         }
-
-        // 策略 2: /usr/lib/debug + 原路径
         std::string debug_path = "/usr/lib/debug" + elf_path + ".debug";
         if (cache.Load(debug_path)) return true;
         debug_path = "/usr/lib/debug" + elf_path;
         if (cache.Load(debug_path)) return true;
 
-        // 策略 3: 同目录 .debug 子目录
         auto last_slash = elf_path.rfind('/');
         if (last_slash != std::string::npos) {
             std::string dir = elf_path.substr(0, last_slash + 1);
@@ -809,7 +419,6 @@ private:
         return false;
     }
 
-    // 从 ELF 文件提取 .note.gnu.build-id 十六进制字符串
     static std::string ExtractBuildId(const std::string& path) {
         std::ifstream f(path, std::ios::binary);
         if (!f) return {};
@@ -820,7 +429,8 @@ private:
         if (ehdr->e_ident[EI_MAG0] != ELFMAG0) return {};
         if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
             return {};
-        auto* shdrs = reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
+        auto* shdrs =
+            reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
         for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
             if (shdrs[i].sh_type != SHT_NOTE) continue;
             if (shdrs[i].sh_offset + shdrs[i].sh_size > buf.size()) continue;
@@ -828,9 +438,12 @@ private:
             size_t rem = shdrs[i].sh_size;
             size_t pos = 0;
             while (pos + 12 <= rem) {
-                uint32_t namesz = *reinterpret_cast<const uint32_t*>(nd + pos);
-                uint32_t descsz = *reinterpret_cast<const uint32_t*>(nd + pos + 4);
-                uint32_t type = *reinterpret_cast<const uint32_t*>(nd + pos + 8);
+                uint32_t namesz =
+                    *reinterpret_cast<const uint32_t*>(nd + pos);
+                uint32_t descsz =
+                    *reinterpret_cast<const uint32_t*>(nd + pos + 4);
+                uint32_t type =
+                    *reinterpret_cast<const uint32_t*>(nd + pos + 8);
                 size_t name_start = pos + 12;
                 size_t name_aligned = (namesz + 3) & ~3u;
                 size_t desc_start = name_start + name_aligned;
@@ -843,7 +456,7 @@ private:
                     for (size_t j = 0; j < descsz; ++j) {
                         char h[3];
                         std::snprintf(h, sizeof(h), "%02x",
-                                      static_cast<uint8_t>(nd[desc_start + j]));
+                            static_cast<uint8_t>(nd[desc_start + j]));
                         hex += h;
                     }
                     return hex;
@@ -854,27 +467,19 @@ private:
         return {};
     }
 
-    // 对无法解析的库内部地址提供友好的近似标注
-    // 接受两个偏移：file_off（文件偏移，用于 nm 地址空间比较）和 map_off（仅供参考）
-    // 使用 file_off 进行已知函数地址范围匹配
     std::string AnnotateLibraryOffset(const std::string& lib_path,
-                                      uint64_t file_off, uint64_t /*map_off*/) {
+                                      uint64_t file_off,
+                                      uint64_t /*map_off*/) {
         if (lib_path.find("libstdc++") != std::string::npos) {
-            // execute_native_thread_routine（gcc/libstdc++ std::thread 入口）
-            // 通常在 _M_start_thread (0xf7500-0xf7900) 附近 ±0x200
-            // file offset 在 0xf7000-0xf8000 范围（适配多版本 libstdc++6.0.30-35+）
             if (file_off >= 0xf7000 && file_off < 0xf8000)
                 return "execute_native_thread_routine [libstdc++]";
-            // 备用范围：较老版本 libstdc++ (gcc 10-11)
             if (file_off >= 0xd5000 && file_off < 0xd6000)
                 return "execute_native_thread_routine [libstdc++]";
         }
         if (lib_path.find("libc.so") != std::string::npos ||
             lib_path.find("libc-") != std::string::npos) {
-            // start_thread (pthread_create 的入口) — glibc 2.35/2.36
             if (file_off >= 0x94000 && file_off < 0x95000)
                 return "start_thread [glibc]";
-            // __clone3 / clone (thread creation syscall wrapper)
             if (file_off >= 0x115000 && file_off < 0x116000)
                 return "__clone3 [glibc]";
         }
@@ -885,7 +490,7 @@ private:
         return {};
     }
 
-    std::string DemangleSymbol(const std::string& sym) {
+    static std::string DemangleSymbol(const std::string& sym) {
         int status = 0;
         char* dm = abi::__cxa_demangle(sym.c_str(), nullptr, nullptr, &status);
         if (status != 0 || !dm) return sym;
@@ -894,30 +499,12 @@ private:
         return out;
     }
 
-    bool stub_mode_ = false;
+    // ---- 私有状态 ----
     uint32_t min_duration_us_ = 10000;
-    bool user_stacks_ = true;
-    bool kernel_stacks_ = true;
-    int start_delay_seconds_ = 3;
-    std::vector<uint32_t> target_pids_;
-    std::vector<std::string> target_comms_;
-
-    // ---- 运行时状态 ----
-    std::atomic<bool> running_{false};
-    struct offcpu_profiler_sk_bpf* offcpu_skel_ = nullptr;
-    int stacks_fd_ = -1;
-    int meta_stats_fd_ = -1;
-    int cfg_fd_ = -1;
-    uint32_t cfg_flags_base_ = 0;
-    struct ring_buffer* ring_buf_ = nullptr;
-    std::thread poll_thread_;
-    std::thread delay_thread_;
-    mutable std::mutex cache_mu_;
-    DataBatchPtr cached_batch_;
     mutable std::mutex snapshot_mu_;
     std::string latest_json_snapshot_ = "{\"stack_samples\":[]}";
 
-    // ---- 内联符号解析器 ----
+    // ---- 符号解析 ----
     uint32_t self_pid_ = static_cast<uint32_t>(getpid());
     KernelSymbolResolver kernel_resolver_;
     bool kernel_resolver_loaded_ = false;

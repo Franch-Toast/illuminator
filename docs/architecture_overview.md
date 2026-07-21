@@ -369,6 +369,55 @@ Linux Kernel          eBPF ringbuf         CpuProfilerSource    AsyncChannel    
     │                      │                      │                  │ → 前端火焰图    │
 ```
 
+### 4.4 eBPF Source 模板体系
+
+Illuminator 提供两套 eBPF Skeleton 模板，分别对应 Push 和 Pull 两种数据流模式：
+
+```
+SourcePlugin (抽象基类)
+│
+├── EbpfSkeletonSource<SkelOps>          Push 模板 (别名: EbpfSkeletonPushSource)
+│   │  - BPF ring buffer 实时推送完整事件
+│   │  - poll 线程接收事件 → callback → pipeline
+│   │  - 单 bit gate 控制 (key=0, val=0/1)
+│   │  - PidManager 集成
+│   │  - 子类仅需 ~60 行: 定义 SkelOps + EventCallback
+│   ├── EbpfIoMonitor       (66 行)
+│   ├── EbpfSchedTracer     (72 行)
+│   └── EbpfNetTracer       (72 行)
+│
+├── EbpfSkeletonPullSource<SkelOps>      Pull 模板 (聚合模式)
+│   │  - BPF 内核 map 聚合数据，ring buffer 仅作低频信号
+│   │  - TimerWheel 驱动 Collect() → 返回缓存的 DataBatch
+│   │  - 多 bit cfg gate + 延迟启动
+│   │  - PID/进程名/PID Namespace BPF map 管理
+│   │  - Pause/Resume/Reconfigure 标准化
+│   │  - 子类需实现: ReadAndClearStats() + EventCallback()
+│   └── OffcpuProfilerSource (518 行, 原 932 行)
+│
+├── CpuProfilerSource                    手动管理 (perf_event 模式)
+│   │  - 通过 perf_event_open() + ioctl 挂载 BPF (非 skeleton attach)
+│   │  - 双模式: aggregated(Pull) / stream(Push)
+│   └── 923 行 (未来考虑 EbpfPerfEventSource 模板)
+│
+└── SchedAnalyzerSource                  手动管理 (双模式)
+    │  - 双模式: aggregated(Pull) / detailed(Push)
+    │  - 用户态 PID 过滤 + 历史/事件/唤醒 deque
+    └── 582 行
+```
+
+**Push vs Pull 数据流对比**:
+
+```
+Push (EbpfSkeletonSource):
+  内核 BPF → ring buffer [完整事件] → poll 线程 → callback → pipeline
+
+Pull (EbpfSkeletonPullSource):
+  内核 BPF → 内核 map [聚合统计] + ring buffer [低频信号]
+           → poll 线程 [仅接收信号] → ReadAndClearStats() → cache
+           → TimerWheel Collect() → pipeline
+```
+
 ---
 
 ## 五、前后端交互完整链路
@@ -1141,7 +1190,8 @@ src/
 │   │   ├── net_tracer_driver.h
 │   │   └── sched_analyzer_driver.h
 │   ├── sources/                       数据源插件 (按 cpu/sched/io/net 分组)
-│   │   ├── ebpf_skeleton_source.h     eBPF Skeleton Push Source 基类
+│   │   ├── ebpf_skeleton_source.h     eBPF Skeleton Push Source 模板 (EbpfSkeletonSource)
+│   │   ├── ebpf_skeleton_pull_source.h eBPF Skeleton Pull Source 模板 (EbpfSkeletonPullSource)
 │   │   ├── cpu/                       cpu_utilization, process_cpu, cpu_profiler, proc_stat_reader
 │   │   ├── sched/                     sched_analyzer, offcpu_profiler, ebpf_sched_tracer
 │   │   ├── io/                        ebpf_io_monitor

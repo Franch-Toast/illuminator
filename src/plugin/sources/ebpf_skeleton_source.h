@@ -313,4 +313,9 @@ private:
     }
 };
 
+// 类型别名：EbpfSkeletonPushSource 是 EbpfSkeletonSource 的显式名称，
+// 与 EbpfSkeletonPullSource（Pull 聚合模式）形成对称的命名体系。
+template <typename SkelOps>
+using EbpfSkeletonPushSource = EbpfSkeletonSource<SkelOps>;
+
 }  // namespace illuminator

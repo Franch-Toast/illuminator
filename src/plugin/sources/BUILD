@@ -3,7 +3,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 # Source plugins — organized by subsystem (cpu, sched, io, net)
 
 # ============================================================================
-# eBPF Skeleton-based Push Source base class
+# eBPF Skeleton Source Templates (Push + Pull)
 # ============================================================================
 
 cc_library(
@@ -17,6 +17,22 @@ cc_library(
         "//src/core:common",
         "//src/core:engine",
         "//src/core:threading",
+        "//src/ebpf:loader",
+        "//src/plugin:api",
+    ],
+)
+
+cc_library(
+    name = "ebpf_skeleton_pull_source",
+    hdrs = ["ebpf_skeleton_pull_source.h"],
+    strip_include_prefix = "",
+    include_prefix = "plugin/sources",
+    visibility = ["//visibility:public"],
+    linkopts = ["-lbpf", "-lelf", "-lz"],
+    deps = [
+        "//src/core:common",
+        "//src/core:threading",
+        "//src/ebpf:common_bpf_types",
         "//src/ebpf:loader",
         "//src/plugin:api",
     ],
@@ -134,8 +150,8 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
+        ":ebpf_skeleton_pull_source",
         "//src/core:common",
-        "//src/core:threading",
         "//src/ebpf:common_bpf_types",
         "//src/ebpf:stack_trace_util",
         "//src/ebpf/probes:offcpu_profiler_sk_skel",
