@@ -2,21 +2,11 @@
 // OffcpuProfilerSource — Off-CPU 性能剖析器（Pull 模式）
 // ============================================================================
 //
-// 通过 eBPF 追踪进程在非 CPU 执行状态下的等待时间。
-// 与 cpu_profiler（On-CPU 采样）互补。
+// 基于 EbpfSourceBase 重写。
+// 旧版实现保留在 offcpu_profiler.legacy.h 作为功能参考。
 //
-// 基于 EbpfSkeletonPullSource 模板，该模板统一管理：
-//   - Skeleton 生命周期（open/load/attach/destroy）
-//   - 多 bit 配置 gate + 延迟启动
-//   - PID/进程名/PID Namespace 过滤
-//   - Ring buffer poll 线程
-//   - 缓存管理 + Collect()
-//   - Pause/Resume/Reconfigure
-//
-// 本子类仅需关注 offcpu 特有的逻辑：
-//   - rodata 配置（min_duration_ns）
-//   - 聚合数据读取（ReadAndClearStats）
-//   - JSON 快照生成（QueryExtra("snapshot")）
+// 通过 eBPF 追踪进程在非 CPU 执行状态下的等待时间，
+// 从 offcpu_stats BPF map 读取聚合数据。
 // ============================================================================
 
 #pragma once
@@ -27,37 +17,45 @@
 #include <cxxabi.h>
 #include <elf.h>
 #include <fstream>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
-using json = nlohmann::json;
 
 #include "ebpf/include/bpf_compat.h"
 
 #include "offcpu_profiler_sk.skel.h"
 #include "core/common/logging.h"
 #include "ebpf/include/event_types.h"
+#include "ebpf/loader/bpf_util.h"
 #include "ebpf/loader/stack_trace_util.h"
 #include "plugin/processors/stack_symbolizer/stack_symbolizer.h"
-#include "plugin/sources/ebpf_skeleton_pull_source.h"
+#include "plugin/sources/ebpf_source_base.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
-IL_DEFINE_SKEL_OPS_WITH_META(OffcpuSkelOps, offcpu_profiler_sk,
-                             offcpu_events, offcpu_cfg, "offcpu-poll",
-                             meta_stats);
+class OffcpuProfilerSource : public EbpfSourceBase {
+    IL_SKEL_CALLBACKS(offcpu_profiler_sk);
 
-// ============================================================================
-// OffcpuProfilerSource — 继承 Pull 模板，实现 offcpu 特有逻辑
-// ============================================================================
-class OffcpuProfilerSource
-    : public EbpfSkeletonPullSource<OffcpuSkelOps> {
 public:
     const char* Name() const override { return "offcpu_profiler"; }
-    const char* Version() const override { return "0.1.0"; }
+    const char* Version() const override { return "2.0.0"; }
+
+    Status Init(const ConfigValue& config) override {
+        min_duration_us_ = static_cast<uint32_t>(
+            config["min_block_us"].AsInt(
+                config["min_duration_us"].AsInt(10000)));
+
+        target_pids_ = ParseCommaSeparated<uint32_t>(
+            config["target_pids"].AsString(""));
+        ParseComms(config["target_process_names"].AsString(
+            config["target_comms"].AsString("")));
+        return Status::Ok();
+    }
 
     StatusOr<std::string> QueryExtra(
         const std::string& query, const QueryParams& /*params*/) override {
@@ -68,54 +66,20 @@ public:
         return Status::Error(StatusCode::kUnimplemented, "unknown query");
     }
 
-protected:
-    // ---- 子类专有配置 ----
-    Status InitExtra(const ConfigValue& config) override {
-        min_duration_us_ = static_cast<uint32_t>(
-            config["min_block_us"].AsInt(
-                config["min_duration_us"].AsInt(10000)));
-        return Status::Ok();
-    }
+    Status Reconfigure(const ConfigValue& params) override {
+        target_pids_ = ParseCommaSeparated<uint32_t>(
+            params["target_pids"].AsString(""));
+        ParseComms(params["target_process_names"].AsString(
+            params["target_comms"].AsString("")));
 
-    // ---- rodata 配置：min_duration_ns ----
-    void ConfigureSkeleton(skel_type* skel) override {
-        if (skel->rodata) {
-            skel->rodata->min_duration_ns =
-                static_cast<uint64_t>(min_duration_us_) * 1000ULL;
-        }
-    }
+        bpf_util::RewritePidFilter(
+            bpf_map__fd(skel()->maps.offcpu_target_pids), target_pids_);
+        bpf_util::RewriteCommFilter(
+            bpf_map__fd(skel()->maps.offcpu_target_comms), target_comms_);
 
-    // ---- Map FD 提供者 ----
-    int GetStacksMapFd() const override {
-        return bpf_map__fd(skel_->maps.offcpu_stacks);
-    }
-    int GetTargetPidsMapFd() const override {
-        return bpf_map__fd(skel_->maps.offcpu_target_pids);
-    }
-    int GetTargetCommsMapFd() const override {
-        return bpf_map__fd(skel_->maps.offcpu_target_comms);
-    }
-    int GetPidnsMapFd() const override {
-        return bpf_map__fd(skel_->maps.offcpu_pidns_cfg);
-    }
-
-    ring_buffer_sample_fn EventCallback() const override {
-        return HandleEvent;
-    }
-
-    DataBatchPtr MakeEmptyBatch() const override {
-        return std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-    }
-
-    bool IsCacheEmpty() const override {
-        return !cached_batch_ || cached_batch_->stack_samples().empty();
-    }
-
-    // ---- Reconfigure 扩展：min_block_us 需要重启 ----
-    Status OnReconfigureExtra(const ConfigValue& params) override {
         {
             std::lock_guard<std::mutex> lk(snapshot_mu_);
-            latest_json_snapshot_ = "{\"stack_samples\":[]}";
+            latest_json_snapshot_ = R"({"stack_samples":[]})";
         }
 
         if (!params["min_block_us"].AsString("").empty() ||
@@ -126,37 +90,78 @@ protected:
         return Status::Ok();
     }
 
-    // ========================================================================
-    // ReadAndClearStats — 批量读取 offcpu_stats BPF map 并转换为 DataBatch
-    // ========================================================================
-    void ReadAndClearStats() override {
-        int stats_fd = bpf_map__fd(skel_->maps.offcpu_stats);
-        if (stats_fd < 0) return;
+protected:
+    // ================================================================
+    // Hooks
+    // ================================================================
 
-        struct offcpu_stat_key {
-            uint32_t tgid;
-            uint32_t tid;
-            int32_t kernel_stack_id;
-            int32_t user_stack_id;
-        };
-        struct offcpu_stat_val {
-            uint64_t total_ns;
-            uint32_t count;
-            uint32_t cpu;
-            char comm[16];
-        };
+    void OnConfigureRodata(void* /*s*/) override {
+        if (skel()->rodata)
+            skel()->rodata->min_duration_ns =
+                static_cast<uint64_t>(min_duration_us_) * 1000ULL;
+    }
 
-        auto batch = MakeEmptyBatch();
-        offcpu_stat_key key = {}, next_key = {};
-        offcpu_stat_val val = {};
+    void OnConfigureMaps(void* /*s*/) override {
+        stacks_fd_ = bpf_map__fd(skel()->maps.offcpu_stacks);
+        stats_fd_ = bpf_map__fd(skel()->maps.offcpu_stats);
+        SetRingBufFd(bpf_map__fd(skel()->maps.offcpu_events));
+        SetGateFd(bpf_map__fd(skel()->maps.offcpu_cfg));
+        SetMetaStatsFd(bpf_map__fd(skel()->maps.meta_stats));
 
-        while (bpf_map_get_next_key(stats_fd, &key, &next_key) == 0) {
-            if (bpf_map_lookup_elem(stats_fd, &next_key, &val) == 0) {
-                auto kernel_stack =
-                    LookupBpfStackTrace(stacks_fd_, next_key.kernel_stack_id);
-                auto user_stack =
-                    LookupBpfStackTrace(stacks_fd_, next_key.user_stack_id);
+        bpf_util::ConfigurePidNamespace(
+            bpf_map__fd(skel()->maps.offcpu_pidns_cfg));
+        bpf_util::WritePidFilter(
+            bpf_map__fd(skel()->maps.offcpu_target_pids), target_pids_);
+        bpf_util::WriteCommFilter(
+            bpf_map__fd(skel()->maps.offcpu_target_comms), target_comms_);
+    }
 
+    ring_buffer_sample_fn GetEventCallback() const override {
+        return HandleSignal;
+    }
+
+    // Pull 模式：先消费 ring buffer 中的信号，然后读 stats map
+    StatusOr<DataBatchPtr> CollectFromMaps() override {
+        if (stats_fd_ < 0 || stacks_fd_ < 0)
+            return std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        ReadAndFlushStats(batch.get());
+
+        if (!batch->stack_samples().empty())
+            GenerateSymbolizedSnapshot(batch);
+
+        return batch;
+    }
+
+private:
+    // ring buffer 用作信号通道（pid==0 表示 BPF 侧数据就绪）
+    // 在新架构中信号由 Collect() → ring_buffer__consume() 自动处理，
+    // 回调只需排空 ring buffer 防溢出
+    static int HandleSignal(void* /*ctx*/, void* /*data*/, size_t /*size*/) {
+        return 0;
+    }
+
+    struct OffcpuStatKey {
+        uint32_t tgid;
+        uint32_t tid;
+        int32_t kernel_stack_id;
+        int32_t user_stack_id;
+    };
+
+    struct OffcpuStatVal {
+        uint64_t total_ns;
+        uint32_t count;
+        uint32_t cpu;
+        char comm[16];
+    };
+
+    void ReadAndFlushStats(DataBatch* batch) {
+        OffcpuStatKey key{}, next_key{};
+        OffcpuStatVal val{};
+
+        while (bpf_map_get_next_key(stats_fd_, &key, &next_key) == 0) {
+            if (bpf_map_lookup_elem(stats_fd_, &next_key, &val) == 0) {
                 auto& cs = batch->AddStackSample();
                 cs.pid = next_key.tgid;
                 cs.tid = next_key.tid;
@@ -168,58 +173,32 @@ protected:
                 cs.count = val.count;
                 cs.kernel_stack_id = next_key.kernel_stack_id;
                 cs.user_stack_id = next_key.user_stack_id;
-                cs.kernel_stack = kernel_stack;
-                cs.user_stack = user_stack;
+                cs.kernel_stack = LookupBpfStackTrace(
+                    stacks_fd_, next_key.kernel_stack_id);
+                cs.user_stack = LookupBpfStackTrace(
+                    stacks_fd_, next_key.user_stack_id);
             }
-            bpf_map_delete_elem(stats_fd, &next_key);
+            bpf_map_delete_elem(stats_fd_, &next_key);
             key = next_key;
         }
+    }
 
-        if (batch->stack_samples().empty())
-            return;
-
-        IL_DEBUG("offcpu_profiler: flush {} samples",
-                 batch->stack_samples().size());
-
-        GenerateSymbolizedSnapshot(batch);
-
-        std::lock_guard<std::mutex> lk(cache_mu_);
-        if (!cached_batch_)
-            cached_batch_ = MakeEmptyBatch();
-        for (const auto& s : batch->stack_samples()) {
-            auto& dst = cached_batch_->AddStackSample();
-            dst.pid = s.pid;
-            dst.tid = s.tid;
-            dst.cpu = s.cpu;
-            dst.count = s.count;
-            dst.duration_ns = s.duration_ns;
-            dst.sample_type = s.sample_type;
-            dst.kernel_stack_id = s.kernel_stack_id;
-            dst.user_stack_id = s.user_stack_id;
-            dst.kernel_stack = s.kernel_stack;
-            dst.user_stack = s.user_stack;
-            dst.comm = cached_batch_->InternString(s.comm);
+    void ParseComms(const std::string& s) {
+        target_comms_.clear();
+        if (s.empty()) return;
+        std::stringstream ss(s);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            while (!tok.empty() && tok.front() == ' ') tok.erase(0, 1);
+            while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+            if (!tok.empty()) target_comms_.push_back(tok);
         }
     }
 
-private:
-    // ========================================================================
-    // HandleEvent — ring buffer 信号回调
-    // ========================================================================
-    static int HandleEvent(void* ctx, void* data, size_t size) {
-        auto* self = static_cast<OffcpuProfilerSource*>(ctx);
-        if (size < sizeof(il_offcpu_event))
-            return 0;
-        auto* ev = static_cast<il_offcpu_event*>(data);
-        if (ev->pid == 0) {
-            self->ReadAndClearStats();
-        }
-        return 0;
-    }
+    // ================================================================
+    // 符号解析（保留自旧版，为 QueryExtra("snapshot") 服务）
+    // ================================================================
 
-    // ========================================================================
-    // GenerateSymbolizedSnapshot — 生成符号化 JSON 快照供 HTTP API 使用
-    // ========================================================================
     void GenerateSymbolizedSnapshot(const DataBatchPtr& batch) {
         std::lock_guard<std::mutex> lk(snapshot_mu_);
 
@@ -230,10 +209,10 @@ private:
             kernel_resolver_loaded_ = true;
         }
 
-        json j;
-        json samples = json::array();
+        nlohmann::json j;
+        nlohmann::json samples = nlohmann::json::array();
         for (auto& s : batch->stack_samples()) {
-            json sj;
+            nlohmann::json sj;
             sj["pid"] = s.pid;
             sj["tid"] = s.tid;
             sj["cpu"] = s.cpu;
@@ -242,9 +221,9 @@ private:
             sj["comm"] = std::string(s.comm.data(), s.comm.size());
             sj["sample_type"] = static_cast<int>(s.sample_type);
 
-            json ks = json::array();
+            nlohmann::json ks = nlohmann::json::array();
             for (auto& f : s.kernel_stack) {
-                json fj;
+                nlohmann::json fj;
                 fj["address"] = f.address;
                 std::string sym = kernel_resolver_.Resolve(f.address);
                 if (sym.empty()) {
@@ -257,9 +236,9 @@ private:
                 ks.push_back(std::move(fj));
             }
 
-            json us = json::array();
+            nlohmann::json us = nlohmann::json::array();
             for (auto& f : s.user_stack) {
-                json fj;
+                nlohmann::json fj;
                 fj["address"] = f.address;
                 std::string sym;
                 if (f.address < 0x1000) {
@@ -286,9 +265,6 @@ private:
         latest_json_snapshot_ = j.dump();
     }
 
-    // ========================================================================
-    // 用户态符号解析
-    // ========================================================================
     std::string ResolveUserSymbol(uint32_t pid, uint64_t addr) {
         auto now = std::chrono::steady_clock::now();
         uint32_t cache_key = IsSelfPid(pid) ? self_pid_ : pid;
@@ -296,8 +272,7 @@ private:
         auto it = maps_cache_.find(cache_key);
         if (it == maps_cache_.end()) {
             MapsCacheEntry entry;
-            if (!LoadProcMaps(cache_key, entry))
-                return {};
+            if (!LoadProcMaps(cache_key, entry)) return {};
             auto ins = maps_cache_.emplace(cache_key, std::move(entry));
             it = ins.first;
         } else {
@@ -499,12 +474,15 @@ private:
         return out;
     }
 
-    // ---- 私有状态 ----
     uint32_t min_duration_us_ = 10000;
-    mutable std::mutex snapshot_mu_;
-    std::string latest_json_snapshot_ = "{\"stack_samples\":[]}";
+    int stacks_fd_ = -1;
+    int stats_fd_ = -1;
+    std::vector<uint32_t> target_pids_;
+    std::vector<std::string> target_comms_;
 
-    // ---- 符号解析 ----
+    mutable std::mutex snapshot_mu_;
+    std::string latest_json_snapshot_ = R"({"stack_samples":[]})";
+
     uint32_t self_pid_ = static_cast<uint32_t>(getpid());
     KernelSymbolResolver kernel_resolver_;
     bool kernel_resolver_loaded_ = false;

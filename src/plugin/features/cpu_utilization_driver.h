@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <nlohmann/json.hpp>
+
 #include "core/engine/feature_driver.h"
 #include "plugin/features/feature_registry.h"
 #include "server/sse_handler.h"
@@ -60,13 +62,31 @@ public:
     }
 
     Status SetConfig(const std::string& json_config) override {
-        (void)json_config;
-        return Reconfigure(ConfigValue{});
+        try {
+            auto j = nlohmann::json::parse(json_config);
+            ConfigValue params;
+            if (j.contains("interval_ms") && j["interval_ms"].is_number_integer()) {
+                interval_ms_ = j["interval_ms"].get<uint32_t>();
+                params["interval_ms"] = ConfigValue(static_cast<int64_t>(interval_ms_));
+            }
+            if (j.contains("collect_per_core") && j["collect_per_core"].is_boolean()) {
+                collect_per_core_ = j["collect_per_core"].get<bool>();
+                params["collect_per_core"] = ConfigValue(collect_per_core_);
+            }
+            if (j.contains("ema_alpha") && j["ema_alpha"].is_number()) {
+                ema_alpha_ = j["ema_alpha"].get<double>();
+                params["ema_alpha"] = ConfigValue(ema_alpha_);
+            }
+            return Reconfigure(params);
+        } catch (const std::exception& e) {
+            return Status::Error(StatusCode::kInvalidArgument,
+                std::string("Invalid JSON config: ") + e.what());
+        }
     }
 
     Status Reconfigure(const ConfigValue& params) override {
         if (!pipeline_) {
-            return Status::Error(StatusCode::kUnavailable, "not running");
+            return Status::Ok();
         }
         return pipeline_->Reconfigure(params);
     }

@@ -369,53 +369,63 @@ Linux Kernel          eBPF ringbuf         CpuProfilerSource    AsyncChannel    
     │                      │                      │                  │ → 前端火焰图    │
 ```
 
-### 4.4 eBPF Source 模板体系
+### 4.4 eBPF Source 架构（EbpfSourceBase）
 
-Illuminator 提供两套 eBPF Skeleton 模板，分别对应 Push 和 Pull 两种数据流模式：
+所有 eBPF Source 插件统一继承 `EbpfSourceBase`，采用 Linux 驱动框架风格的
+"框架 + hooks" 设计模式。PID/Comm 过滤、perf_event 管理等能力通过 `bpf_util`
+工具函数按需调用（类似 Linux `devm_*`），基类不强制使用。
 
 ```
 SourcePlugin (抽象基类)
 │
-├── EbpfSkeletonSource<SkelOps>          Push 模板 (别名: EbpfSkeletonPushSource)
-│   │  - BPF ring buffer 实时推送完整事件
-│   │  - poll 线程接收事件 → callback → pipeline
-│   │  - 单 bit gate 控制 (key=0, val=0/1)
-│   │  - PidManager 集成
-│   │  - 子类仅需 ~60 行: 定义 SkelOps + EventCallback
-│   ├── EbpfIoMonitor       (66 行)
-│   ├── EbpfSchedTracer     (72 行)
-│   └── EbpfNetTracer       (72 行)
-│
-├── EbpfSkeletonPullSource<SkelOps>      Pull 模板 (聚合模式)
-│   │  - BPF 内核 map 聚合数据，ring buffer 仅作低频信号
-│   │  - TimerWheel 驱动 Collect() → 返回缓存的 DataBatch
-│   │  - 多 bit cfg gate + 延迟启动
-│   │  - PID/进程名/PID Namespace BPF map 管理
-│   │  - Pause/Resume/Reconfigure 标准化
-│   │  - 子类需实现: ReadAndClearStats() + EventCallback()
-│   └── OffcpuProfilerSource (518 行, 原 932 行)
-│
-├── CpuProfilerSource                    手动管理 (perf_event 模式)
-│   │  - 通过 perf_event_open() + ioctl 挂载 BPF (非 skeleton attach)
-│   │  - 双模式: aggregated(Pull) / stream(Push)
-│   └── 923 行 (未来考虑 EbpfPerfEventSource 模板)
-│
-└── SchedAnalyzerSource                  手动管理 (双模式)
-    │  - 双模式: aggregated(Pull) / detailed(Push)
-    │  - 用户态 PID 过滤 + 历史/事件/唤醒 deque
-    └── 582 行
+└── EbpfSourceBase                       统一 eBPF Source 基类
+    │  - Skeleton 生命周期: open → configure → load → attach → destroy
+    │  - Stub 模式: 内核不支持 BPF 时优雅降级
+    │  - Gate 管理 + MetaStats 自观测
+    │  - IL_SKEL_CALLBACKS(skel_name) 宏: 一行生成 skeleton 回调表
+    │
+    │  Push 模式: ConsumeAndBatch() — ring_buffer__consume() 批量排空
+    │  Pull 模式: Collect() → CollectFromMaps() 从 BPF maps 读聚合数据
+    │  无独立 poll 线程 — 由 Pipeline 引擎 (TimerWheel + CollectPool) 统一调度
+    │
+    │  子类 Hooks (类似 Linux struct xxx_ops):
+    │    OnConfigureRodata()   — load 前写 rodata
+    │    OnConfigureMaps()     — load 后配置 BPF maps
+    │    OnPostAttach()        — attach 后额外挂载 (如 perf_event)
+    │    OnPreDestroy()        — 停止时清理额外资源
+    │    GetEventCallback()    — Push: ring buffer 事件回调
+    │    CollectFromMaps()     — Pull: 从 maps 读聚合数据
+    │
+    ├── EbpfIoMonitor          (70 行)   Push — bio tracepoint
+    ├── EbpfNetTracer          (81 行)   Push — inet_sock tracepoint
+    ├── EbpfSchedTracer        (82 行)   Push — sched tracepoint
+    ├── CpuProfilerSource     (337 行)   Pull/Push — perf_event 采样
+    ├── OffcpuProfilerSource  (496 行)   Pull — off-CPU 分析 + 符号解析
+    └── SchedAnalyzerSource   (403 行)   Pull/Push — 调度聚合 + 详细事件
+```
+
+**bpf_util 工具函数** (`src/ebpf/loader/bpf_util.h`):
+```
+bpf_util::WritePidFilter()          — 写入 PID 白名单到 BPF hash map
+bpf_util::WriteCommFilter()         — 写入进程名白名单
+bpf_util::ConfigurePidNamespace()   — 配置 PID namespace (bpf_get_ns_current_pid_tgid)
+bpf_util::AttachPerfEvents()        — 为所有在线 CPU 创建并挂载 perf_event
+bpf_util::DetachPerfEvents()        — 关闭所有 perf_event fd
+bpf_util::EnablePerfEvents()        — ioctl PERF_EVENT_IOC_ENABLE
+bpf_util::DisablePerfEvents()       — ioctl PERF_EVENT_IOC_DISABLE
+bpf_util::AdjustPerfFrequency()     — 运行时调整采样频率 (反压)
 ```
 
 **Push vs Pull 数据流对比**:
 
 ```
-Push (EbpfSkeletonSource):
-  内核 BPF → ring buffer [完整事件] → poll 线程 → callback → pipeline
+Push (EbpfSourceBase + ConsumeAndBatch):
+  内核 BPF → ring buffer → TimerWheel 定时触发
+           → ring_buffer__consume() 批量排空 → pending_batch_ → pipeline
 
-Pull (EbpfSkeletonPullSource):
-  内核 BPF → 内核 map [聚合统计] + ring buffer [低频信号]
-           → poll 线程 [仅接收信号] → ReadAndClearStats() → cache
-           → TimerWheel Collect() → pipeline
+Pull (EbpfSourceBase + CollectFromMaps):
+  内核 BPF → 内核 map [聚合统计]
+           → TimerWheel Collect() → CollectFromMaps() → pipeline
 ```
 
 ---
@@ -1190,8 +1200,7 @@ src/
 │   │   ├── net_tracer_driver.h
 │   │   └── sched_analyzer_driver.h
 │   ├── sources/                       数据源插件 (按 cpu/sched/io/net 分组)
-│   │   ├── ebpf_skeleton_source.h     eBPF Skeleton Push Source 模板 (EbpfSkeletonSource)
-│   │   ├── ebpf_skeleton_pull_source.h eBPF Skeleton Pull Source 模板 (EbpfSkeletonPullSource)
+│   │   ├── ebpf_source_base.h         eBPF 统一基类 (EbpfSourceBase + IL_SKEL_CALLBACKS)
 │   │   ├── cpu/                       cpu_utilization, process_cpu, cpu_profiler, proc_stat_reader
 │   │   ├── sched/                     sched_analyzer, offcpu_profiler, ebpf_sched_tracer
 │   │   ├── io/                        ebpf_io_monitor

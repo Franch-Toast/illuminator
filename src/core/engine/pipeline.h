@@ -293,7 +293,8 @@ public:
         return batch;
     }
 
-    const std::vector<std::shared_ptr<SinkPlugin>>& GetSinks() const {
+    std::vector<std::shared_ptr<SinkPlugin>> GetSinks() const {
+        std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
         return sinks_;
     }
 
@@ -320,10 +321,13 @@ public:
             if (!IsReconfigureContinueCode(s.code())) return s;
             if (s.code() == StatusCode::kRequiresRestart) requires_restart = true;
         }
-        for (auto& s : sinks_) {
-            auto rc = s->Reconfigure(params);
-            if (!IsReconfigureContinueCode(rc.code())) return rc;
-            if (rc.code() == StatusCode::kRequiresRestart) requires_restart = true;
+        {
+            std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
+            for (auto& s : sinks_) {
+                auto rc = s->Reconfigure(params);
+                if (!IsReconfigureContinueCode(rc.code())) return rc;
+                if (rc.code() == StatusCode::kRequiresRestart) requires_restart = true;
+            }
         }
         if (requires_restart) {
             return Status(StatusCode::kRequiresRestart,

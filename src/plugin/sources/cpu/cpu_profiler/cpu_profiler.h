@@ -2,666 +2,221 @@
 // CpuProfilerSource — eBPF CPU 性能剖析器（火焰图数据源）
 // ============================================================================
 //
-// 通过 Linux perf_event 子系统配合 eBPF 程序，在 CPU 上定时采样当前进程的
-// 内核和用户态调用栈，生成类似于 `perf record` 的火焰图级别堆栈采样数据。
-//
-// 采集指标：
-// ==========
-// 1. 堆栈采样样本（StackSample），每条样本包含：
-//    - pid / tid：被采样进程/线程
-//    - comm：进程名称
-//    - kernel_stack_id / user_stack_id：内核态/用户态堆栈 ID
-//    - kernel_stack / user_stack：解析后的完整调用栈帧地址列表
-//    - count：该堆栈被采到的次数（聚合模式下）
-//    - cpu：采样所在 CPU 核心号（流式模式下）
-//
-// 2. 样本按 (pid, tid, comm, kernel_stack_id, user_stack_id) 五元组聚合，
-//    定位 CPU 热点函数和调用路径。
-//
-// 工作原理：
-// ==========
-// 1. 为每个在线 CPU 核心创建一个 perf_event（PERF_COUNT_SW_CPU_CLOCK），
-//    设置采样频率（默认 49 Hz）。
-// 2. 通过 PERF_EVENT_IOC_SET_BPF ioctl 将 eBPF 程序挂载到 perf_event。
-// 3. 每次定时器触发时，内核自动调用 eBPF 程序采集当前任务的调用栈。
-// 4. eBPF 程序将堆栈帧地址存入 BPF_MAP_TYPE_STACK_TRACE 的 stacks map，
-//    并在 stack_counts map 中递增对应五元组的计数。
-// 5. 用户态定期（或按需）从 stack_counts map 中拉取聚合结果。
+// 基于 EbpfSourceBase 重写。
+// 旧版实现保留在 cpu_profiler.legacy.h 作为功能参考。
 //
 // 两种工作模式：
-// ==============
-// - aggregated（聚合拉取模式，默认）：
-//     后台线程每 aggregate_interval_ms 毫秒从 eBPF map 中快照累加计数，
-//     然后清空 map。Collect() 返回最近一次快照的结果。
-//     适合周期性轮询场景（配合其它 Pull 模式插件统一调度）。
+//   - aggregated（Pull，默认）：Collect() → CollectFromMaps() 从 stack_counts 读聚合数据
+//   - stream（Push）：ring buffer → ConsumeAndBatch() 批量消费
 //
-// - stream（流式推送模式，mode="stream"）：
-//     通过 BPF ring buffer 实时推送每条采样事件到 HandleStreamEvent，
-//     立即构造 batch 并通过 callback_ 推送到下游管道。
-//     适合需要实时火焰图或低延迟响应的场景。
-//
-// 过滤配置：
-// ==========
-// - target_pids: 逗号分隔的 PID 列表，只采集这些进程
-// - target_comms: 逗号分隔的进程名列表，只采集名称匹配的进程
-//   （过滤逻辑在 eBPF 内核侧执行，避免无用的数据传输）
-//
-// 配置参数：
-// ==========
-// - frequency_hz: 采样频率（默认 49 Hz，大多数 Linux 内核限制非 root 49Hz）
-// - aggregate_interval_ms: 聚合间隔（默认 1000ms）
-// - stack_depth: 最大堆栈深度（默认 128，受 MAX_STACK_DEPTH 约束）
-// - user_stacks: 是否采集用户态堆栈（默认 true）
-// - kernel_stacks: 是否采集内核态堆栈（默认 true）
-// - mode: 工作模式 "aggregated" 或 "stream"（默认 "aggregated"）
-// - bpf_object: eBPF 目标文件路径（必需）
+// perf_event 管理通过 bpf_util 工具函数完成，无独立线程。
 // ============================================================================
 
 #pragma once
 
-#include <algorithm>
-#include <atomic>
-#include <cerrno>
-#include <chrono>
 #include <cstring>
-#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
-#include <thread>
-#include <unordered_map>
 #include <vector>
-
-#include <sys/ioctl.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <linux/limits.h>
-#include <linux/perf_event.h>
-#include <unistd.h>
-
-#include "ebpf/include/bpf_compat.h"
 
 #include <nlohmann/json.hpp>
 
 #include "cpu_profiler_sk.skel.h"
 #include "core/common/logging.h"
 #include "core/common/string_util.h"
-#include "core/threading/thread_util.h"
 #include "ebpf/include/event_types.h"
-#include "ebpf/loader/bpf_stats_reader.h"
+#include "ebpf/loader/bpf_util.h"
 #include "ebpf/loader/stack_trace_util.h"
-#include "plugin/api/source_plugin.h"
+#include "plugin/sources/ebpf_source_base.h"
 #include "plugin/manager/plugin_registry.h"
 
 namespace illuminator {
 
-// ============================================================================
-// ParseOnlineCpuIds — 解析在线 CPU 核心列表
-// ============================================================================
-// 读取 /sys/devices/system/cpu/online，解析逗号分隔的范围表示法。
-// 例如 "0-3,8-11" → {0,1,2,3,8,9,10,11}
-// 返回在线 CPU ID 的 vector，读取失败则返回空。
-inline std::vector<int> ParseOnlineCpuIds() {
-    std::vector<int> cpus;
-    std::ifstream f("/sys/devices/system/cpu/online");
-    if (!f)
-        return cpus;
-    std::string line;
-    std::getline(f, line);
-    std::stringstream ss(line);
-    std::string part;
-    while (std::getline(ss, part, ',')) {
-        try {
-            auto dash = part.find('-');
-            if (dash == std::string::npos) {
-                cpus.push_back(std::stoi(part));
-            } else {
-                int lo = std::stoi(part.substr(0, dash));
-                int hi = std::stoi(part.substr(dash + 1));
-                for (int c = lo; c <= hi; ++c)
-                    cpus.push_back(c);
-            }
-        } catch (const std::exception& e) {
-            IL_WARN("ParseOnlineCpuIds: failed to parse '{}': {}", part, e.what());
-        }
-    }
-    return cpus;
-}
+class CpuProfilerSource : public EbpfSourceBase {
+    IL_SKEL_CALLBACKS(cpu_profiler_sk);
 
-// ============================================================================
-// ParseCommaSeparatedStrings — 解析逗号分隔的字符串列表
-// ============================================================================
-// 将 "nginx,mysqld,redis" 格式的字符串解析为 string 的 vector。
-// 自动去除每个元素前后的空白字符。
-inline void ParseCommaSeparatedStrings(const std::string& s,
-                                       std::vector<std::string>* out) {
-    out->clear();
-    std::stringstream ss(s);
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        while (!token.empty() && (token.front() == ' ' || token.front() == '\t'))
-            token.erase(0, 1);
-        while (!token.empty() && (token.back() == ' ' || token.back() == '\t'))
-            token.pop_back();
-        if (!token.empty())
-            out->push_back(token);
-    }
-}
-
-// ============================================================================
-// PerfEventOpenSys — perf_event_open 系统调用封装
-// ============================================================================
-// 通过 syscall() 直接调用 perf_event_open，绕过 glibc 封装（部分发行版未提供）。
-// 兼容不同的内核头文件宏定义（SYS_perf_event_open 或 __NR_perf_event_open）。
-//
-// 参数：attr=perf_event 属性配置, pid=目标进程(-1=任意进程),
-//       cpu=目标CPU核心, group_fd=组领导fd(-1=新组), flags=标志位
-// 返回：成功返回文件描述符，失败返回 -1（errno 已设置）
-inline long PerfEventOpenSys(struct perf_event_attr* attr, pid_t pid, int cpu,
-                             int group_fd, unsigned long flags) {
-#if defined(SYS_perf_event_open)
-    return syscall(SYS_perf_event_open, attr, pid, cpu, group_fd, flags);
-#elif defined(__NR_perf_event_open)
-    return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
-#else
-    (void)attr;
-    (void)pid;
-    (void)cpu;
-    (void)group_fd;
-    (void)flags;
-    return -1;
-#endif
-}
-
-// ============================================================================
-// CpuProfilerSource 类 — CPU 性能剖析插件主体
-// ============================================================================
-class CpuProfilerSource : public SourcePlugin {
 public:
-    // 插件元信息
     const char* Name() const override { return "cpu_profiler"; }
-    const char* Version() const override { return "0.2.0"; }
-
+    const char* Version() const override { return "2.0.0"; }
     bool IsPushMode() const override { return stream_mode_; }
-    bool HasBpfProbe() const override { return !stub_mode_; }
-    bool IsStub() const override { return stub_mode_; }
 
-    MetaStats GetBpfStats() const override {
-        return ReadBpfMetaStats(meta_stats_fd_);
-    }
-
-    // ========================================================================
-    // Collect — 采集方法（聚合模式下的 Pull 入口）
-    // ========================================================================
-    // 聚合模式下返回最近一次后台线程生成的 batch 快照。
-    // 如果 eBPF 未加载或 map 不可用，返回错误。
-    // 线程安全：通过 last_batch_mu_ 保护 last_batch_ 的读写。
-    StatusOr<DataBatchPtr> Collect() override {
-        std::lock_guard<std::mutex> lock(last_batch_mu_);
-        if (last_batch_ && !last_batch_->Empty()) {
-            return last_batch_;
-        }
-        if (counts_fd_ < 0 || stacks_fd_ < 0)
-            return Status::Error(StatusCode::kUnavailable, "BPF not loaded");
-        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        SnapshotAggregatedCounts(batch.get());
-        return batch;
-    }
-
-    // ========================================================================
-    // QueryExtra — 支持 "snapshot" 查询，返回最近 JSON 快照
-    // ========================================================================
-    StatusOr<std::string> QueryExtra(
-        const std::string& query, const QueryParams& /*params*/) override {
-        if (query == "snapshot") {
-            std::lock_guard<std::mutex> lk(last_batch_mu_);
-            return latest_json_snapshot_;
-        }
-        return Status::Error(StatusCode::kUnimplemented, "unknown query");
-    }
-
-    // ========================================================================
-    // Init — 初始化插件，读取并缓存所有配置参数
-    // ========================================================================
     Status Init(const ConfigValue& config) override {
         frequency_hz_ = static_cast<int>(
             config["sample_freq"].AsInt(config["frequency_hz"].AsInt(49)));
-        aggregate_interval_ms_ =
-            static_cast<uint32_t>(config["aggregate_interval_ms"].AsInt(1000));
         stack_depth_ = static_cast<int>(config["stack_depth"].AsInt(128));
         user_stacks_ = config["user_stacks"].AsBool(true);
         kernel_stacks_ = config["kernel_stacks"].AsBool(true);
-
-        auto mode = config["mode"].AsString("aggregated");
-        stream_mode_ = (mode == "stream");
+        stream_mode_ = (config["mode"].AsString("aggregated") == "stream");
 
         target_pids_ =
             ParseCommaSeparated<uint32_t>(config["target_pids"].AsString(""));
-        // target_process_names 是 target_comms 的别名，优先使用 target_process_names
-        ParseCommaSeparatedStrings(
-            config["target_process_names"].AsString(
-                config["target_comms"].AsString("")),
-            &target_comms_);
+        ParseComms(config["target_process_names"].AsString(
+            config["target_comms"].AsString("")));
 
-        // 限制最大栈深度
-        if (stack_depth_ > MAX_STACK_DEPTH)
-            stack_depth_ = MAX_STACK_DEPTH;
-
-        (void)stack_depth_;  // BPF 对象编译时已固定 MAX_STACK_DEPTH；保留此配置 API
+        if (stack_depth_ > MAX_STACK_DEPTH) stack_depth_ = MAX_STACK_DEPTH;
         return Status::Ok();
     }
 
-    // ========================================================================
-    // Start — 启动 eBPF 程序和 perf_event 采样
-    // ========================================================================
-    // 1. 加载 eBPF 目标文件并验证必需 maps/programs 存在
-    // 2. 遍历所有在线 CPU 核心，为每个核心创建并配置 perf_event
-    //    - 使用 PERF_COUNT_SW_CPU_CLOCK 软件事件
-    //    - 设置频率采样模式（freq=1, sample_freq=frequency_hz_）
-    //    - 根据配置过滤用户态/内核态堆栈
-    // 3. 将 eBPF 程序挂载到 perf_event（PERF_EVENT_IOC_SET_BPF）
-    // 4. 根据模式启动后台线程（stream → StreamPollLoop / aggregated → AggregatedPullLoop）
-    Status Start() override {
-        // Skeleton 模式：从嵌入的字节码加载，无需外部 .bpf.o 文件
-        cpu_skel_ = cpu_profiler_sk_bpf__open();
-        if (!cpu_skel_) {
-            IL_WARN("cpu_profiler: skeleton open failed; idle mode");
-            stub_mode_ = true;
-            running_.store(false);
-            return Status::Ok();
-        }
+    // ================================================================
+    // Hooks — 配置 BPF skeleton
+    // ================================================================
 
-        // 在 load 前写入 rodata 配置：采样频率
-        if (cpu_skel_->rodata) {
-            cpu_skel_->rodata->sample_freq = static_cast<uint64_t>(frequency_hz_);
-        }
+    void OnConfigureRodata(void* /*s*/) override {
+        if (skel()->rodata)
+            skel()->rodata->sample_freq = static_cast<uint64_t>(frequency_hz_);
+    }
 
-        int err = cpu_profiler_sk_bpf__load(cpu_skel_);
-        if (err) {
-            cpu_profiler_sk_bpf__destroy(cpu_skel_);
-            cpu_skel_ = nullptr;
-            return Status::Error(StatusCode::kInternal,
-                "cpu_profiler: skeleton load failed (err=" +
-                std::to_string(err) + ")");
-        }
+    void OnConfigureMaps(void* /*s*/) override {
+        stacks_fd_ = bpf_map__fd(skel()->maps.stacks);
+        counts_fd_ = bpf_map__fd(skel()->maps.stack_counts);
+        SetMetaStatsFd(bpf_map__fd(skel()->maps.meta_stats));
 
-        int stacks_fd = bpf_map__fd(cpu_skel_->maps.stacks);
-        int counts_fd = bpf_map__fd(cpu_skel_->maps.stack_counts);
-        if (stacks_fd < 0 || counts_fd < 0) {
-            return Status::Error(StatusCode::kInternal,
-                                 "cpu_profiler: stacks/stack_counts maps missing");
-        }
-        stacks_fd_ = stacks_fd;
-        counts_fd_ = counts_fd;
-        meta_stats_fd_ = bpf_map__fd(cpu_skel_->maps.meta_stats);
+        if (stream_mode_)
+            SetRingBufFd(bpf_map__fd(skel()->maps.cpu_events));
 
-        ApplyFilterMaps();
+        ApplyFilters();
+    }
 
-        int prog_fd = bpf_program__fd(cpu_skel_->progs.on_cpu_sample);
+    Status OnPostAttach(void* /*s*/) override {
+        bpf_util::PerfConfig pcfg;
+        pcfg.type = PERF_TYPE_SOFTWARE;
+        pcfg.config = PERF_COUNT_SW_CPU_CLOCK;
+        pcfg.sample_freq = static_cast<uint64_t>(frequency_hz_);
+        pcfg.freq_mode = true;
+        pcfg.exclude_user = !user_stacks_;
+        pcfg.exclude_kernel = !kernel_stacks_;
 
-        // per-CPU 模式：系统全局采样，BPF 内核态 tgid 过滤
-        {
-            auto cpus = ParseOnlineCpuIds();
-            if (cpus.empty()) {
-                IL_WARN("cpu_profiler: could not read online CPUs; defaulting to cpu 0");
-                cpus.push_back(0);
-            }
-
-            for (int cpu : cpus) {
-                struct perf_event_attr attr = {};
-                attr.size = sizeof(attr);
-                attr.type = PERF_TYPE_SOFTWARE;
-                attr.config = PERF_COUNT_SW_CPU_CLOCK;
-                attr.freq = 1;
-                attr.sample_freq = static_cast<uint64_t>(frequency_hz_);
-                attr.sample_type = PERF_SAMPLE_CALLCHAIN;
-                attr.disabled = 1;
-                attr.exclude_user = user_stacks_ ? 0 : 1;
-                attr.exclude_kernel = kernel_stacks_ ? 0 : 1;
-
-                int fd = static_cast<int>(
-                    PerfEventOpenSys(&attr, /*pid=*/-1, cpu, /*group=*/-1,
-                                     PERF_FLAG_FD_CLOEXEC));
-                if (fd < 0) {
-                    IL_WARN("cpu_profiler: perf_event_open cpu={} failed errno={}",
-                            cpu, errno);
-                    continue;
-                }
-
-                if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0) {
-                    IL_WARN("cpu_profiler: SET_BPF cpu={} failed errno={}",
-                            cpu, errno);
-                    close(fd);
-                    continue;
-                }
-
-                if (ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
-                    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-                    IL_WARN("cpu_profiler: ENABLE cpu={} failed errno={}",
-                            cpu, errno);
-                    close(fd);
-                    continue;
-                }
-
-                perf_fds_.push_back(fd);
-            }
-        }
+        int prog_fd = bpf_program__fd(skel()->progs.on_cpu_sample);
+        perf_fds_ = bpf_util::AttachPerfEvents(prog_fd, pcfg);
 
         if (perf_fds_.empty()) {
             return Status::Error(StatusCode::kInternal,
-                                 "cpu_profiler: failed to open any perf events");
+                                 "cpu_profiler: no perf events opened");
         }
-
-        running_.store(true);
-
-        // 根据模式启动对应的后台轮询线程
-        if (stream_mode_) {
-            int rb_fd = bpf_map__fd(cpu_skel_->maps.cpu_events);
-            ring_buf_ = ring_buffer__new(rb_fd, HandleStreamEvent, this, nullptr);
-            if (!ring_buf_) {
-                return Status::Error(StatusCode::kInternal,
-                                     "cpu_profiler: ring buffer init failed");
-            }
-            poll_thread_ = std::thread([this] {
-                SetThreadName("cpuprofiler-poll");
-                StreamPollLoop();
-            });
-        } else {
-            agg_thread_ = std::thread([this] {
-                SetThreadName("cpuprofiler-agg");
-                AggregatedPullLoop();
-            });
-        }
-
-        IL_INFO("cpu_profiler started ({} mode, {} attach, {} perf fds)",
-                stream_mode_ ? "stream" : "aggregated",
-                target_pids_.empty() ? "per-cpu" : "per-pid",
-                perf_fds_.size());
+        IL_INFO("cpu_profiler: {} perf events attached", perf_fds_.size());
         return Status::Ok();
     }
 
-    // ========================================================================
-    // Stop — 停止采样，清理所有资源
-    // ========================================================================
-    // 1. 设置 running_ 标志为 false
-    // 2. 等待后台线程结束
-    // 3. 释放 ring buffer 和关闭所有 perf_event fd
-    // 4. 分离所有 eBPF 挂钩点
-    Status Stop() override {
-        running_.store(false);
-        if (poll_thread_.joinable())
-            poll_thread_.join();
-        if (agg_thread_.joinable())
-            agg_thread_.join();
-
-        if (ring_buf_) {
-            ring_buffer__free(ring_buf_);
-            ring_buf_ = nullptr;
-        }
-
-        for (int fd : perf_fds_) {
-            ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-            close(fd);
-        }
-        perf_fds_.clear();
-
-        if (cpu_skel_) {
-            cpu_profiler_sk_bpf__destroy(cpu_skel_);
-            cpu_skel_ = nullptr;
-        }
-
-        return Status::Ok();
+    void OnPreDestroy() override {
+        bpf_util::DetachPerfEvents(perf_fds_);
     }
 
-    // ========================================================================
-    // Reconfigure — 运行时更新目标 PID/进程名过滤器
-    // ========================================================================
-    // 在 profiler 运行期间动态更新 BPF map 中的过滤规则。
-    // 先清空旧的 map 条目，再写入新的，最后更新 flags。
-    // 线程安全：BPF map 操作是原子的。
+    // ================================================================
+    // Push 模式
+    // ================================================================
+
+    ring_buffer_sample_fn GetEventCallback() const override {
+        return stream_mode_ ? HandleStreamEvent : nullptr;
+    }
+
+    DataBatchPtr MakePushBatch() override {
+        return std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+    }
+
+    // ================================================================
+    // Pull 模式
+    // ================================================================
+
+    StatusOr<DataBatchPtr> CollectFromMaps() override {
+        if (counts_fd_ < 0 || stacks_fd_ < 0)
+            return Status::Error(StatusCode::kUnavailable, "BPF not loaded");
+
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        ReadAndFlushCounts(batch.get());
+        return batch;
+    }
+
+    // ================================================================
+    // QueryExtra
+    // ================================================================
+
+    StatusOr<std::string> QueryExtra(
+            const std::string& query, const QueryParams&) override {
+        if (query != "snapshot")
+            return Status::Error(StatusCode::kUnimplemented, "unknown query");
+        std::lock_guard<std::mutex> lk(snap_mu_);
+        return latest_snapshot_;
+    }
+
+    // ================================================================
+    // Reconfigure
+    // ================================================================
+
     Status Reconfigure(const ConfigValue& params) override {
-        auto pid_str = params["target_pids"].AsString("");
-        auto comm_str = params["target_process_names"].AsString(
-            params["target_comms"].AsString(""));
+        target_pids_ =
+            ParseCommaSeparated<uint32_t>(params["target_pids"].AsString(""));
+        ParseComms(params["target_process_names"].AsString(
+            params["target_comms"].AsString("")));
 
-        target_pids_ = ParseCommaSeparated<uint32_t>(pid_str);
-        target_comms_.clear();
-        ParseCommaSeparatedStrings(comm_str, &target_comms_);
+        bpf_util::RewritePidFilter(
+            bpf_map__fd(skel()->maps.target_pids), target_pids_);
+        bpf_util::RewriteCommFilter(
+            bpf_map__fd(skel()->maps.target_comms), target_comms_);
+        ApplyConfigFlags();
 
-        // Clear existing PID map entries
-        int pid_fd = bpf_map__fd(cpu_skel_->maps.target_pids);
-        if (pid_fd >= 0) {
-            uint32_t cur{};
-            uint32_t next{};
-            std::vector<uint32_t> old_keys;
-            int err = bpf_map_get_next_key(pid_fd, nullptr, &cur);
-            while (err == 0) {
-                old_keys.push_back(cur);
-                err = bpf_map_get_next_key(pid_fd, &cur, &next);
-                cur = next;
-            }
-            for (auto k : old_keys)
-                bpf_map_delete_elem(pid_fd, &k);
-        }
+        bpf_util::DetachPerfEvents(perf_fds_);
+        auto st = OnPostAttach(nullptr);
 
-        // Clear existing comm map entries
-        int comm_fd = bpf_map__fd(cpu_skel_->maps.target_comms);
-        if (comm_fd >= 0) {
-            char cur_key[TASK_COMM_LEN] = {};
-            char next_key[TASK_COMM_LEN] = {};
-            std::vector<std::string> old_comms;
-            int err = bpf_map_get_next_key(comm_fd, nullptr, cur_key);
-            while (err == 0) {
-                old_comms.emplace_back(cur_key);
-                err = bpf_map_get_next_key(comm_fd, cur_key, next_key);
-                std::memcpy(cur_key, next_key, TASK_COMM_LEN);
-            }
-            for (auto& c : old_comms) {
-                char k[TASK_COMM_LEN] = {};
-                std::memcpy(k, c.c_str(), std::min(c.size(), sizeof(k) - 1));
-                bpf_map_delete_elem(comm_fd, k);
-            }
-        }
-
-        ApplyFilterMaps();
-
-        // 清空 stack_counts BPF map 中旧目标的残留样本
-        if (counts_fd_ >= 0) {
-            il_stack_key cur{}, next{};
-            std::vector<il_stack_key> stale_keys;
-            int err = bpf_map_get_next_key(counts_fd_, nullptr, &cur);
-            while (err == 0) {
-                stale_keys.push_back(cur);
-                err = bpf_map_get_next_key(counts_fd_, &cur, &next);
-                cur = next;
-            }
-            for (auto& k : stale_keys)
-                bpf_map_delete_elem(counts_fd_, &k);
-        }
-
-        // 重建 perf events（per-PID 模式需要为新 PID 重新创建 perf_event）
-        RebuildPerfEvents();
-
-        // 清空内部数据缓存，避免旧目标的样本残留
-        {
-            std::lock_guard<std::mutex> lock(last_batch_mu_);
-            last_batch_.reset();
-            latest_json_snapshot_ = R"({"stack_samples":[]})";
-        }
-
-        IL_INFO("cpu_profiler: reconfigured (pids={}, comms={}, perf_fds={})",
+        IL_INFO("cpu_profiler: reconfigured (pids={}, comms={}, perf={})",
                 target_pids_.size(), target_comms_.size(), perf_fds_.size());
-        return Status::Ok();
+        return st;
+    }
+
+    // ================================================================
+    // Pause/Resume/Backpressure
+    // ================================================================
+
+    void OnPause() override {
+        bpf_util::DisablePerfEvents(perf_fds_);
+    }
+
+    void OnResume() override {
+        bpf_util::EnablePerfEvents(perf_fds_);
+    }
+
+    void OnBackpressure(bool active) override {
+        uint64_t freq = active
+            ? static_cast<uint64_t>(std::max(1, frequency_hz_ / 4))
+            : static_cast<uint64_t>(frequency_hz_);
+        bpf_util::AdjustPerfFrequency(perf_fds_, freq);
     }
 
 private:
-    // ========================================================================
-    // RebuildPerfEvents — 根据当前 target_pids_ 重建 perf events
-    // ========================================================================
-    // 在 Reconfigure 时调用。关闭旧的 perf_event FDs，根据新的
-    // target_pids_ 重新创建（per-PID 或 per-CPU 模式）。
-    void RebuildPerfEvents() {
-        int prog_fd = bpf_program__fd(cpu_skel_->progs.on_cpu_sample);
-        if (prog_fd < 0) return;
-
-        for (int fd : perf_fds_) {
-            ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-            close(fd);
-        }
-        perf_fds_.clear();
-
-        {
-            auto cpus = ParseOnlineCpuIds();
-            if (cpus.empty()) cpus.push_back(0);
-            for (int cpu : cpus) {
-                struct perf_event_attr attr = {};
-                attr.size = sizeof(attr);
-                attr.type = PERF_TYPE_SOFTWARE;
-                attr.config = PERF_COUNT_SW_CPU_CLOCK;
-                attr.freq = 1;
-                attr.sample_freq = static_cast<uint64_t>(frequency_hz_);
-                attr.sample_type = PERF_SAMPLE_CALLCHAIN;
-                attr.disabled = 1;
-                attr.exclude_user = user_stacks_ ? 0 : 1;
-                attr.exclude_kernel = kernel_stacks_ ? 0 : 1;
-
-                int fd = static_cast<int>(
-                    PerfEventOpenSys(&attr, /*pid=*/-1, cpu, /*group=*/-1,
-                                     PERF_FLAG_FD_CLOEXEC));
-                if (fd < 0) continue;
-
-                if (ioctl(fd, PERF_EVENT_IOC_SET_BPF, prog_fd) != 0 ||
-                    ioctl(fd, PERF_EVENT_IOC_RESET, 0) != 0 ||
-                    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0) != 0) {
-                    close(fd);
-                    continue;
-                }
-                perf_fds_.push_back(fd);
-            }
+    void ParseComms(const std::string& s) {
+        target_comms_.clear();
+        if (s.empty()) return;
+        std::stringstream ss(s);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            while (!tok.empty() && tok.front() == ' ') tok.erase(0, 1);
+            while (!tok.empty() && tok.back() == ' ') tok.pop_back();
+            if (!tok.empty()) target_comms_.push_back(tok);
         }
     }
 
-    // ========================================================================
-    // ApplyFilterMaps — 将过滤配置写入 eBPF 侧的配置 map
-    // ========================================================================
-    // 配置 PID namespace 翻译（bpf_get_ns_current_pid_tgid），使 BPF 可以
-    // 直接使用 namespace-local PID 进行过滤，无需 comm 学习等间接机制。
-    // ========================================================================
-    //
-    // 标志位含义：
-    //   位 0 (1): stream 模式
-    //   位 1 (2): 启用 PID 过滤
-    //   位 2 (4): 启用进程名过滤
-    void ApplyFilterMaps() {
-        // 1. 配置 PID Namespace 翻译
-        ConfigurePidNamespace();
-
-        // 2. 设置配置标志位 — 启用 BPF-side PID 过滤
-        int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
-        uint32_t flags =
-            (stream_mode_ ? 1u : 0u) |
-            (!target_pids_.empty() ? 2u : 0u) |
-            (!target_comms_.empty() ? 4u : 0u);
-        if (cfg_fd >= 0) {
-            uint32_t k = 0;
-            bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
-            IL_INFO("cpu_profiler: BPF cfg_flags=0x{:x} (BPF-side PID filter, ns-aware)",
-                    flags);
-        }
-
-        // 3. 写入 PID 白名单（namespace-local PID，BPF 翻译后可直接匹配）
-        int pid_fd = bpf_map__fd(cpu_skel_->maps.target_pids);
-        if (pid_fd >= 0 && !target_pids_.empty()) {
-            uint8_t one = 1;
-            for (uint32_t pid : target_pids_)
-                bpf_map_update_elem(pid_fd, &pid, &one, BPF_ANY);
-        }
-
-        // 4. 写入进程名白名单
-        int comm_fd = bpf_map__fd(cpu_skel_->maps.target_comms);
-        if (comm_fd >= 0 && !target_comms_.empty()) {
-            uint8_t one = 1;
-            for (const auto& name : target_comms_) {
-                char key[TASK_COMM_LEN] = {};
-                std::memcpy(key, name.c_str(),
-                            std::min(name.size(), sizeof(key) - 1));
-                bpf_map_update_elem(comm_fd, key, &one, BPF_ANY);
-            }
-        }
+    void ApplyFilters() {
+        bpf_util::ConfigurePidNamespace(
+            bpf_map__fd(skel()->maps.cpu_pidns_cfg));
+        bpf_util::WritePidFilter(
+            bpf_map__fd(skel()->maps.target_pids), target_pids_);
+        bpf_util::WriteCommFilter(
+            bpf_map__fd(skel()->maps.target_comms), target_comms_);
+        ApplyConfigFlags();
     }
 
-    // ========================================================================
-    // ConfigurePidNamespace — 将当前进程的 PID namespace dev/ino 写入 BPF map
-    // ========================================================================
-    // BPF 使用 bpf_get_ns_current_pid_tgid(dev, ino) 将内核态 root-ns PID
-    // 翻译为目标 namespace 的 local PID，实现零开销 namespace 透明过滤。
-    void ConfigurePidNamespace() {
-        int ns_fd = bpf_map__fd(cpu_skel_->maps.cpu_pidns_cfg);
-        if (ns_fd < 0) return;
-
-        struct stat st = {};
-        if (stat("/proc/self/ns/pid", &st) != 0) {
-            IL_WARN("cpu_profiler: stat(/proc/self/ns/pid) failed: {}",
-                    strerror(errno));
-            return;
-        }
-
-        il_pidns_config cfg = {};
-        cfg.dev = static_cast<uint64_t>(st.st_dev);
-        cfg.ino = static_cast<uint64_t>(st.st_ino);
-
-        uint32_t k = 0;
-        if (bpf_map_update_elem(ns_fd, &k, &cfg, BPF_ANY) == 0) {
-            IL_INFO("cpu_profiler: configured pidns (dev={}, ino={}) for "
-                    "bpf_get_ns_current_pid_tgid", cfg.dev, cfg.ino);
-        }
+    void ApplyConfigFlags() {
+        int fd = bpf_map__fd(skel()->maps.cpu_profiler_cfg);
+        if (fd < 0) return;
+        uint32_t flags = (stream_mode_ ? 1u : 0u) |
+                         (!target_pids_.empty() ? 2u : 0u) |
+                         (!target_comms_.empty() ? 4u : 0u);
+        bpf_util::WriteMapU32(fd, 0, flags);
     }
 
-    // ========================================================================
-    // StreamPollLoop — 流式模式的后台轮询循环
-    // ========================================================================
-    // 持续调用 ring_buffer__poll 从 BPF ring buffer 中读取实时事件。
-    // 每次 poll 超时 100ms，检查 running_ 标志决定是否退出。
-    void StreamPollLoop() {
-        while (running_.load() && !paused_.load()) {
-            int err = ring_buffer__poll(ring_buf_, 100);
-            if (err < 0 && err != -EINTR)
-                IL_WARN("cpu_profiler: ringbuf poll err {}", err);
-        }
-    }
-
-    // ========================================================================
-    // AggregatedPullLoop — 聚合模式的后台轮询循环
-    // ========================================================================
-    // 每 aggregate_interval_ms_ 毫秒执行一次 FlushAggregatedCounts，
-    // 将当前周期内 eBPF 累计的采样计数取出并清空 map。
-    void AggregatedPullLoop() {
-        using namespace std::chrono_literals;
-        while (running_.load()) {
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(aggregate_interval_ms_));
-            if (!running_.load())
-                break;
-            if (paused_.load())
-                continue;
-            FlushAggregatedCounts();
-        }
-    }
-
-    // ========================================================================
-    // SnapshotAggregatedCounts — 快照 eBPF 聚合计数，生成 batch
-    // ========================================================================
-    // 遍历 stack_counts map 中的所有条目，为每个 (pid,tid,comm,kstack,ustack)
-    // 五元组生成一条 StackSample。同时解析对应的 kernel_stack 和 user_stack。
-    void SnapshotAggregatedCounts(DataBatch* batch) {
-        if (counts_fd_ < 0)
-            return;
-
-        il_stack_key cur{};
-        il_stack_key next{};
+    void ReadAndFlushCounts(DataBatch* batch) {
+        il_stack_key cur{}, next{};
         std::vector<il_stack_key> keys;
-
-        // 先收集所有 key（不能在遍历时修改 map）
         int err = bpf_map_get_next_key(counts_fd_, nullptr, &cur);
         while (err == 0) {
             keys.push_back(cur);
@@ -671,71 +226,32 @@ private:
 
         for (const auto& key : keys) {
             uint64_t count = 0;
-            if (bpf_map_lookup_elem(counts_fd_, &key, &count) != 0)
-                continue;
+            if (bpf_map_lookup_elem(counts_fd_, &key, &count) != 0) continue;
 
-            auto& sample = batch->AddStackSample();
-            sample.pid = key.pid;
-            sample.tid = key.tid;
-            sample.comm = batch->InternString(std::string_view(
+            auto& s = batch->AddStackSample();
+            s.pid = key.pid;
+            s.tid = key.tid;
+            s.comm = batch->InternString(std::string_view(
                 key.comm, strnlen(key.comm, TASK_COMM_LEN)));
-            sample.count = count;
-            sample.sample_type = SampleType::kOnCpu;
-            sample.kernel_stack_id = key.kernel_stack_id;
-            sample.user_stack_id = key.user_stack_id;
-
-            sample.kernel_stack = LookupBpfStackTrace(
+            s.count = count;
+            s.sample_type = SampleType::kOnCpu;
+            s.kernel_stack_id = key.kernel_stack_id;
+            s.user_stack_id = key.user_stack_id;
+            s.kernel_stack = LookupBpfStackTrace(
                 stacks_fd_, key.kernel_stack_id,
                 static_cast<size_t>(stack_depth_));
-            sample.user_stack = LookupBpfStackTrace(stacks_fd_, key.user_stack_id,
-                                                     static_cast<size_t>(stack_depth_));
+            s.user_stack = LookupBpfStackTrace(
+                stacks_fd_, key.user_stack_id,
+                static_cast<size_t>(stack_depth_));
+
+            bpf_map_delete_elem(counts_fd_, &key);
+        }
+
+        if (!batch->Empty()) {
+            BuildJsonSnapshot(*batch);
         }
     }
 
-    // ========================================================================
-    // FlushAggregatedCounts — 清空并推送聚合计数
-    // ========================================================================
-    // 1. 快照当前 eBPF map 中的所有聚合计数
-    // 2. 逐个删除已读取的条目（避免重复上报）
-    // 3. 将生成的 batch 同时缓存在 last_batch_ 和推送到 callback_
-    void FlushAggregatedCounts() {
-        if (counts_fd_ < 0)
-            return;
-
-        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        SnapshotAggregatedCounts(batch.get());
-
-        il_stack_key cur{};
-        il_stack_key next{};
-        int err = bpf_map_get_next_key(counts_fd_, nullptr, &cur);
-        while (err == 0) {
-            il_stack_key to_delete = cur;
-            err = bpf_map_get_next_key(counts_fd_, &cur, &next);
-            cur = next;
-            bpf_map_delete_elem(counts_fd_, &to_delete);
-        }
-
-        size_t n = batch->stack_samples().size();
-        if (n > 0) {
-            IL_DEBUG("cpu_profiler: flush {} samples", n);
-            {
-                std::lock_guard<std::mutex> lock(last_batch_mu_);
-                last_batch_ = batch;
-                BuildJsonSnapshot(*batch);
-            }
-            if (callback_) callback_(std::move(batch));
-        } else {
-            static uint64_t empty_count = 0;
-            if (++empty_count % 10 == 1) {
-                IL_DEBUG("cpu_profiler: no samples (empty_count={}, "
-                         "target_pids={})", empty_count, target_pids_.size());
-            }
-        }
-    }
-
-    // ========================================================================
-    // BuildJsonSnapshot — 从 batch 生成 JSON 快照字符串（用于 QueryExtra）
-    // ========================================================================
     void BuildJsonSnapshot(const DataBatch& batch) {
         nlohmann::json j;
         nlohmann::json samples = nlohmann::json::array();
@@ -746,21 +262,21 @@ private:
             item["comm"] = std::string(s.comm);
             item["count"] = s.count;
             nlohmann::json stack_arr = nlohmann::json::array();
-            for (const auto& frame : s.kernel_stack) {
-                if (!frame.function_name.empty())
-                    stack_arr.push_back(std::string(frame.function_name));
+            for (const auto& f : s.kernel_stack) {
+                if (!f.function_name.empty())
+                    stack_arr.push_back(std::string(f.function_name));
                 else {
                     std::ostringstream oss;
-                    oss << "0x" << std::hex << frame.address;
+                    oss << "0x" << std::hex << f.address;
                     stack_arr.push_back(oss.str());
                 }
             }
-            for (const auto& frame : s.user_stack) {
-                if (!frame.function_name.empty())
-                    stack_arr.push_back(std::string(frame.function_name));
+            for (const auto& f : s.user_stack) {
+                if (!f.function_name.empty())
+                    stack_arr.push_back(std::string(f.function_name));
                 else {
                     std::ostringstream oss;
-                    oss << "0x" << std::hex << frame.address;
+                    oss << "0x" << std::hex << f.address;
                     stack_arr.push_back(oss.str());
                 }
             }
@@ -769,155 +285,53 @@ private:
         }
         j["stack_samples"] = std::move(samples);
         j["pipeline"] = "cpu_profile";
-        latest_json_snapshot_ = j.dump();
+        std::lock_guard<std::mutex> lk(snap_mu_);
+        latest_snapshot_ = j.dump();
     }
 
-    // ========================================================================
-    // HandleStreamEvent — 流式模式的事件回调（静态函数）
-    // ========================================================================
-    // 当 eBPF 通过 ring buffer 推送一条 cpu_sample_event 时被调用。
-    // 直接构造一条 count=1 的 StackSample 并通过 callback_ 立即推送。
-    // 每次事件触发时解析一次堆栈帧。
     static int HandleStreamEvent(void* ctx, void* data, size_t size) {
         auto* self = static_cast<CpuProfilerSource*>(ctx);
-        if (size < sizeof(il_cpu_sample_event))
+        if (size < sizeof(il_cpu_sample_event) || !self->pending_batch_)
             return 0;
         auto* ev = static_cast<il_cpu_sample_event*>(data);
+        auto* batch = self->pending_batch_.get();
 
-        if (!self->callback_)
-            return 0;
-
-        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
-        auto& sample = batch->AddStackSample();
-        sample.pid = ev->pid;
-        sample.tid = ev->tid;
-        sample.cpu = ev->cpu;
-        sample.comm = batch->InternString(std::string_view(
+        auto& s = batch->AddStackSample();
+        s.pid = ev->pid;
+        s.tid = ev->tid;
+        s.cpu = ev->cpu;
+        s.comm = batch->InternString(std::string_view(
             ev->comm, strnlen(ev->comm, TASK_COMM_LEN)));
-        sample.count = 1;
-        sample.sample_type = SampleType::kOnCpu;
-        sample.kernel_stack_id = ev->kernel_stack_id;
-        sample.user_stack_id = ev->user_stack_id;
-
-        sample.kernel_stack = LookupBpfStackTrace(
+        s.count = 1;
+        s.sample_type = SampleType::kOnCpu;
+        s.kernel_stack_id = ev->kernel_stack_id;
+        s.user_stack_id = ev->user_stack_id;
+        s.kernel_stack = LookupBpfStackTrace(
             self->stacks_fd_, ev->kernel_stack_id,
             static_cast<size_t>(self->stack_depth_));
-        sample.user_stack =
-            LookupBpfStackTrace(self->stacks_fd_, ev->user_stack_id,
-                                static_cast<size_t>(self->stack_depth_));
-
-        self->callback_(std::move(batch));
+        s.user_stack = LookupBpfStackTrace(
+            self->stacks_fd_, ev->user_stack_id,
+            static_cast<size_t>(self->stack_depth_));
         return 0;
     }
 
-    // PID 映射预留点（容器环境如需 PID namespace 转换可在此扩展）
-
-    // ---- 暂停/恢复 ----
-    // 无论 stream 还是 aggregated 模式，都通过 PERF_EVENT_IOC_DISABLE/ENABLE
-    // 真正停止/恢复内核 perf_event 采样；stream 模式额外停止/重启 ringbuf poll
-    // 线程，并清除/恢复 cfg bit0 以阻止/允许 BPF 向 ringbuf 发射事件。
-    Status PauseCollection() override {
-        if (stub_mode_ || perf_fds_.empty()) return Status::Ok();
-
-        // stream 模式：先关 BPF gate，停止 poll 线程，再 disable perf events
-        if (stream_mode_) {
-            int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
-            if (cfg_fd >= 0) {
-                uint32_t k = 0, val = 0;
-                bpf_map_update_elem(cfg_fd, &k, &val, BPF_ANY);
-            }
-            paused_.store(true);
-            if (poll_thread_.joinable())
-                poll_thread_.join();
-        }
-
-        for (int fd : perf_fds_)
-            ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
-
-        paused_.store(true);
-        IL_INFO("cpu_profiler: collection paused ({} perf events disabled)",
-                perf_fds_.size());
-        return Status::Ok();
-    }
-
-    Status ResumeCollection() override {
-        if (stub_mode_ || perf_fds_.empty()) return Status::Ok();
-
-        paused_.store(false);
-
-        // stream 模式：先 enable perf events，再重启 poll 线程，最后恢复 BPF gate
-        if (stream_mode_) {
-            for (int fd : perf_fds_)
-                ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-
-            poll_thread_ = std::thread([this] {
-                SetThreadName("cpuprofiler-poll");
-                while (running_.load() && !paused_.load())
-                    ring_buffer__poll(ring_buf_, 100);
-            });
-
-            int cfg_fd = bpf_map__fd(cpu_skel_->maps.cpu_profiler_cfg);
-            if (cfg_fd >= 0) {
-                uint32_t k = 0;
-                uint32_t flags = 1u |
-                    (!target_pids_.empty() ? 2u : 0u) |
-                    (!target_comms_.empty() ? 4u : 0u);
-                bpf_map_update_elem(cfg_fd, &k, &flags, BPF_ANY);
-            }
-        } else {
-            for (int fd : perf_fds_)
-                ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-        }
-
-        IL_INFO("cpu_profiler: collection resumed ({} perf events enabled)",
-                perf_fds_.size());
-        return Status::Ok();
-    }
-
-    // ---- 反压响应 ----
-    void OnBackpressure(bool active) override {
-        uint64_t new_freq = active
-            ? std::max(1, frequency_hz_ / 4)
-            : static_cast<uint64_t>(frequency_hz_);
-
-        for (int fd : perf_fds_) {
-            uint64_t period = 1000000000ULL / new_freq;  // ns per sample
-            ioctl(fd, PERF_EVENT_IOC_PERIOD, &period);
-        }
-        IL_INFO("cpu_profiler: backpressure {} → freq {}Hz",
-                active ? "ON" : "OFF", new_freq);
-    }
-
-    // ---- 配置参数 ----
-    int frequency_hz_ = 49;                   // 采样频率（Hz）
-    uint32_t aggregate_interval_ms_ = 1000;   // 聚合间隔（毫秒）
-    int stack_depth_ = MAX_STACK_DEPTH;       // 最大堆栈深度
-    bool user_stacks_ = true;                 // 是否采集用户态堆栈
-    bool kernel_stacks_ = true;               // 是否采集内核态堆栈
+    int frequency_hz_ = 49;
+    int stack_depth_ = MAX_STACK_DEPTH;
+    bool user_stacks_ = true;
+    bool kernel_stacks_ = true;
     bool stream_mode_ = false;
-    bool stub_mode_ = false;
 
-    std::vector<uint32_t> target_pids_;       // 目标 PID 列表
-    std::vector<std::string> target_comms_;   // 目标进程名列表
+    std::vector<uint32_t> target_pids_;
+    std::vector<std::string> target_comms_;
 
-    // ---- 运行时状态 ----
-    std::atomic<bool> running_{false};
-    std::atomic<bool> paused_{false};
-    struct cpu_profiler_sk_bpf* cpu_skel_ = nullptr;
     int stacks_fd_ = -1;
-    int counts_fd_ = -1;                      // stack_counts map 的文件描述符
-    int meta_stats_fd_ = -1;
-    std::vector<int> perf_fds_;               // 所有 perf_event 的文件描述符
-    struct ring_buffer* ring_buf_ = nullptr;  // BPF ring buffer 句柄
-    std::thread poll_thread_;                 // 流式轮询线程
-    std::thread agg_thread_;                  // 聚合轮询线程
+    int counts_fd_ = -1;
+    std::vector<int> perf_fds_;
 
-    mutable std::mutex last_batch_mu_;        // 保护 last_batch_ 的互斥锁
-    DataBatchPtr last_batch_;                 // 最近一次聚合结果的缓存
-    std::string latest_json_snapshot_ = R"({"stack_samples":[]})";
+    mutable std::mutex snap_mu_;
+    std::string latest_snapshot_ = R"({"stack_samples":[]})";
 };
 
-// 自动注册到插件注册表
 IL_REGISTER_SOURCE("cpu_profiler", CpuProfilerSource);
 
 }  // namespace illuminator

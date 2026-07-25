@@ -38,6 +38,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <mutex>
 #include <string>
 
 #include "httplib.h"
@@ -95,21 +97,29 @@ inline void SetupAuthMiddleware(httplib::Server& srv,
             if (req.path.find("/api/") != 0) {
                 return httplib::Server::HandlerResponse::Unhandled;
             }
+
+            std::string expected = "Bearer " + auth_token;
+
             auto it = req.headers.find("Authorization");
+            if (it != req.headers.end() && it->second == expected) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+
+            if (req.has_param("token") && req.get_param_value("token") == auth_token) {
+                return httplib::Server::HandlerResponse::Unhandled;
+            }
+
             if (it == req.headers.end()) {
                 res.status = 401;
-                res.set_content(R"({"error":"missing Authorization header"})",
-                                "application/json");
-                return httplib::Server::HandlerResponse::Handled;
-            }
-            std::string expected = "Bearer " + auth_token;
-            if (it->second != expected) {
+                res.set_content(
+                    R"json({"error":"missing Authorization header (or ?token= query param)"})json",
+                    "application/json");
+            } else {
                 res.status = 403;
                 res.set_content(R"({"error":"invalid token"})",
                                 "application/json");
-                return httplib::Server::HandlerResponse::Handled;
             }
-            return httplib::Server::HandlerResponse::Unhandled;
+            return httplib::Server::HandlerResponse::Handled;
         });
 }
 
@@ -471,6 +481,8 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                     json{{"plugins", plugins}}.dump() + "\n",
                     "application/json");
             });
+
+    // /api/v1/query 和 /api/v1/budget 端点待实现（需要完善 storage deps）
 }
 
 

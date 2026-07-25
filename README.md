@@ -20,8 +20,8 @@
   - **全局时间控制**：LIVE/PAUSED 模式切换、30s/1m/5m/15m 时间窗口、键盘快捷键（Space/T/?）
   - **Zustand 状态管理**：全局时间、管道状态、过滤器三大 Store
   - **TimeSeriesStore**：前端 RingBuffer 时间序列缓存，支持按时间范围查询和订阅通知
-- **WebSocket 实时推送**：独立端口（默认 9528），前端 WsManager 单例自动重连
-- **动态 Feature 管理（热插拔）**：用户可通过 API/前端实时启动/停止功能模块，无需重启。内置 `StreamSink`（per-feature RingBuffer 缓冲实时数据）、`SinkFanout`（零拷贝多路分发）、`RecordingSink`（按需录制为 `.ilr` NDJSON 文件，支持大小限制）
+- **SSE 实时推送**：基于 Server-Sent Events 的订阅式数据推送（HTTP 端口 9527），支持 64KB 帧分割、Last-Event-ID 重放、15s 心跳、动态订阅更新
+- **动态 Feature 管理（热插拔）**：用户可通过 API/前端实时启动/停止功能模块，无需重启。内置 `SseSink`（SSE 实时推送）、`RecordingSink`（按需录制为 `.ilr` NDJSON 文件，支持大小限制）
 - **深度堆栈符号解析**：合并 `.symtab` + `.dynsym`、build-id 调试信息查找、nearest-symbol 启发式（gap 归属）、PID 命名空间感知、`[vdso]` 处理、C++ 自动 demangle，综合解析率 97%+
 - **自观测能力**：内部指标（Counter/Gauge/Histogram）、健康检查、RSS 资源限制器
 
@@ -62,7 +62,7 @@
   │  Export Layer: pprof / OTLP / Prometheus / JSON                  │
   │  Self-Observability: InternalMetrics / ResourceLimiter / /metrics│
   └──────────────────────┬─────────────────────────────────────────┘
-                         │ HTTP (cpp-httplib) / WebSocket (独立端口)
+                         │ HTTP + SSE (cpp-httplib, port 9527)
   ┌──────────────────────▼─────────────────────────────────────────┐
   │              Web 可视化平台 (React + TypeScript + Zustand)         │
   │  TimeControls │ Overview │ CPU │ Memory │ IO │ Network │ GPU    │
@@ -78,8 +78,7 @@
 | CollectPool | M (默认 2) | `collect-N` | 并行执行 Source::Collect() I/O |
 | ProcessThread | N (每管道 1) | `{pipeline_name}` | 纯事件处理器 — variant dispatch |
 | SinkPool | K (默认 4) | `sink-write-N` | 并行执行 Sink::Write() I/O |
-| HTTP | 1 | `http-server` | REST API + 静态文件 |
-| WebSocket | 2 | `ws-broadcast` / `ws-accept` | 实时数据推送 / 连接监听 |
+| HTTP | 1 | `http-server` | REST API + SSE 数据面 + 静态文件 |
 | eBPF 轮询 | 按需 | `profiler-poll` / `sched-poll` 等 | Push Source ring buffer 轮询 |
 
 ---
@@ -106,11 +105,11 @@ illuminator/
 │   └── check_env.sh           #   环境检测（编译+运行环境）
 │
 ├── docs/                       # ===== 设计文档 =====
+│   ├── architecture_overview.md #  系统架构全景分析 v2.0
 │   ├── pipeline_v3_design.md   #   Pipeline v3 事件驱动架构设计文档
-│   ├── architecture_audit_v4.md#   全面架构审计报告 (P0-P2 缺陷追踪)
-│   ├── wasm_runtime_design.md  #   WASM 沙箱插件系统设计与路线图
-│   ├── frontend_implementation_report.md# 前端实施报告
-│   ├── project_review_and_roadmap.md   # 项目全面审阅与未来路线图
+│   ├── ebpf_plugin_redesign.md #   eBPF 插件基类重设计 RFC
+│   ├── architecture_audit_report.md # 全面架构审计报告
+│   ├── frontend_architecture_design.md # 前端架构设计 v3.1
 │   └── onboarding_guide.md     #   新人入门指南
 │
 ├── src/                        # ===== 全部 C++ 源代码 =====
@@ -136,54 +135,31 @@ illuminator/
 │   │   │   └── memory/         #     mem_tracer.bpf.c
 │   │   └── loader/             #   FeatureProbe, StackTraceUtil
 │   │
-│   ├── sources/                # Source 插件 (按子系统分类)
-│   │   ├── ebpf_skeleton_source.h     # eBPF Skeleton Push Source 基类 (bpftool gen skeleton)
-│   │   ├── cpu/                #   4 个 CPU 相关源
-│   │   │   ├── cpu_profiler/   #     eBPF perf_event CPU 性能剖析 (Push)
-│   │   │   ├── cpu_utilization/#     CPU 利用率 /proc/stat (Pull, EMA 平滑)
-│   │   │   ├── process_cpu/    #     进程/线程 CPU 监控 (Pull, Top-N)
-│   │   │   └── proc_stat_reader/#    /proc/stat 底层读取器
-│   │   ├── sched/              #   3 个调度器相关源
-│   │   │   ├── sched_analyzer/ #     调度分析 (eBPF, 运行队列延迟, 迁移追踪)
-│   │   │   ├── ebpf_sched_tracer/#   eBPF 调度事件追踪
-│   │   │   └── offcpu_profiler/#     Off-CPU 性能剖析 (eBPF)
-│   │   ├── io/                 #   eBPF 块 I/O 延迟监控
-│   │   │   └── ebpf_io_monitor/
-│   │   └── net/                #   eBPF TCP 连接追踪
-│   │       └── ebpf_net_tracer/
+│   ├── plugin/                 # 插件框架 + 所有插件
+│   │   ├── api/                #   插件接口 (Source/Processor/Aggregator/Sink) + C ABI
+│   │   ├── manager/            #   PluginRegistry + SO Loader
+│   │   ├── builtin/            #   内建插件强链接清单
+│   │   ├── features/           #   FeatureDriver 实现 + FeatureRegistry
+│   │   ├── sources/            #   Source 插件 (按子系统分类)
+│   │   │   ├── ebpf_skeleton_source.h     # eBPF Push Source 基类模板
+│   │   │   ├── ebpf_skeleton_pull_source.h# eBPF Pull Source 基类模板
+│   │   │   ├── cpu/            #   cpu_profiler, cpu_utilization, process_cpu, proc_stat_reader
+│   │   │   ├── sched/          #   sched_analyzer, ebpf_sched_tracer, offcpu_profiler
+│   │   │   ├── io/             #   ebpf_io_monitor
+│   │   │   └── net/            #   ebpf_net_tracer
+│   │   ├── processors/         #   passthrough, filter, stack_symbolizer, stack_merger
+│   │   ├── aggregators/        #   cpu_stats_aggregator
+│   │   └── sinks/              #   console, file, local_storage, pprof, prometheus, otlp, recording
 │   │
-│   ├── processors/             # Processor 插件
-│   │   ├── passthrough/        #   透传处理器 (测试用)
-│   │   ├── filter/             #   标签过滤处理器
-│   │   ├── stack_symbolizer/   #   堆栈符号化 (ELF + kallsyms + C++ demangle)
-│   │   └── stack_merger/       #   相同调用栈合并
-│   │
-│   ├── aggregators/            # Aggregator 插件
-│   │   └── cpu_stats_aggregator/#  CPU 统计聚合 (时间窗口)
-│   │
-│   ├── sinks/                  # Sink 插件 (10 个)
-│   │   ├── console_output/     #   控制台输出 (文本/JSON)
-│   │   ├── fanout/             #   复合分发 Sink (零拷贝多路分发)
-│   │   ├── file_export/        #   JSONL 文件导出
-│   │   ├── local_storage/      #   SQLite 存储后端写入
-│   │   ├── pprof_export/       #   pprof 折叠栈格式 (兼容 FlameGraph)
-│   │   ├── prometheus_exposition/#  Prometheus 指标暴露
-│   │   ├── otlp_export/        #   OpenTelemetry OTLP (JSON over HTTP)
-│   │   ├── recording_sink/     #   按需录制落盘 (.ilr NDJSON 格式)
-│   │   └── stream_sink/        #   统一环形数据缓冲 (HTTP/WS/Export 共用)
-│   │
-│   ├── serialization/          # JSON 序列化 (nlohmann/json)
-│   │   └── json_serializer.h   #   DataBatch → JSON
-│   │
-│   ├── storage/                # 存储抽象层
-│   │   ├── storage_backend.h   #   StorageBackend 接口 + StorageFactory
+│   ├── server/                 # HTTP/SSE 服务
+│   │   ├── http_server.h       #   cpp-httplib 封装
+│   │   ├── api_routes.h        #   REST API 路由
+│   │   ├── sse_handler.h       #   SSE 实时推送
+│   │   └── storage/            #   存储抽象层
+│   │       ├── storage_backend.h #   StorageBackend 接口 + StorageFactory
 │   │   └── sqlite_backend/     #   SQLite 实现 (WAL 模式)
 │   │
-│   ├── server/                 # HTTP / WebSocket 服务
-│   │   ├── http_server.h       #   cpp-httplib 薄封装
-│   │   ├── api_routes.h        #   REST API 路由注册 (从 main.cc 拆出)
-│   │   ├── websocket_server.h  #   WebSocket 协议实现 (内联 SHA-1)
-│   │   └── websocket_manager.h #   WebSocket 连接管理 + 独立监听端口
+│   ├── server/                 # HTTP + SSE 服务（见上方 server/ 部分）
 │   │
 │   └── cli/                    # 命令行入口
 │       └── main.cc             #   daemon / collect / top / plugins / version
@@ -202,7 +178,9 @@ illuminator/
     │   │   └── useFilterStore.ts#    全局过滤器 (PID, comm, CPU)
     │   ├── services/           #   数据服务层
     │   │   ├── apiClient.ts    #     统一 REST API 客户端 (类型安全)
-    │   │   ├── wsManager.ts    #     WebSocket 单例管理器 (自动重连)
+    │   │   ├── sseLink.ts     #     SSE 连接管理器 (自动重连 + 心跳)
+    │   │   ├── dataBus.ts     #     SSE 数据总线 (批量缓冲 + 背压)
+    │   │   ├── dataSource.ts  #     DataSource 抽象 (Live/Replay)
     │   │   └── timeSeriesStore.ts#   前端 RingBuffer 时间序列缓存
     │   ├── components/         #   共享 UI 组件
     │   │   ├── TimeControls/   #     全局时间控制器 (LIVE/PAUSED, 窗口选择)
@@ -210,8 +188,8 @@ illuminator/
     │   ├── hooks/              #   自定义 hooks
     │   │   ├── usePolling.ts   #     通用轮询 hook (响应全局时间模式)
     │   │   ├── usePipelinePolling.ts# 管道状态轮询
-    │   │   ├── useCpuMetrics.ts#     CPU 指标专用 hook
-    │   │   └── useWebSocket.ts #     WebSocket 自动重连 hook
+    │   │   ├── useCpuData.ts   #     CPU 指标专用 hook
+    │   │   └── useFeatureStream.ts #  Feature 数据流 hook
     │   ├── styles/
     │   │   └── theme.ts        #     设计令牌 (颜色、间距、字体)
     │   └── pages/              #   7 个页面组件
@@ -367,7 +345,7 @@ docker build \
 
 ### 守护进程模式
 
-启动 Illuminator 守护进程，开启 HTTP 服务（默认端口 9527）和 WebSocket 实时推送（默认端口 9528）：
+启动 Illuminator 守护进程，开启 HTTP + SSE 服务（默认端口 9527）：
 
 ```bash
 sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
@@ -407,8 +385,10 @@ sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 - `POST /api/v1/features/:name/record/stop` — 停止录制
 - `GET /api/v1/features/:name/record/status` — 录制状态查询
 
-**WebSocket**
-- `ws://localhost:9528/ws/<pipeline>` — 实时数据推送
+**SSE (Server-Sent Events)**
+- `POST /api/v1/events/subscribe` — 订阅 Feature 数据流
+- `GET  /api/v1/events/{id}` — SSE 数据连接
+- `POST /api/v1/events/{id}/update` — 动态更新订阅
 
 ### 一次性采集
 
@@ -452,8 +432,7 @@ server:
   http:
     enabled: true
     listen: "0.0.0.0:9527"
-  websocket:
-    enabled: true
+  # SSE 通过同一 HTTP 端口提供
 
 engine:
   collect_pool_threads: 2     # CollectPool 线程数 (0=auto)
@@ -621,7 +600,7 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Integration** | Pipeline E2E | 1 | Source→Sink 数据流、统计计数器、错误路径 |
 | **Processors** | passthrough, filter, stack_merger, stack_symbolizer | 4 | 透传、标签过滤、堆栈合并分组、符号化 |
 | **Aggregators** | cpu_stats_aggregator | 1 | 窗口聚合、avg/min/max/p50/p99、Flush 清空 |
-| **Sinks** | console, file, local_storage, otlp, pprof, prometheus, websocket, stream_sink, fanout | 9 | I/O 写入、格式化、缓冲淘汰、RingBuffer 流、多路分发 |
+| **Sinks** | console, file, local_storage, otlp, pprof, prometheus, recording, fanout | 8 | I/O 写入、格式化、SSE 推送、录制落盘、多路分发 |
 | **Sources** | cpu_utilization | 1 | Init/Collect、配置解析、Load Average |
 | **Server** | api_routes, auth middleware | 1 | /healthz、认证绕过、401/403/200 |
 | **Plugin** | PluginRegistry | 1 | 注册/创建/列举、Source/Processor/Sink |
@@ -638,7 +617,7 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | 功能 | 说明 |
 |------|------|
 | **TimeControls** | 顶部工具栏，LIVE/PAUSED 模式切换，30s/1m/5m/15m 时间窗口选择 |
-| **StatusBar** | 底部状态栏，显示运行管道数和 WebSocket 连接状态 |
+| **StatusBar** | 底部状态栏，显示运行管道数和 SSE 连接状态 |
 | **键盘快捷键** | `Space` 暂停/恢复、`T` 切换时间窗口、`?` 显示帮助 |
 
 ### 页面功能

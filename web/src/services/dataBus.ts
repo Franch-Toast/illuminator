@@ -54,6 +54,8 @@ export class DataBus implements DataSource {
   private status: ConnectionStatus = 'disconnected'
   private windowSeconds = 60
 
+  private syncedFeatures = new Set<string>()
+
   // 批量通知状态
   private pendingBatches = new Map<string, DataBatch[]>()
   private batchTimer: ReturnType<typeof setTimeout> | null = null
@@ -261,19 +263,21 @@ export class DataBus implements DataSource {
   private async syncSubscription(): Promise<void> {
     if (!this.subscriptionId) return
 
-    const currentFeatures = Array.from(this.subs.keys())
+    const currentFeatures = new Set(this.subs.keys())
+    const add = [...currentFeatures].filter(f => !this.syncedFeatures.has(f))
+    const remove = [...this.syncedFeatures].filter(f => !currentFeatures.has(f))
+
+    if (add.length === 0 && remove.length === 0) return
 
     try {
       await fetch(`${this.baseUrl}/api/v1/events/${this.subscriptionId}/update`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          add: currentFeatures,
-          remove: [],
-        }),
+        body: JSON.stringify({ add, remove }),
       })
+      this.syncedFeatures = currentFeatures
     } catch {
-      // Silently ignore sync failures
+      // Retry on next subscribe/unsubscribe
     }
   }
 

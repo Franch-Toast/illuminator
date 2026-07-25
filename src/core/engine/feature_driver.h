@@ -225,6 +225,7 @@ public:
     Status Remove() {
         if (state_ == DriverState::kInactive) return Status::Ok();
 
+        state_ = DriverState::kInactive;
         UnregisterTimers(InfrastructureManager::Instance());
 
         if (recording_sink_) {
@@ -240,7 +241,6 @@ public:
             pipeline_.reset();
         }
 
-        state_ = DriverState::kInactive;
         IL_INFO("FeatureDriver '{}' removed", Name());
         return Status::Ok();
     }
