@@ -48,7 +48,7 @@
 #include "core/common/version_generated.h"
 #include "core/engine/feature_bus.h"
 #include "core/engine/feature_driver.h"
-#include "plugin/manager/plugin_manager.h"
+#include "plugin/infra/plugin_manager.h"
 #include "cli/json_serializer.h"
 #include "plugin/sinks/recording_sink/recording_sink.h"
 

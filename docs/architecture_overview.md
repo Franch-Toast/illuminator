@@ -404,7 +404,7 @@ SourcePlugin (抽象基类)
     └── SchedAnalyzerSource   (403 行)   Pull/Push — 调度聚合 + 详细事件
 ```
 
-**bpf_util 工具函数** (`src/ebpf/loader/bpf_util.h`):
+**bpf_util 工具函数** (`src/ebpf_common/loader/bpf_util.h`):
 ```
 bpf_util::WritePidFilter()          — 写入 PID 白名单到 BPF hash map
 bpf_util::WriteCommFilter()         — 写入进程名白名单

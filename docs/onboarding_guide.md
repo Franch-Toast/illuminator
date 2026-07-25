@@ -317,8 +317,8 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 ### 阶段五：理解插件系统（Day 2-3）
 
 **必读文件**：
-1. `src/plugin/manager/plugin_registry.h` — 宏注册机制 `IL_REGISTER_*`
-2. `src/plugin/sources/cpu/cpu_utilization/cpu_utilization.h` — 最简单的 Pull Source
+1. `src/plugin/infra/plugin_registry.h` — 宏注册机制 `IL_REGISTER_*`
+2. `src/plugin/features/cpu/cpu_utilization/cpu_utilization.h` — 最简单的 Pull Source
 3. `src/plugin/processors/filter/filter_processor.h` — 标签过滤 Processor
 4. `src/plugin/sinks/console_output/console_sink.h` — 最简单的 Sink
 
@@ -327,11 +327,11 @@ illuminator.yaml.example / 内置 kDefaultConfigYaml
 **前置知识**：BPF 基础、libbpf 用法
 
 **必读文件**：
-1. `src/ebpf/include/event_types.h` — 内核/用户态共享数据结构
-2. `src/plugin/sources/ebpf_skeleton_source.h` — eBPF Skeleton Push Source 基类（bpftool gen skeleton）
-3. `src/ebpf/probes/bpf_probe.bzl` — BPF 编译与 skeleton 生成 Bazel 规则
-4. `src/ebpf/probes/cpu/cpu_profiler.bpf.c` — BPF C 程序示例
-5. `src/plugin/sources/cpu/cpu_profiler/cpu_profiler.h` — 复杂 skeleton 源示例
+1. `src/ebpf_common/include/event_types.h` — 内核/用户态共享数据结构
+2. `src/plugin/features/ebpf_skeleton_source.h` — eBPF Skeleton Push Source 基类（bpftool gen skeleton）
+3. `src/ebpf_common/probes/bpf_probe.bzl` — BPF 编译与 skeleton 生成 Bazel 规则
+4. `src/ebpf_common/probes/cpu/cpu_profiler.bpf.c` — BPF C 程序示例
+5. `src/plugin/features/cpu/cpu_profiler/cpu_profiler.h` — 复杂 skeleton 源示例
 
 ---
 
@@ -860,13 +860,13 @@ server:
 | API 有哪些 | `src/server/api_routes.h` + `/api/v2/features/*` |
 | SSE 推送怎么做 | `src/server/sse_handler.h` |
 | 如何写 FeatureDriver | `src/plugin/features/cpu_utilization_driver.h` |
-| 如何写 Source | `src/plugin/sources/cpu/cpu_utilization/cpu_utilization.h` |
+| 如何写 Source | `src/plugin/features/cpu/cpu_utilization/cpu_utilization.h` |
 | 如何写 Processor | `src/plugin/processors/filter/filter_processor.h` |
 | 如何写 Sink | `src/plugin/sinks/console_output/console_sink.h` |
 | 错误怎么处理 | `src/core/common/status.h` |
 | 内存怎么管理 | `src/core/memory/arena.h` |
 | 线程怎么调度 | `src/core/engine/timer_wheel.h` |
-| eBPF 怎么加载 | `src/plugin/sources/ebpf_skeleton_source.h`（skeleton 基类）|
+| eBPF 怎么加载 | `src/plugin/features/ebpf_skeleton_source.h`（skeleton 基类）|
 | 前端数据流 | `web/src/services/dataBus.ts` |
 | 前端 SSE 传输层 | `web/src/services/sseLink.ts` |
 | 前端路由 | `web/src/App.tsx` |

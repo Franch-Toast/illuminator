@@ -90,7 +90,6 @@ cc_library(
         ":memory",
         ":threading",
         "//src/plugin:api",
-        "//src/plugin:manager",
         "//src/plugin/sinks:recording_sink",
         "//src/server/storage:storage",
     ],

@@ -13,7 +13,7 @@
 #include <string>
 
 #include "plugin/api/sink_plugin.h"
-#include "plugin/manager/plugin_registry.h"
+#include "plugin/infra/plugin_registry.h"
 #include "server/storage/storage_backend.h"
 
 namespace illuminator {

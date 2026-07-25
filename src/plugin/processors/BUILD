@@ -9,7 +9,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -22,7 +22,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -35,7 +35,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -48,6 +48,6 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )

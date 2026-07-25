@@ -3,7 +3,7 @@
 > **状态**: 已实现 (Implemented)
 > **日期**: 2026-07-25
 > **作者**: Architecture Review
-> **范围**: `src/plugin/sources/ebpf_source_base.h`, `src/ebpf/loader/bpf_util.h`, 及所有 eBPF Source 插件
+> **范围**: `src/plugin/features/ebpf_source_base.h`, `src/ebpf_common/loader/bpf_util.h`, 及所有 eBPF Source 插件
 >
 > **实现记录**:
 > - 所有 6 个 eBPF 插件已迁移至 `EbpfSourceBase`
@@ -905,8 +905,8 @@ class EbpfIoMonitor : public EbpfSourceBase {
 
 ### Phase 1：基础设施 ✅
 
-1. ✅ 实现 `EbpfSourceBase` 基类 → `src/plugin/sources/ebpf_source_base.h` (354 行)
-2. ✅ 实现 `bpf_util` 工具函数 → `src/ebpf/loader/bpf_util.h` (225 行)
+1. ✅ 实现 `EbpfSourceBase` 基类 → `src/plugin/features/ebpf_source_base.h` (354 行)
+2. ✅ 实现 `bpf_util` 工具函数 → `src/ebpf_common/loader/bpf_util.h` (225 行)
 3. 最终设计：不使用 `BpfPidFilter`/`BpfPerfAttach` 独立类，改为 `bpf_util` 工具函数
 
 ### Phase 2：迁移简单插件 ✅
@@ -974,24 +974,24 @@ class EbpfIoMonitor : public EbpfSourceBase {
 
 | 文件 | 说明 |
 |------|------|
-| `src/plugin/sources/ebpf_source_base.h` | eBPF Source 公共基类 |
-| `src/plugin/sources/bpf_util.h` | BPF 操作工具函数（PID 过滤、perf_event、PID namespace 等） |
+| `src/plugin/features/ebpf_source_base.h` | eBPF Source 公共基类 |
+| `src/plugin/features/bpf_util.h` | BPF 操作工具函数（PID 过滤、perf_event、PID namespace 等） |
 
 ### 修改文件
 
 | 文件 | 变更 |
 |------|------|
 | `src/core/engine/infrastructure_manager.h` | 新增 `BpfPollService` 成员 |
-| `src/plugin/sources/io/ebpf_io_monitor.h` | 迁移到 `EbpfSourceBase` |
-| `src/plugin/sources/net/ebpf_net_tracer.h` | 迁移到 `EbpfSourceBase` |
-| `src/plugin/sources/sched/ebpf_sched_tracer.h` | 迁移到 `EbpfSourceBase` |
-| `src/plugin/sources/sched/offcpu_profiler.h` | 迁移到 `EbpfSourceBase` + `BpfPidFilter` |
-| `src/plugin/sources/cpu/cpu_profiler.h` | 迁移到 `EbpfSourceBase` + `BpfPerfAttach` + `BpfPidFilter` |
-| `src/plugin/sources/sched/sched_analyzer.h` | 迁移到 `EbpfSourceBase` |
+| `src/plugin/features/io/ebpf_io_monitor.h` | 迁移到 `EbpfSourceBase` |
+| `src/plugin/features/net/ebpf_net_tracer.h` | 迁移到 `EbpfSourceBase` |
+| `src/plugin/features/sched/ebpf_sched_tracer.h` | 迁移到 `EbpfSourceBase` |
+| `src/plugin/features/sched/offcpu_profiler.h` | 迁移到 `EbpfSourceBase` + `BpfPidFilter` |
+| `src/plugin/features/cpu/cpu_profiler.h` | 迁移到 `EbpfSourceBase` + `BpfPerfAttach` + `BpfPidFilter` |
+| `src/plugin/features/sched/sched_analyzer.h` | 迁移到 `EbpfSourceBase` |
 
 ### 删除文件（Phase 4）
 
 | 文件 | 说明 |
 |------|------|
-| `src/plugin/sources/ebpf_skeleton_source.h` | 被 `EbpfSourceBase` 取代 |
-| `src/plugin/sources/ebpf_skeleton_pull_source.h` | 被 `EbpfSourceBase` 取代 |
+| `src/plugin/features/ebpf_skeleton_source.h` | 被 `EbpfSourceBase` 取代 |
+| `src/plugin/features/ebpf_skeleton_pull_source.h` | 被 `EbpfSourceBase` 取代 |

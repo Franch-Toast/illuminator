@@ -11,7 +11,7 @@
 
 #include <string>
 #include "plugin/api/processor_plugin.h"
-#include "plugin/manager/plugin_registry.h"
+#include "plugin/infra/plugin_registry.h"
 
 namespace illuminator {
 

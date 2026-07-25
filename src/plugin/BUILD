@@ -20,11 +20,26 @@ cc_library(
 )
 
 cc_library(
-    name = "manager",
+    name = "ebpf_source_base",
+    hdrs = ["api/ebpf_source_base.h"],
+    strip_include_prefix = "",
+    include_prefix = "plugin",
+    visibility = ["//visibility:public"],
+    linkopts = ["-lbpf", "-lelf", "-lz"],
+    deps = [
+        ":api",
+        "//src/core:common",
+        "//src/ebpf_common:loader",
+    ],
+)
+
+cc_library(
+    name = "infra",
     hdrs = [
-        "manager/plugin_registry.h",
-        "manager/so_loader.h",
-        "manager/plugin_manager.h",
+        "infra/plugin_registry.h",
+        "infra/so_loader.h",
+        "infra/plugin_manager.h",
+        "infra/wasm_runtime.h",
     ],
     strip_include_prefix = "",
     include_prefix = "plugin",
@@ -37,28 +52,29 @@ cc_library(
 )
 
 cc_library(
+    name = "feature_registry",
+    hdrs = ["infra/feature_registry.h"],
+    strip_include_prefix = "",
+    include_prefix = "plugin",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:engine",
+    ],
+)
+
+cc_library(
     name = "builtin",
-    srcs = ["builtin/builtin_plugins.cc"],
-    hdrs = ["builtin/builtin_plugins.h"],
+    srcs = ["infra/builtin_plugins.cc"],
+    hdrs = ["infra/builtin_plugins.h"],
     strip_include_prefix = "",
     include_prefix = "plugin",
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
         ":api",
-        ":manager",
-        # CPU sources
-        "//src/plugin/sources:proc_stat_reader",
-        "//src/plugin/sources:cpu_utilization",
-        "//src/plugin/sources:process_cpu",
-        "//src/plugin/sources:cpu_profiler",
-        # Scheduler sources
-        "//src/plugin/sources:sched_analyzer",
-        "//src/plugin/sources:offcpu_profiler",
-        "//src/plugin/sources:ebpf_sched_tracer",
-        # I/O + Network
-        "//src/plugin/sources:ebpf_io_monitor",
-        "//src/plugin/sources:ebpf_net_tracer",
+        ":infra",
+        # All feature sources
+        "//src/plugin/features:all_sources",
         # Processors
         "//src/plugin/processors:passthrough",
         "//src/plugin/processors:filter",

@@ -5,7 +5,7 @@ cc_test(
     srcs = ["plugin_registry_test.cc"],
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
         "//src/core:common",
         "//src/core:data",
         "@googletest//:gtest_main",

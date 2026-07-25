@@ -3,8 +3,8 @@
 #include "core/engine/feature_bus.h"
 #include "core/engine/feature_driver.h"
 #include "core/engine/infrastructure_manager.h"
-#include "plugin/features/cpu_utilization_driver.h"
-#include "plugin/features/feature_registry.h"
+#include "plugin/features/cpu/cpu_utilization/cpu_utilization_driver.h"
+#include "plugin/infra/feature_registry.h"
 
 #include <gtest/gtest.h>
 

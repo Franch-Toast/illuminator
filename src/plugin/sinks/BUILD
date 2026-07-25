@@ -9,7 +9,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
         "//src/cli:json_serializer",
     ],
 )
@@ -23,7 +23,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
         "//src/cli:json_serializer",
     ],
 )
@@ -37,7 +37,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
         "//src/server/storage:storage",
         "//src/server/storage:sqlite_backend",
     ],
@@ -52,7 +52,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -65,7 +65,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -78,7 +78,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -93,7 +93,7 @@ cc_library(
     deps = [
         "//src/core:common",
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
     ],
 )
 
@@ -107,7 +107,7 @@ cc_library(
     deps = [
         "//src/core:common",
         "//src/plugin:api",
-        "//src/plugin:manager",
+        "//src/plugin:infra",
         "//src/cli:json_serializer",
         "@nlohmann_json//:json",
     ],

@@ -310,10 +310,10 @@ BPF 探针通过 Bazel 编译，使用 `bpftool gen skeleton` 生成类型安全
 
 ```bash
 # 编译全部 BPF 探针（含 skeleton 生成）
-bazel build //src/ebpf/probes:all
+bazel build //src/plugin/features:all
 
 # 编译单个探针
-bazel build //src/ebpf/probes:cpu_profiler
+bazel build //src/plugin/features:cpu_profiler
 ```
 
 ### 构建 Web 前端 (可选)
@@ -472,7 +472,7 @@ pipelines:
 
 ```cpp
 #include "plugin/api/source_plugin.h"
-#include "plugin/manager/plugin_registry.h"
+#include "plugin/infra/plugin_registry.h"
 
 namespace illuminator {
 
@@ -523,7 +523,7 @@ extern "C" const IlPluginDescriptor* illuminator_plugin_describe() {
 |-----|------|------|
 | **backend-build** | push/PR | `bazel build //src/...` 全量 C++ 编译 |
 | **backend-test** | push/PR | `bazel test //src/...` 运行 25 个单元测试 |
-| **bpf-probes** | push/PR | `bazel build //src/ebpf/probes:all` eBPF 探针编译 |
+| **features** | push/PR | `bazel build //src/plugin/features:all` eBPF 探针编译 |
 | **frontend-build** | push/PR | `tsc --noEmit` + ESLint + Vitest + `vite build` |
 | **sanitizer-asan** | 仅 PR | AddressSanitizer 内存错误检测 |
 | **sanitizer-tsan** | 仅 PR | ThreadSanitizer 数据竞争检测 |

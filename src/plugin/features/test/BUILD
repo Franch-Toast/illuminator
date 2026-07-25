@@ -6,7 +6,7 @@ cc_test(
     deps = [
         "//src/core:engine",
         "//src/plugin/features:cpu_utilization_driver",
-        "//src/plugin/features:feature_registry",
+        "//src/plugin:infra",
         "@googletest//:gtest_main",
     ],
 )
