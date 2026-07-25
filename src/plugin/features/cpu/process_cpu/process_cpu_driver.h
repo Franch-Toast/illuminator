@@ -47,7 +47,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("process_cpu");
+        auto pipeline = MakePipeline("process_cpu");
         auto source = std::make_unique<ProcessCpuSource>();
         ConfigValue cfg;
         cfg["interval_ms"] = ConfigValue(static_cast<int64_t>(2000));

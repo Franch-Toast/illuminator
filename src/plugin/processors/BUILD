@@ -35,6 +35,7 @@ cc_library(
     alwayslink = True,
     deps = [
         "//src/plugin:api",
+        "//src/plugin:common_utils",
         "//src/plugin:infra",
     ],
 )

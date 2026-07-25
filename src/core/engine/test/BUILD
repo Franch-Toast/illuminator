@@ -83,7 +83,7 @@ cc_test(
     deps = [
         "//src/core:engine",
         "//src/plugin:api",
-        "//src/plugin/sinks:recording_sink",
+        "//src/plugin:feature_driver_factories",
         "@googletest//:gtest_main",
     ],
 )

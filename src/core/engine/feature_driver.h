@@ -25,8 +25,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/common/config.h"
@@ -34,13 +36,15 @@
 #include "core/common/status.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
+#include "plugin/api/recording_interface.h"
 #include "plugin/api/sink_plugin.h"
 
 namespace illuminator {
 
-// 前向声明：录制相关方法按需包含完整定义
-class RecordingSink;
-class RecordingSinkRegistry;
+using SseSinkFactory = std::function<std::unique_ptr<SinkPlugin>(const char* name)>;
+using RecordingSinkFactory = std::function<
+    std::pair<std::unique_ptr<SinkPlugin>, RecordableInterface*>(
+        const std::string& feature_name, const std::string& output_dir)>;
 
 enum class DriverState {
     kInactive,
@@ -300,7 +304,7 @@ public:
     // ====================================================================
     // StartRecording 在 Pipeline 运行时动态挂载 RecordingSink；
     // StopRecording 将其卸载并关闭录制文件。
-    Status StartRecording(const std::string& output_dir = "/tmp/illuminator_data");
+    Status StartRecording(const std::string& output_dir = "");
     Status StopRecording();
     bool IsRecording() const;
 
@@ -324,9 +328,29 @@ public:
     }
 
     static void SetSsePublishCallback(SsePublishCallback cb);
+    static SsePublishCallback& GetSsePublishCallback();
+
+    static void SetSseSinkFactory(SseSinkFactory factory);
+    static SseSinkFactory& GetSseSinkFactory();
+
+    static void SetRecordingSinkFactory(RecordingSinkFactory factory);
+    static RecordingSinkFactory& GetRecordingSinkFactory();
+
+    static void SetDefaultDataDir(const std::string& dir);
+    static const std::string& GetDefaultDataDir();
 
 protected:
-    std::unique_ptr<class SseSink> MakeSseSink(const char* feature_name);
+    std::unique_ptr<Pipeline> MakePipeline(const std::string& name) {
+        const auto& ch = InfrastructureManager::Instance().GetChannelConfig();
+        return std::make_unique<Pipeline>(
+            name,
+            ResolveChannelCapacity(ch.size),
+            ResolveDropPolicy(ch.drop_policy),
+            ch.backpressure_high,
+            ch.backpressure_low);
+    }
+
+    std::unique_ptr<SinkPlugin> MakeSseSink(const char* feature_name);
 
     // 子类必须实现：构建自己的 Pipeline
     virtual std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) = 0;
@@ -370,69 +394,10 @@ protected:
 
     DriverState state_ = DriverState::kInactive;
     std::unique_ptr<Pipeline> pipeline_;
-    RecordingSink* recording_sink_ = nullptr;
+    RecordableInterface* recording_sink_ = nullptr;
     std::chrono::steady_clock::time_point start_time_;
     uint64_t collect_timer_id_ = 0;
     uint64_t flush_timer_id_ = 0;
 };
-
-}  // namespace illuminator
-
-#include "plugin/sinks/recording_sink/recording_sink.h"
-#include "plugin/sinks/sse_sink/sse_sink.h"
-
-namespace illuminator {
-
-inline SsePublishCallback& FeatureDriverSsePublishCallbackStorage() {
-    static SsePublishCallback cb;
-    return cb;
-}
-
-inline void FeatureDriver::SetSsePublishCallback(SsePublishCallback cb) {
-    FeatureDriverSsePublishCallbackStorage() = std::move(cb);
-}
-
-inline std::unique_ptr<SseSink> FeatureDriver::MakeSseSink(const char* feature_name) {
-    return std::make_unique<SseSink>(feature_name, FeatureDriverSsePublishCallbackStorage());
-}
-
-inline Status FeatureDriver::StartRecording(const std::string& output_dir) {
-    if (state_ == DriverState::kInactive || !pipeline_) {
-        return Status::Error(StatusCode::kInvalidArgument, "Feature not active");
-    }
-    if (recording_sink_) {
-        return Status::Error(StatusCode::kAlreadyExists, "Already recording");
-    }
-    auto rec_sink = std::make_unique<RecordingSink>();
-    ConfigValue cfg;
-    cfg.Set("feature_name", std::string(Name()));
-    cfg.Set("output_dir", output_dir);
-    rec_sink->Init(cfg);
-    recording_sink_ = rec_sink.get();
-    RecordingSinkRegistry::Instance().Register(Name(), recording_sink_);
-    auto status = pipeline_->AddSinkRuntime(std::move(rec_sink));
-    if (!status.ok()) {
-        RecordingSinkRegistry::Instance().Unregister(Name());
-        recording_sink_ = nullptr;
-        return status;
-    }
-    recording_sink_->StartRecording();
-    return Status::Ok();
-}
-
-inline Status FeatureDriver::StopRecording() {
-    if (!recording_sink_) {
-        return Status::Error(StatusCode::kNotFound, "Not recording");
-    }
-    recording_sink_->StopRecording();
-    RecordingSinkRegistry::Instance().Unregister(Name());
-    pipeline_->RemoveSinkRuntime("recording");
-    recording_sink_ = nullptr;
-    return Status::Ok();
-}
-
-inline bool FeatureDriver::IsRecording() const {
-    return recording_sink_ != nullptr && recording_sink_->IsRecording();
-}
 
 }  // namespace illuminator

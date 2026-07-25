@@ -32,7 +32,7 @@
 #include "ebpf_common/include/event_types.h"
 #include "ebpf_common/loader/bpf_util.h"
 #include "ebpf_common/loader/stack_trace_util.h"
-#include "plugin/processors/stack_symbolizer/stack_symbolizer.h"
+#include "plugin/common/stack_symbol_resolver.h"
 #include "plugin/api/ebpf_source_base.h"
 #include "plugin/infra/plugin_registry.h"
 

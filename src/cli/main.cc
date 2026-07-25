@@ -19,6 +19,7 @@
 #include "core/engine/feature_driver.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
+#include "plugin/infra/feature_driver_factories.h"
 #include "plugin/infra/feature_registry.h"
 #include "plugin/features/cpu/cpu_utilization/cpu_utilization_driver.h"
 #include "plugin/features/cpu/process_cpu/process_cpu_driver.h"
@@ -33,7 +34,7 @@
 #include "server/api_routes.h"
 #include "server/api_v2_routes.h"
 #include "server/sse_handler.h"
-#include "cli/json_serializer.h"
+#include "core/common/json_serializer.h"
 #include "server/storage/storage_backend.h"
 
 static std::atomic<bool> g_running{true};
@@ -137,25 +138,33 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     // ---- RFC v3: FeatureBus is the ONLY pipeline management path ----
     // Start InfrastructureManager (TimerWheel + CollectPool + SinkPool)
     {
-        illuminator::InfrastructureConfig infra_cfg;
-        infra_cfg.collect_pool_threads = config.engine.collect_pool_threads > 0
-            ? config.engine.collect_pool_threads : 2;
-        infra_cfg.sink_pool_threads = config.engine.sink_pool_threads;
-        auto status = illuminator::InfrastructureManager::Instance().Start(infra_cfg);
+        auto status = illuminator::InfrastructureManager::Instance().Start(config.engine);
         if (!status.ok()) {
             IL_ERROR("Failed to start InfrastructureManager: {}", status.message());
             return 1;
         }
     }
 
-    // Register all FeatureDrivers and probe Tier 1/2 (always-on)
+    illuminator::FeatureDriver::SetDefaultDataDir(config.data_dir);
+
+    // Register all FeatureDrivers and probe when auto_start is enabled
     illuminator::FeatureDriver::SetSsePublishCallback(
         [](const std::string& feature, const std::string& data) {
             illuminator::SseHandler::Instance().Publish(feature, data);
         });
+    illuminator::FeatureDriver::SetSseSinkFactory(
+        [](const char* name) { return illuminator::MakeFeatureSseSink(name); });
+    illuminator::FeatureDriver::SetRecordingSinkFactory(
+        [](const std::string& feature, const std::string& dir) {
+            return illuminator::MakeFeatureRecordingSinkPair(feature, dir);
+        });
     illuminator::FeatureRegistry::RegisterAll();
-    illuminator::FeatureBus::Instance().ProbeAll();
-    IL_INFO("FeatureBus: all registered drivers probed");
+    if (config.auto_start) {
+        illuminator::FeatureBus::Instance().ProbeAll();
+        IL_INFO("FeatureBus: all registered drivers probed (auto_start=true)");
+    } else {
+        IL_INFO("FeatureBus: drivers registered but not probed (auto_start=false, awaiting frontend control)");
+    }
 
     if (!config.server.http_enabled) {
         IL_WARN("HTTP server disabled by config. No REST API or frontend will be served.");
@@ -202,10 +211,8 @@ static int RunCollect(int duration_sec, const std::string& log_level) {
 
     illuminator::RegisterBuiltinPlugins();
 
-    illuminator::InfrastructureConfig infra_cfg;
-    infra_cfg.collect_pool_threads = 2;
-    infra_cfg.sink_pool_threads = 4;
-    auto status = illuminator::InfrastructureManager::Instance().Start(infra_cfg);
+    auto status = illuminator::InfrastructureManager::Instance().Start(
+        illuminator::EngineConfig{.collect_pool_threads = 2, .sink_pool_threads = 4});
     if (!status.ok()) {
         IL_ERROR("Failed to start InfrastructureManager: {}", status.message());
         return 1;

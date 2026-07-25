@@ -39,7 +39,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("net_tracer");
+        auto pipeline = MakePipeline("net_tracer");
         auto source = std::make_unique<EbpfNetTracer>();
         ConfigValue cfg;
         source->Init(cfg);

@@ -22,7 +22,9 @@
 #pragma once
 
 #include <memory>
+#include <thread>
 
+#include "core/common/config.h"
 #include "core/common/logging.h"
 #include "core/common/status.h"
 #include "core/engine/timer_wheel.h"
@@ -30,39 +32,36 @@
 
 namespace illuminator {
 
-struct InfrastructureConfig {
-    size_t collect_pool_threads = 2;
-    size_t sink_pool_threads = 0;  // 0 = auto (hardware_concurrency / 2, min 2)
-};
-
 class InfrastructureManager {
 public:
-    using Config = InfrastructureConfig;
-
     static InfrastructureManager& Instance() {
         static InfrastructureManager inst;
         return inst;
     }
 
-    Status Start(const Config& config = Config{}) {
+    Status Start(const EngineConfig& config = EngineConfig{}) {
         if (started_) {
             return Status::Error(StatusCode::kInvalidArgument,
                                  "InfrastructureManager already started");
         }
 
+        engine_config_ = config;
+
+        size_t collect_threads = config.collect_pool_threads > 0
+            ? config.collect_pool_threads : 2;
         size_t sink_threads = config.sink_pool_threads;
         if (sink_threads == 0) {
             sink_threads = std::max(2u, std::thread::hardware_concurrency() / 2);
         }
 
         collect_pool_ = std::make_unique<ThreadPool>(
-            config.collect_pool_threads, "collecter");
+            collect_threads, "collecter");
         sink_pool_ = std::make_shared<ThreadPool>(sink_threads, "sink-write");
 
         timer_.Start();
 
         IL_INFO("InfrastructureManager started: CollectPool={} threads, SinkPool={} threads",
-                config.collect_pool_threads, sink_threads);
+                collect_threads, sink_threads);
         started_ = true;
         return Status::Ok();
     }
@@ -81,6 +80,11 @@ public:
 
     bool IsStarted() const { return started_; }
 
+    const EngineConfig& GetEngineConfig() const { return engine_config_; }
+    const EngineConfig::ChannelConfig& GetChannelConfig() const {
+        return engine_config_.channel;
+    }
+
     TimerWheel& GetTimerWheel() { return timer_; }
     ThreadPool* GetCollectPool() { return collect_pool_.get(); }
     std::shared_ptr<ThreadPool> GetSinkPool() { return sink_pool_; }
@@ -93,6 +97,7 @@ private:
     InfrastructureManager& operator=(const InfrastructureManager&) = delete;
 
     bool started_ = false;
+    EngineConfig engine_config_;
     TimerWheel timer_;
     std::unique_ptr<ThreadPool> collect_pool_;
     std::shared_ptr<ThreadPool> sink_pool_;

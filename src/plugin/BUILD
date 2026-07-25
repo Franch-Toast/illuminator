@@ -1,6 +1,17 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
+    name = "common_utils",
+    hdrs = ["common/stack_symbol_resolver.h"],
+    strip_include_prefix = "",
+    include_prefix = "plugin",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:common",
+    ],
+)
+
+cc_library(
     name = "api",
     hdrs = [
         "api/plugin_api.h",
@@ -8,6 +19,7 @@ cc_library(
         "api/processor_plugin.h",
         "api/aggregator_plugin.h",
         "api/sink_plugin.h",
+        "api/recording_interface.h",
     ],
     strip_include_prefix = "",
     include_prefix = "plugin",
@@ -48,6 +60,20 @@ cc_library(
     deps = [
         ":api",
         "//src/core:common",
+    ],
+)
+
+cc_library(
+    name = "feature_driver_factories",
+    hdrs = ["infra/feature_driver_factories.h"],
+    strip_include_prefix = "",
+    include_prefix = "plugin",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":api",
+        "//src/core:engine",
+        "//src/plugin/sinks:recording_sink",
+        "//src/plugin/sinks:sse_sink",
     ],
 )
 

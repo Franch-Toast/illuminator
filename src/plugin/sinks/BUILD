@@ -10,7 +10,7 @@ cc_library(
         "//src/plugin:api",
         "//src/core:common",
         "//src/core:data",
-        "//src/cli:json_serializer",
+        "//src/core:serialization",
     ],
 )
 
@@ -24,7 +24,7 @@ cc_library(
     deps = [
         "//src/plugin:api",
         "//src/plugin:infra",
-        "//src/cli:json_serializer",
+        "//src/core:serialization",
     ],
 )
 
@@ -38,7 +38,7 @@ cc_library(
     deps = [
         "//src/plugin:api",
         "//src/plugin:infra",
-        "//src/cli:json_serializer",
+        "//src/core:serialization",
     ],
 )
 
@@ -122,7 +122,7 @@ cc_library(
         "//src/core:common",
         "//src/plugin:api",
         "//src/plugin:infra",
-        "//src/cli:json_serializer",
+        "//src/core:serialization",
         "@nlohmann_json//:json",
     ],
 )

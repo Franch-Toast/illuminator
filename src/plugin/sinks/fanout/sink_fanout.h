@@ -1,3 +1,4 @@
+// Not linked in builtin_plugins.cc; available for tests and future FeatureDriver wiring.
 // =============================================================================
 // SinkFanout — 数据分发器（组合 Sink）
 // =============================================================================

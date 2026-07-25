@@ -115,7 +115,7 @@ illuminator/
 ├── src/                        # ===== 全部 C++ 源代码 =====
 │   ├── cli/                    # 命令行入口 (daemon / collect / top / plugins / version)
 │   ├── core/                   # 核心引擎
-│   │   ├── common/             # Status, Logger, Config, yaml_config_loader, data_batch
+│   │   ├── common/             # Status, Logger, Config, yaml_config_loader, json_serializer, data_batch
 │   │   ├── engine/             # Pipeline, FeatureDriver, FeatureBus, TimerWheel, AsyncChannel
 │   │   ├── memory/             # Arena, LockFreeQueue
 │   │   └── threading/          # ThreadPool, ThreadUtil
@@ -133,7 +133,7 @@ illuminator/
 │   │   │   └── net/            # net_tracer
 │   │   ├── processors/         # passthrough, filter, stack_symbolizer, stack_merger
 │   │   ├── aggregators/        # cpu_stats_aggregator
-│   │   └── sinks/              # console, file, local_storage, pprof, prometheus, otlp, sse, recording, fanout
+│   │   └── sinks/              # console, file, local_storage, pprof, prometheus, otlp (STUB), sse, recording, fanout
 │   └── server/                 # HTTP/SSE 服务 + 存储层
 │       ├── http_server.h       # cpp-httplib 封装
 │       ├── api_routes.h        # REST API v1 路由
@@ -419,25 +419,9 @@ engine:
     drop_policy: drop_newest  # drop_newest | drop_oldest
     backpressure_high: 0.8    # 触发反压水位线
     backpressure_low: 0.2     # 解除反压水位线
-
-pipelines:
-  cpu_profiling:
-    source:
-      type: cpu_profiler
-      config:
-        frequency_hz: 49
-        # BPF 字节码已通过 skeleton 嵌入二进制，无需指定 bpf_object 路径
-    processors:
-      - type: stack_symbolizer
-      - type: stack_merger
-    aggregator:
-      type: cpu_stats_aggregator
-      config:
-        window_sec: 30
-    sinks:
-      - type: local_storage
-      - type: sse_sink
 ```
+
+Feature 的启停与运行时参数由前端 REST API 控制（`/api/v2/features/*`），不再通过 YAML `pipelines:` 节编排。
 
 ---
 

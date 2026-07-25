@@ -79,7 +79,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("offcpu_profiler");
+        auto pipeline = MakePipeline("offcpu_profiler");
         auto source = std::make_unique<OffcpuProfilerSource>();
         if (config_.IsNull()) {
             config_.Set("min_block_us", int64_t{1000});

@@ -33,7 +33,7 @@
 //
 // 【API 版本演进】
 //   v1 路由保留 pipelines/collect/channel_stats/metrics 等核心运维端点。
-//   Feature 管理通过 /api/v2/features/* 路由（定义在 main.cc 中）。
+//   Feature 管理通过 /api/v2/features/* 路由（定义在 api_v2_routes.h 中）。
 // ============================================================================
 
 #pragma once
@@ -49,8 +49,8 @@
 #include "core/engine/feature_bus.h"
 #include "core/engine/feature_driver.h"
 #include "plugin/infra/plugin_manager.h"
-#include "cli/json_serializer.h"
-#include "plugin/sinks/recording_sink/recording_sink.h"
+#include "core/common/json_serializer.h"
+#include "plugin/api/recording_interface.h"
 
 namespace illuminator {
 

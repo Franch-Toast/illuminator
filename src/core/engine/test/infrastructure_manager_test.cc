@@ -28,7 +28,7 @@ TEST_F(InfrastructureManagerTest, StartAndStopCleanly) {
     auto& mgr = InfrastructureManager::Instance();
     EXPECT_FALSE(mgr.IsStarted());
 
-    auto status = mgr.Start({.collect_pool_threads = 2, .sink_pool_threads = 2});
+    auto status = mgr.Start(EngineConfig{.collect_pool_threads = 2, .sink_pool_threads = 2});
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(mgr.IsStarted());
 
@@ -42,8 +42,8 @@ TEST_F(InfrastructureManagerTest, StartAndStopCleanly) {
 
 TEST_F(InfrastructureManagerTest, DoubleStartReturnsError) {
     auto& mgr = InfrastructureManager::Instance();
-    EXPECT_TRUE(mgr.Start({.sink_pool_threads = 2}).ok());
-    EXPECT_FALSE(mgr.Start({.sink_pool_threads = 2}).ok());
+    EXPECT_TRUE(mgr.Start(EngineConfig{.sink_pool_threads = 2}).ok());
+    EXPECT_FALSE(mgr.Start(EngineConfig{.sink_pool_threads = 2}).ok());
 }
 
 TEST_F(InfrastructureManagerTest, StopBeforeStartIsNoOp) {
@@ -53,7 +53,7 @@ TEST_F(InfrastructureManagerTest, StopBeforeStartIsNoOp) {
 
 TEST_F(InfrastructureManagerTest, PoolsExecuteTasks) {
     auto& mgr = InfrastructureManager::Instance();
-    mgr.Start({.collect_pool_threads = 2, .sink_pool_threads = 2});
+    mgr.Start(EngineConfig{.collect_pool_threads = 2, .sink_pool_threads = 2});
 
     std::atomic<int> counter{0};
 
@@ -68,7 +68,7 @@ TEST_F(InfrastructureManagerTest, PoolsExecuteTasks) {
 
 TEST_F(InfrastructureManagerTest, TimerWheelAccessible) {
     auto& mgr = InfrastructureManager::Instance();
-    mgr.Start({.sink_pool_threads = 2});
+    mgr.Start(EngineConfig{.sink_pool_threads = 2});
 
     auto& tw = mgr.GetTimerWheel();
     (void)tw;  // Just verify it doesn't crash
@@ -76,7 +76,7 @@ TEST_F(InfrastructureManagerTest, TimerWheelAccessible) {
 
 TEST_F(InfrastructureManagerTest, AutoThreadCountWhenZero) {
     auto& mgr = InfrastructureManager::Instance();
-    mgr.Start({.collect_pool_threads = 2, .sink_pool_threads = 0});
+    mgr.Start(EngineConfig{.collect_pool_threads = 2, .sink_pool_threads = 0});
 
     EXPECT_NE(mgr.GetSinkPool(), nullptr);
     EXPECT_GE(mgr.GetSinkPool()->NumThreads(), 2u);

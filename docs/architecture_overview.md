@@ -1059,13 +1059,14 @@ illuminator.yaml.example
     │   ├─ http.listen: "0.0.0.0:9527"
     │   └─ auth_token: "" (空 = 开发模式, 跳过认证)
     │
-    ├─ engine:
-    │   ├─ collect_pool_threads: 2
-    │   ├─ sink_pool_threads: 4
-    │   └─ channel.size: "medium" (4096 slots)
+    ├─ global:
+    │   ├─ data_dir: "/var/lib/illuminator" (默认录制目录)
+    │   └─ auto_start: false (true=启动时 ProbeAll)
     │
-    └─ always_on:
-        └─ auto_start_tier_1_2: true
+    └─ engine:
+        ├─ collect_pool_threads: 2
+        ├─ sink_pool_threads: 4
+        └─ channel.size: "medium" (4096 slots) [已实现，传递给 Pipeline]
 ```
 
 ### 12.2 Feature 配置 vs 基础设施配置
@@ -1144,15 +1145,15 @@ illuminator.yaml.example
 
 ```
 src/
-├── cli/                                CLI 入口 + 序列化
-│   ├── main.cc                         daemon 入口 (RunDaemon + RunCollect)
-│   └── json_serializer.h              DataBatch → JSON 序列化
+├── cli/                                CLI 入口
+│   └── main.cc                         daemon 入口 (RunDaemon + RunCollect)
 ├── core/
 │   ├── common/                         基础设施（无外部依赖）
 │   │   ├── status.h                   StatusCode + Status + StatusOr<T>
 │   │   ├── logging.h                  spdlog 封装 + IL_* 日志宏
-│   │   ├── config.h                   ConfigValue + PipelineConfig + GlobalConfig
+│   │   ├── config.h                   ConfigValue + EngineConfig + GlobalConfig
 │   │   ├── yaml_config_loader.h       YAML 配置加载 (yaml-cpp)
+│   │   ├── json_serializer.h          DataBatch → JSON 序列化
 │   │   ├── data_batch.h              数据模型 (Record + StackSample + Arena)
 │   │   ├── string_util.h             通用工具函数
 │   │   └── proc_reader.h             /proc 文件系统解析库

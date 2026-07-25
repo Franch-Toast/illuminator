@@ -48,7 +48,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("sched_analyzer");
+        auto pipeline = MakePipeline("sched_analyzer");
         auto source = std::make_unique<SchedAnalyzerSource>();
         ConfigValue cfg;
         source->Init(cfg);

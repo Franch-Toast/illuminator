@@ -23,8 +23,9 @@ cc_library(
         "//src/core:common",
         "//src/core:engine",
         "//src/core:version",
-        "//src/cli:json_serializer",
-        "//src/plugin/sinks:recording_sink",
+        "//src/core:serialization",
+        "//src/plugin:api",
+        "//src/plugin:infra",
         "//third_party/cpp-httplib",
     ],
 )

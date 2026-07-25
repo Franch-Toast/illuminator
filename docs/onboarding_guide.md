@@ -555,6 +555,8 @@ SSE 订阅和控制面 API 均走 `/api/` 路径，通过 `SetupAuthMiddleware` 
 
 以添加一个 **MemoryUsageDriver**（内存使用监控 Feature）为例。RFC v3 架构下，每个 Feature 是一个自包含的 FeatureDriver，而非 YAML pipeline 配置。
 
+> **注意**：以下为端到端教程示例；`MemoryUsageSource` 尚未内建，需自行实现 Source 插件并注册。
+
 ### Step 1: 创建 FeatureDriver
 
 `src/plugin/features/memory_usage_driver.h`
@@ -595,7 +597,7 @@ REGISTER_FEATURE(MemoryUsageDriver);
 }  // namespace illuminator
 ```
 
-> Source 插件（`MemoryUsageSource`）仍使用 `IL_REGISTER_SOURCE` 宏注册，由 Driver 的 `BuildPipeline()` 组装进 Pipeline。
+> 示例中的 Source 插件（`MemoryUsageSource`）使用 `IL_REGISTER_SOURCE` 宏注册，由 Driver 的 `BuildPipeline()` 组装进 Pipeline。
 
 ### Step 2: 添加 BUILD 规则
 
@@ -857,7 +859,8 @@ server:
 | Feature 注册与生命周期 | `src/core/engine/feature_bus.h` |
 | Feature 自动注册 | `src/plugin/features/feature_registry.h` |
 | 配置怎么解析 | `src/core/common/yaml_config_loader.h` |
-| API 有哪些 | `src/server/api_routes.h` + `/api/v2/features/*` |
+| JSON 序列化 | `src/core/common/json_serializer.h` |
+| API 有哪些 | `src/server/api_routes.h` + `src/server/api_v2_routes.h` |
 | SSE 推送怎么做 | `src/server/sse_handler.h` |
 | 如何写 FeatureDriver | `src/plugin/features/cpu_utilization_driver.h` |
 | 如何写 Source | `src/plugin/features/cpu/cpu_utilization/cpu_utilization_source.h` |

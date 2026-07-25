@@ -1,3 +1,4 @@
+// Available via PluginRegistry but not yet wired into any FeatureDriver.
 // =============================================================================
 // 文件：cpu_stats_aggregator.h
 // 模块：Illuminator 聚合器 - CPU 统计聚合器

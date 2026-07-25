@@ -1,3 +1,4 @@
+// STUB: WASM runtime is not implemented. This file serves as a placeholder.
 // ============================================================================
 // Illuminator WASM 运行时 — WebAssembly 沙箱插件支持
 // ============================================================================

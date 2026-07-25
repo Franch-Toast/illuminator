@@ -69,7 +69,22 @@ cc_library(
 )
 
 cc_library(
+    name = "serialization",
+    hdrs = ["common/json_serializer.h"],
+    strip_include_prefix = "",
+    include_prefix = "core",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":data",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
     name = "engine",
+    srcs = [
+        "engine/feature_driver.cc",
+    ],
     hdrs = [
         "engine/async_channel.h",
         "engine/feature_bus.h",
@@ -90,9 +105,6 @@ cc_library(
         ":memory",
         ":threading",
         "//src/plugin:api",
-        "//src/plugin/sinks:recording_sink",
-        "//src/plugin/sinks:sse_sink",
-        "//src/server/storage:storage",
     ],
 )
 

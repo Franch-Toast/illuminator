@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-#include "cli/json_serializer.h"
+#include "core/common/json_serializer.h"
 #include "core/common/data_batch.h"
 #include "plugin/api/sink_plugin.h"
 

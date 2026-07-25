@@ -25,7 +25,8 @@
 #include "core/engine/pipeline.h"
 #include "plugin/api/sink_plugin.h"
 #include "plugin/api/source_plugin.h"
-#include "plugin/sinks/recording_sink/recording_sink.h"
+#include "plugin/api/recording_interface.h"
+#include "plugin/infra/feature_driver_factories.h"
 
 namespace illuminator {
 namespace {
@@ -105,6 +106,10 @@ protected:
         }
         // 清理注册表中的残留
         RecordingSinkRegistry::Instance().Unregister("test_recording_feature");
+        FeatureDriver::SetRecordingSinkFactory(
+            [](const std::string& feature, const std::string& dir) {
+                return MakeFeatureRecordingSinkPair(feature, dir);
+            });
     }
 
     void TearDown() override {

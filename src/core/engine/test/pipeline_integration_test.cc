@@ -16,6 +16,8 @@
 #include "core/common/data_batch.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
+#include "core/engine/self_observability.h"
+#include "core/threading/thread_pool.h"
 
 namespace illuminator {
 namespace {
@@ -388,6 +390,38 @@ private:
     std::atomic<uint64_t> bp_clear_count_{0};
 };
 
+// MockAggregator — 缓冲数据，仅在 Flush 时输出（模拟时间窗口聚合器）
+class MockAggregator : public AggregatorPlugin {
+public:
+    explicit MockAggregator(uint32_t flush_interval_ms = 100)
+        : flush_interval_ms_(flush_interval_ms) {}
+
+    const char* Name() const override { return "mock_aggregator"; }
+    const char* Version() const override { return "0.1.0"; }
+    uint32_t FlushIntervalMs() const override { return flush_interval_ms_; }
+
+    Status Add(DataBatchPtr batch) override {
+        if (batch && !batch->Empty()) {
+            buffered_.push_back(std::move(batch));
+        }
+        return Status::Ok();
+    }
+
+    StatusOr<std::vector<DataBatchPtr>> Flush() override {
+        flush_count_.fetch_add(1, std::memory_order_relaxed);
+        std::vector<DataBatchPtr> out = std::move(buffered_);
+        buffered_.clear();
+        return out;
+    }
+
+    uint64_t FlushCount() const { return flush_count_.load(); }
+
+private:
+    uint32_t flush_interval_ms_;
+    std::vector<DataBatchPtr> buffered_;
+    std::atomic<uint64_t> flush_count_{0};
+};
+
 // SlowSink — 每次写入时 sleep，用于触发反压和丢弃
 class SlowSink : public SinkPlugin {
 public:
@@ -718,6 +752,84 @@ TEST(PipelineIntegrationTest, ChannelFullDropsDataAndUpdatesStats) {
     EXPECT_GT(pipe.ChannelEnqueued(), 0u);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(pipe.Stop().ok());
+}
+
+// =========================================================================
+// MaybeForceFlush — 无 FlushSentinel 时超时强制 flush
+// =========================================================================
+TEST(PipelineIntegrationTest, MaybeForceFlushFlushesAggregatorWithoutSentinel) {
+    constexpr uint32_t kFlushIntervalMs = 100;
+    Pipeline pipe("test_force_flush");
+
+    pipe.SetSource(std::make_unique<MockSource>());
+    pipe.SetAggregator(std::make_unique<MockAggregator>(kFlushIntervalMs));
+
+    auto sink = std::make_unique<MockSink>();
+    auto* sink_ptr = sink.get();
+    pipe.AddSink(std::move(sink));
+
+    ASSERT_TRUE(pipe.Start().ok());
+
+    auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+    batch->AddRecord().SetField(batch->InternString("v"), double{1.0});
+    pipe.Enqueue(batch);
+
+    // 不调用 InjectFlush；等待 >= 3 倍 flush interval（300ms）+ buffer
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));
+
+    ASSERT_TRUE(pipe.Stop().ok());
+
+    EXPECT_EQ(pipe.ChannelFlushInjected(), 0u);
+    EXPECT_GT(sink_ptr->WriteCount(), 0u)
+        << "MaybeForceFlush should flush aggregator data to sink";
+}
+
+// =========================================================================
+// SinkPool 过载丢弃 + 反压 gauge
+// =========================================================================
+TEST(PipelineIntegrationTest, SinkPoolOverloadDropsBatchesAndUpdatesMetrics) {
+    constexpr const char* kPipeName = "test_sink_overload";
+    const std::string drops_counter =
+        std::string("pipeline_") + kPipeName + "_sink_drops_total";
+    const std::string bp_gauge =
+        std::string("pipeline_") + kPipeName + "_sink_pool_backpressure";
+
+    const uint64_t drops_before =
+        InternalMetrics::Instance().GetCounter(drops_counter);
+
+    Pipeline pipe(kPipeName);
+    pipe.SetSource(std::make_unique<MockSource>());
+
+    auto sink = std::make_unique<SlowSink>(200);
+    pipe.AddSink(std::move(sink));
+
+    auto sink_pool = std::make_shared<ThreadPool>(1, "test-sink-pool");
+    pipe.SetSinkPool(sink_pool);
+
+    ASSERT_TRUE(pipe.Start().ok());
+
+    for (int i = 0; i < 300; ++i) {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        batch->AddRecord();
+        pipe.Enqueue(batch);
+    }
+
+    // 等待 ProcessThread 将批次提交到 SinkPool
+    for (int i = 0; i < 50; ++i) {
+        if (pipe.ErrorCount() > 0 &&
+            InternalMetrics::Instance().GetGauge(bp_gauge) >= 1.0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    EXPECT_GT(pipe.ErrorCount(), 0u);
+    EXPECT_GT(InternalMetrics::Instance().GetCounter(drops_counter),
+              drops_before);
+    EXPECT_GE(InternalMetrics::Instance().GetGauge(bp_gauge), 1.0)
+        << "backpressure gauge should be 1.0 when pending > 128";
+
     ASSERT_TRUE(pipe.Stop().ok());
 }
 

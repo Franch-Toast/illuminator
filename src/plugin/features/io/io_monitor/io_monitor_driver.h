@@ -39,7 +39,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("io_monitor");
+        auto pipeline = MakePipeline("io_monitor");
         auto source = std::make_unique<EbpfIoMonitor>();
         ConfigValue cfg;
         source->Init(cfg);

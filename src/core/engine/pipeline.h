@@ -56,6 +56,17 @@
 
 namespace illuminator {
 
+inline size_t ResolveChannelCapacity(const std::string& size) {
+    if (size == "small") return 1024;
+    if (size == "large") return 16384;
+    return 4096;
+}
+
+inline DropPolicy ResolveDropPolicy(const std::string& policy) {
+    return policy == "drop_oldest" ? DropPolicy::kDropOldest
+                                   : DropPolicy::kDropNewest;
+}
+
 // ============================================================================
 // Pipeline — 单条异步数据处理管道
 // ============================================================================
@@ -97,6 +108,7 @@ public:
     }
 
     void AddSink(std::unique_ptr<SinkPlugin> sink) {
+        if (!sink) return;
         sinks_.push_back(std::shared_ptr<SinkPlugin>(sink.release()));
     }
 

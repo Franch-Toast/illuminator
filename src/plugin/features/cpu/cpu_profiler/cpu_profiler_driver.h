@@ -79,7 +79,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("cpu_profiler");
+        auto pipeline = MakePipeline("cpu_profiler");
         auto source = std::make_unique<CpuProfilerSource>();
         if (config_.IsNull()) {
             config_.Set("sample_freq", int64_t{49});

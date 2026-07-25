@@ -7,6 +7,7 @@ cc_test(
         "//src/core:engine",
         "//src/plugin/features:cpu_utilization_driver",
         "//src/plugin:infra",
+        "//src/plugin:api",
         "@googletest//:gtest_main",
     ],
 )

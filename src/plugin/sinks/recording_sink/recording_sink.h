@@ -30,12 +30,13 @@
 #include <nlohmann/json.hpp>
 
 #include "core/common/logging.h"
+#include "plugin/api/recording_interface.h"
 #include "plugin/api/sink_plugin.h"
-#include "cli/json_serializer.h"
+#include "core/common/json_serializer.h"
 
 namespace illuminator {
 
-struct RecordingSession {
+struct RecordingSinkSession {
     std::string file_path;
     std::string feature_name;
     std::chrono::system_clock::time_point started_at;
@@ -45,7 +46,7 @@ struct RecordingSession {
     bool active = false;
 };
 
-class RecordingSink : public SinkPlugin {
+class RecordingSink : public SinkPlugin, public RecordableInterface {
 public:
     const char* Name() const override { return "recording"; }
     const char* Version() const override { return "0.1.0"; }
@@ -86,7 +87,7 @@ public:
     }
 
     // 开始录制
-    Status StartRecording() {
+    Status StartRecordingWithStatus() {
         std::lock_guard<std::mutex> lk(mu_);
         if (recording_) {
             return Status::Error(StatusCode::kInvalidArgument,
@@ -136,8 +137,15 @@ public:
         return Status::Ok();
     }
 
+    void StartRecording() override {
+        auto status = StartRecordingWithStatus();
+        if (!status.ok()) {
+            IL_WARN("RecordingSink: StartRecording failed: {}", status.message());
+        }
+    }
+
     // 停止录制
-    Status StopRecording() {
+    Status StopRecordingWithStatus() {
         std::lock_guard<std::mutex> lk(mu_);
         if (!recording_) {
             return Status::Error(StatusCode::kInvalidArgument,
@@ -147,12 +155,29 @@ public:
         return Status::Ok();
     }
 
-    bool IsRecording() const {
+    void StopRecording() override {
+        auto status = StopRecordingWithStatus();
+        if (!status.ok()) {
+            IL_WARN("RecordingSink: StopRecording failed: {}", status.message());
+        }
+    }
+
+    bool IsRecording() const override {
         std::lock_guard<std::mutex> lk(mu_);
         return recording_;
     }
 
-    RecordingSession GetSession() const {
+    RecordingSession GetSession() const override {
+        std::lock_guard<std::mutex> lk(mu_);
+        RecordingSession session;
+        session.file_path = session_.file_path;
+        session.feature_name = session_.feature_name;
+        session.bytes_written = session_.bytes_written;
+        session.batches_written = session_.batches_written;
+        return session;
+    }
+
+    RecordingSinkSession GetFullSession() const {
         std::lock_guard<std::mutex> lk(mu_);
         return session_;
     }
@@ -179,52 +204,8 @@ private:
     uint64_t max_file_bytes_ = 100ULL * 1024 * 1024;
 
     bool recording_ = false;
-    RecordingSession session_;
+    RecordingSinkSession session_;
     std::unique_ptr<std::ofstream> file_;
-};
-
-// RecordingSinkRegistry — 按 Feature 名管理 RecordingSink 实例引用（支持 API 访问）
-// 注意：不拥有 RecordingSink 的所有权，Pipeline 拥有所有权。
-// Feature Stop 时必须 Unregister 以避免悬挂指针。
-class RecordingSinkRegistry {
-public:
-    static RecordingSinkRegistry& Instance() {
-        static RecordingSinkRegistry inst;
-        return inst;
-    }
-
-    void Register(const std::string& feature_name, RecordingSink* sink) {
-        std::lock_guard<std::mutex> lk(mu_);
-        sinks_[feature_name] = sink;
-    }
-
-    void Unregister(const std::string& feature_name) {
-        std::lock_guard<std::mutex> lk(mu_);
-        sinks_.erase(feature_name);
-    }
-
-    std::shared_ptr<RecordingSink> Get(const std::string& feature_name) {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = sinks_.find(feature_name);
-        if (it == sinks_.end() || !it->second) return nullptr;
-        // 返回不拥有所有权的 shared_ptr（custom deleter = no-op）
-        return std::shared_ptr<RecordingSink>(
-            it->second, [](RecordingSink*) {});
-    }
-
-    std::vector<std::string> ListNames() const {
-        std::lock_guard<std::mutex> lk(mu_);
-        std::vector<std::string> names;
-        names.reserve(sinks_.size());
-        for (const auto& [name, sink] : sinks_) {
-            if (sink) names.push_back(name);
-        }
-        return names;
-    }
-
-private:
-    mutable std::mutex mu_;
-    std::unordered_map<std::string, RecordingSink*> sinks_;
 };
 
 }  // namespace illuminator

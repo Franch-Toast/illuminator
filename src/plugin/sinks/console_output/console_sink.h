@@ -17,7 +17,7 @@
 
 #include "plugin/api/sink_plugin.h"
 #include "plugin/infra/plugin_registry.h"
-#include "cli/json_serializer.h"
+#include "core/common/json_serializer.h"
 
 namespace illuminator {
 

@@ -80,12 +80,12 @@ export const api = {
   featureStats: (name: string) => get<Record<string, unknown>>(`/api/v2/features/${name}/stats`),
 
   // ─── Recording API ────────────────────────────────────────────────────
-  startRecording: (name: string, filePath: string) =>
-    post<{ status: string }>(`/api/v1/features/${name}/record/start`, { file_path: filePath }),
+  startRecording: (name: string, outputDir: string) =>
+    post<{ status: string }>(`/api/v1/features/${name}/record/start`, { output_dir: outputDir }),
   stopRecording: (name: string) =>
     post<{ status: string }>(`/api/v1/features/${name}/record/stop`, {}),
   recordingStatus: (name: string) =>
-    get<{ recording: boolean; file_path?: string }>(`/api/v1/features/${name}/record/status`),
+    get<{ recording: boolean; file?: string }>(`/api/v1/features/${name}/record/status`),
 
   // ─── Resource Budget ──────────────────────────────────────────────────
   budget: () => get<BudgetResponse>('/api/v1/budget'),

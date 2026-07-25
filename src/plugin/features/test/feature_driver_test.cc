@@ -5,15 +5,25 @@
 #include "core/engine/infrastructure_manager.h"
 #include "plugin/features/cpu/cpu_utilization/cpu_utilization_driver.h"
 #include "plugin/infra/feature_registry.h"
-
 #include <gtest/gtest.h>
 
 namespace illuminator {
 namespace {
 
+class NoOpSink : public SinkPlugin {
+public:
+    const char* Name() const override { return "noop"; }
+    const char* Version() const override { return "1.0"; }
+    Status Init(const ConfigValue&) override { return Status::Ok(); }
+    Status Write(ConstDataBatchPtr) override { return Status::Ok(); }
+};
+
 class FeatureDriverIntegrationTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        FeatureDriver::SetSseSinkFactory([](const char*) -> std::unique_ptr<SinkPlugin> {
+            return std::make_unique<NoOpSink>();
+        });
         InfrastructureManager::Instance().Start(
             {.collect_pool_threads = 2, .sink_pool_threads = 2});
     }

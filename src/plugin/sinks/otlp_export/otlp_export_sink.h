@@ -1,3 +1,4 @@
+// STUB: OTLP export builds JSON but does not perform HTTP POST.
 // =============================================================================
 // 文件：otlp_export_sink.h
 // 模块：Illuminator 数据出口 - OTLP 指标导出

@@ -92,7 +92,7 @@ public:
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("cpu_utilization");
+        auto pipeline = MakePipeline("cpu_utilization");
 
         auto source = std::make_unique<CpuUtilizationSource>();
         ConfigValue cfg;

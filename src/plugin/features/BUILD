@@ -260,7 +260,7 @@ cc_library(
         "//src/ebpf_common:stack_trace_util",
         "//src/plugin:api",
         "//src/plugin:infra",
-        "//src/plugin/processors:stack_symbolizer",
+        "//src/plugin:common_utils",
         "@nlohmann_json//:json",
     ],
 )
@@ -277,6 +277,7 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
+        "//src/plugin/processors:stack_symbolizer",
     ],
 )
 
