@@ -9,7 +9,6 @@ vi.mock('./hooks/usePipelinePolling', () => ({
 
 vi.mock('./hooks/useDataSource', () => ({
   useConnectionStatus: vi.fn().mockReturnValue('disconnected'),
-  useResourceBudget: vi.fn().mockReturnValue(null),
   getDataSource: vi.fn().mockReturnValue({
     getStatus: () => 'disconnected',
     subscribe: () => () => {},
@@ -39,7 +38,6 @@ vi.mock('./services/apiClient', () => ({
     features: vi.fn().mockResolvedValue({ features: [] }),
     featureStart: vi.fn().mockResolvedValue({ status: 'ok' }),
     featureStop: vi.fn().mockResolvedValue({ status: 'ok' }),
-    budget: vi.fn().mockResolvedValue(null),
     startRecording: vi.fn().mockResolvedValue({ status: 'ok' }),
     stopRecording: vi.fn().mockResolvedValue({ status: 'ok' }),
   },
@@ -71,7 +69,6 @@ describe('App', () => {
     expect(screen.getByText('Network')).toBeInTheDocument()
     expect(screen.getByText('GPU')).toBeInTheDocument()
     expect(screen.getByText('Replay')).toBeInTheDocument()
-    expect(screen.getByText('Query')).toBeInTheDocument()
     expect(screen.getByText('System')).toBeInTheDocument()
   })
 

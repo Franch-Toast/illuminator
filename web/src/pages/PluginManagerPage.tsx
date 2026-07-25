@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { api, FeatureDescriptor, BudgetResponse } from '../services/apiClient'
+import { api, FeatureDescriptor } from '../services/apiClient'
 
 type FeatureEntry = FeatureDescriptor & {
   is_recording?: boolean
@@ -33,7 +33,6 @@ interface PluginAction {
 
 export default function PluginManagerPage() {
   const [features, setFeatures] = useState<FeatureEntry[]>([])
-  const [budget, setBudget] = useState<BudgetResponse | null>(null)
   const [pendingActions, setPendingActions] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all')
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
@@ -46,10 +45,6 @@ export default function PluginManagerPage() {
       const featRes = await api.features()
       setFeatures(featRes.features)
     } catch { /* backend not available */ }
-    try {
-      const budgetRes = await api.budget()
-      setBudget(budgetRes)
-    } catch { /* budget endpoint not implemented yet */ }
   }, [])
 
   useEffect(() => {
@@ -138,38 +133,6 @@ export default function PluginManagerPage() {
           {reloadStatus === 'loading' ? 'Scanning...' : reloadStatus === 'success' ? 'Reloaded!' : 'Hot Reload Plugins'}
         </button>
       </div>
-
-      {/* Resource Budget Overview */}
-      {budget && (
-        <div style={{
-          display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 20,
-        }}>
-          <BudgetCard
-            label="CPU Overhead"
-            value={`${budget.usage.cpu_pct.toFixed(1)}%`}
-            limit={`/ ${budget.limits.max_cpu_pct}%`}
-            pct={budget.usage.cpu_pct / budget.limits.max_cpu_pct * 100}
-          />
-          <BudgetCard
-            label="Memory"
-            value={formatBytes(budget.usage.rss_bytes)}
-            limit={`/ ${formatBytes(budget.limits.max_memory_bytes)}`}
-            pct={budget.usage.rss_bytes / budget.limits.max_memory_bytes * 100}
-          />
-          <BudgetCard
-            label="Active Features"
-            value={`${budget.usage.active_features}`}
-            limit={`/ ${totalFeatures}`}
-            pct={budget.usage.active_features / Math.max(totalFeatures, 1) * 100}
-          />
-          <BudgetCard
-            label="eBPF Probes"
-            value={`${budget.usage.ebpf_probes}`}
-            limit={`/ ${budget.limits.max_ebpf_probes}`}
-            pct={budget.usage.ebpf_probes / budget.limits.max_ebpf_probes * 100}
-          />
-        </div>
-      )}
 
       {/* Filter Bar */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
@@ -377,28 +340,6 @@ function MiniStat({ label, value, danger }: { label: string; value: string; dang
       </div>
     </div>
   )
-}
-
-function BudgetCard({ label, value, limit, pct }: { label: string; value: string; limit: string; pct: number }) {
-  const barColor = pct < 50 ? '#4ade80' : pct < 80 ? '#f59e0b' : '#ef4444'
-  return (
-    <div style={{ background: colors.cardBg, border: `1px solid ${colors.cardBorder}`, borderRadius: 8, padding: 14 }}>
-      <div style={{ fontSize: 10, color: colors.textMuted, marginBottom: 6, textTransform: 'uppercase' }}>{label}</div>
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
-        <span style={{ fontSize: 18, fontWeight: 700, color: colors.textPrimary }}>{value}</span>
-        <span style={{ fontSize: 11, color: colors.textMuted }}>{limit}</span>
-      </div>
-      <div style={{ height: 3, background: '#1f2228', borderRadius: 2, marginTop: 8, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${Math.min(pct, 100)}%`, background: barColor, borderRadius: 2, transition: 'width 0.3s' }} />
-      </div>
-    </div>
-  )
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)}KB`
-  return `${(bytes / 1048576).toFixed(0)}MB`
 }
 
 function formatUptime(ms: number): string {

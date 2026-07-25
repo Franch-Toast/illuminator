@@ -199,7 +199,6 @@ test.describe('Illuminator E2E Smoke Tests', () => {
       { path: '/network' },
       { path: '/gpu' },
       { path: '/replay' },
-      { path: '/query' },
       { path: '/plugins' },
       { path: '/system' },
     ]

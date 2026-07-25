@@ -7,7 +7,7 @@
 // 拆分自 main.cc，职责单一化：API 路由注册与请求处理。
 //
 // 【文件结构】
-//   1. 基础工具函数（JsonError、SetupAuthMiddleware）
+//   1. 基础工具函数（JsonError）
 //   2. RegisterApiRoutes() — 核心 API 路由
 //      - /healthz:                健康检查（无需认证）
 //      - /api/v1/pipelines:       管道列表（FeatureBus 管理的管道）
@@ -26,10 +26,6 @@
 //   5. 插件 API
 //      - /api/v1/plugins/reload: 插件热重载
 //      - /api/v1/plugins:        插件列表
-//
-// 【认证机制】
-//   所有 /api/ 路径的请求都需要 Bearer Token 认证（通过 SetupAuthMiddleware 设置）。
-//   /healthz 和 /metrics 不需要认证。
 //
 // 【API 版本演进】
 //   v1 路由保留 pipelines/collect/channel_stats/metrics 等核心运维端点。
@@ -71,56 +67,6 @@ inline void JsonError(httplib::Response& res, const std::string& msg,
                       int status = 500) {
     res.status = status;
     res.set_content(json{{"error", msg}}.dump() + "\n", "application/json");
-}
-
-// ============================================================================
-// SetupAuthMiddleware — 设置认证中间件
-// ============================================================================
-//
-// 拦截所有 /api/ 路径的请求，验证 Authorization: Bearer <token> 头。
-// /healthz 和 /metrics 不需要认证（用于健康检查和 Prometheus 抓取）。
-//
-// 如果 auth_token 为空，表示不需要认证，中间件不生效。
-//
-// 参数：
-//   srv:        httplib::Server 引用
-//   auth_token: 认证 Token（空字符串表示不需要认证）
-inline void SetupAuthMiddleware(httplib::Server& srv,
-                                const std::string& auth_token) {
-    if (auth_token.empty()) return;
-
-    srv.set_pre_routing_handler(
-        [auth_token](const httplib::Request& req, httplib::Response& res) {
-            if (req.path == "/healthz" || req.path == "/metrics") {
-                return httplib::Server::HandlerResponse::Unhandled;
-            }
-            if (req.path.find("/api/") != 0) {
-                return httplib::Server::HandlerResponse::Unhandled;
-            }
-
-            std::string expected = "Bearer " + auth_token;
-
-            auto it = req.headers.find("Authorization");
-            if (it != req.headers.end() && it->second == expected) {
-                return httplib::Server::HandlerResponse::Unhandled;
-            }
-
-            if (req.has_param("token") && req.get_param_value("token") == auth_token) {
-                return httplib::Server::HandlerResponse::Unhandled;
-            }
-
-            if (it == req.headers.end()) {
-                res.status = 401;
-                res.set_content(
-                    R"json({"error":"missing Authorization header (or ?token= query param)"})json",
-                    "application/json");
-            } else {
-                res.status = 403;
-                res.set_content(R"({"error":"invalid token"})",
-                                "application/json");
-            }
-            return httplib::Server::HandlerResponse::Handled;
-        });
 }
 
 // ============================================================================
@@ -481,8 +427,6 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                     json{{"plugins", plugins}}.dump() + "\n",
                     "application/json");
             });
-
-    // /api/v1/query 和 /api/v1/budget 端点待实现（需要完善 storage deps）
 }
 
 

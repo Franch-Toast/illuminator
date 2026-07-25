@@ -2,7 +2,6 @@ import React, { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import TimeControls from './components/TimeControls/TimeControls'
 import StatusBar from './components/Layout/StatusBar'
-import ResourceBudget from './components/Layout/ResourceBudget'
 import { ConnectionStatus } from './components/shared'
 import ExportControl from './components/Layout/ExportControl'
 import RecordingControls from './components/RecordingControls'
@@ -17,7 +16,6 @@ const MemoryPage = lazy(() => import('./pages/MemoryPage'))
 const IoPage = lazy(() => import('./pages/IoPage'))
 const NetworkPage = lazy(() => import('./pages/NetworkPage'))
 const GpuPage = lazy(() => import('./pages/GpuPage'))
-const QueryConsole = lazy(() => import('./pages/QueryConsole'))
 const SystemPage = lazy(() => import('./pages/SystemPage'))
 const ReplayPage = lazy(() => import('./pages/ReplayPage'))
 const PluginMgrPage = lazy(() => import('./pages/PluginManagerPage'))
@@ -56,7 +54,6 @@ const navItems = [
   { path: '/network', label: 'Network', icon: '🌐' },
   { path: '/gpu', label: 'GPU', icon: '🎮' },
   { path: '/replay', label: 'Replay', icon: '📂' },
-  { path: '/query', label: 'Query', icon: '🔍' },
   { path: '/plugins', label: 'Plugins', icon: '🔌' },
   { path: '/system', label: 'System', icon: '⚙️' },
 ]
@@ -152,7 +149,6 @@ export default function App() {
           <ExportControl />
           <ConnectionStatus />
           {sseConnected && <span style={{ fontSize: 10, color: '#34d399' }}>SSE</span>}
-          <ResourceBudget />
         </div>
       </nav>
 
@@ -170,7 +166,6 @@ export default function App() {
                 <Route path="/network" element={<NetworkPage />} />
                 <Route path="/gpu" element={<GpuPage />} />
                 <Route path="/replay" element={<ReplayPage />} />
-                <Route path="/query" element={<QueryConsole />} />
                 <Route path="/plugins" element={<PluginMgrPage />} />
                 <Route path="/system" element={<SystemPage />} />
               </Routes>

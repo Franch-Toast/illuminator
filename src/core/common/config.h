@@ -166,7 +166,6 @@ struct GlobalConfig {
     struct ServerConfig {
         bool http_enabled = true;
         std::string http_listen = "127.0.0.1:9527";
-        std::string auth_token;
     } server;
 
     // 管道引擎配置

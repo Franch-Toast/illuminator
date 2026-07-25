@@ -30,9 +30,6 @@ server:
     enabled: true
     listen: "127.0.0.1:9527"          # REST API + SSE + Prometheus /metrics (默认仅本机)
     # listen: "0.0.0.0:9527"          # 如需外部访问取消此注释
-  # auth_token: ""                    # Bearer Token 认证（空 = 不启用认证）
-  #                                   # 启用后所有 /api/* 请求需携带 Authorization: Bearer <token>
-  #                                   # /healthz 和 /metrics 端点免认证
 
 # ---- 管道引擎配置 ----
 engine:

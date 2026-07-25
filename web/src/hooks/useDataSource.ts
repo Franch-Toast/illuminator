@@ -32,31 +32,6 @@ export function useConnectionStatus(): ConnectionStatus {
   return status
 }
 
-export interface BudgetInfo {
-  usage: { rss_bytes: number; cpu_pct: number; active_features: number; ebpf_probes: number }
-  limits: { max_memory_bytes: number; max_cpu_pct: number; max_ebpf_probes: number }
-  exceeded: boolean
-}
-
-export function useResourceBudget(pollMs = 5000): BudgetInfo | null {
-  const [budget, setBudget] = useState<BudgetInfo | null>(null)
-
-  useEffect(() => {
-    const fetchBudget = async () => {
-      try {
-        const { api } = await import('../services/apiClient')
-        const resp = await (api as unknown as { budget: () => Promise<BudgetInfo> }).budget()
-        setBudget(resp)
-      } catch { /* ignore */ }
-    }
-    fetchBudget()
-    const timer = setInterval(fetchBudget, pollMs)
-    return () => clearInterval(timer)
-  }, [pollMs])
-
-  return budget
-}
-
 export interface UseDataSourceOptions<T> {
   feature: string
   transform: (batch: DataBatch) => T | null | undefined

@@ -171,7 +171,6 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
     }
 
     illuminator::HttpServer http_server;
-    illuminator::SetupAuthMiddleware(http_server.server(), config.server.auth_token);
     illuminator::RegisterApiRoutes(http_server.server());
 
     // SSE data plane

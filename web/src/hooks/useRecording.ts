@@ -7,6 +7,7 @@
  */
 
 import { useState, useCallback } from 'react'
+import { api } from '../services/apiClient'
 import { dataBus } from '../services/dataBus'
 
 export interface RecordingState {
@@ -24,11 +25,7 @@ export function useRecording() {
 
   const startRecording = useCallback(async (feature: string) => {
     try {
-      await fetch(`/api/v1/features/${feature}/record/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ output_dir: '/tmp/illuminator_data' }),
-      })
+      await api.startRecording(feature, '/tmp/illuminator_data')
       setState({ isRecording: true, startTime: Date.now(), feature })
     } catch (e) {
       console.error('Failed to start recording:', e)
@@ -38,7 +35,7 @@ export function useRecording() {
   const stopRecording = useCallback(async () => {
     if (!state.feature) return
     try {
-      await fetch(`/api/v1/features/${state.feature}/record/stop`, { method: 'POST' })
+      await api.stopRecording(state.feature)
       setState({ isRecording: false, startTime: null, feature: null })
     } catch (e) {
       console.error('Failed to stop recording:', e)

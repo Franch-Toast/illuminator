@@ -218,6 +218,33 @@ TEST(PipelineIntegrationTest, ChannelStatisticsAccessible) {
     EXPECT_FALSE(pipe.ChannelBackpressured());
 }
 
+// 测试：EngineConfig channel.size 经 InfrastructureManager 传递到 Pipeline。
+TEST(PipelineIntegrationTest, ChannelConfigFromEngineConfig) {
+    auto& infra = InfrastructureManager::Instance();
+    if (infra.IsStarted()) {
+        ASSERT_TRUE(infra.Stop().ok());
+    }
+
+    EngineConfig config;
+    config.channel.size = "large";
+    config.collect_pool_threads = 1;
+    config.sink_pool_threads = 1;
+    ASSERT_TRUE(infra.Start(config).ok());
+
+    const auto& ch = infra.GetChannelConfig();
+    auto pipe = std::make_unique<Pipeline>(
+        "test_channel_config",
+        ResolveChannelCapacity(ch.size),
+        ResolveDropPolicy(ch.drop_policy),
+        ch.backpressure_high,
+        ch.backpressure_low);
+
+    EXPECT_EQ(ch.size, "large");
+    EXPECT_EQ(pipe->ChannelCapacity(), 16384u);
+
+    ASSERT_TRUE(infra.Stop().ok());
+}
+
 // 测试：RunProcessors 直接执行 Processor 链（不经过异步通道）。
 TEST(PipelineIntegrationTest, RunProcessorsDirectlyAppliesProcessorChain) {
     Pipeline pipe("test_run_proc");

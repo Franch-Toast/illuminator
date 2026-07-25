@@ -53,18 +53,11 @@ export interface FeatureEntry {
   uptime_ms: number
 }
 
-export interface BudgetResponse {
-  usage: { rss_bytes: number; cpu_pct: number; active_features: number; ebpf_probes: number }
-  limits: { max_memory_bytes: number; max_cpu_pct: number; max_ebpf_probes: number }
-  exceeded: boolean
-}
-
 export const api = {
   healthz: () => get<{ status: string; version: string }>('/healthz'),
   pipelines: () => get<{ pipelines: PipelineEntry[] }>('/api/v1/pipelines'),
   channelStats: () => get<{ channels: ChannelEntry[] }>('/api/v1/channel_stats'),
   internalMetrics: () => get('/api/v1/internal_metrics'),
-  query: (sql: string) => post<{ rows?: Record<string, unknown>[] }>('/api/v1/query', { query: sql }),
 
   // ─── v2 Feature API (RFC v3 FeatureBus) ──────────────────────────────
   features: () => get<{ features: FeatureDescriptor[] }>('/api/v2/features'),
@@ -86,9 +79,6 @@ export const api = {
     post<{ status: string }>(`/api/v1/features/${name}/record/stop`, {}),
   recordingStatus: (name: string) =>
     get<{ recording: boolean; file?: string }>(`/api/v1/features/${name}/record/status`),
-
-  // ─── Resource Budget ──────────────────────────────────────────────────
-  budget: () => get<BudgetResponse>('/api/v1/budget'),
 
   // ─── Plugin Hot-reload ────────────────────────────────────────────────
   pluginsReload: () => post<{ status: string; loaded: number; plugins: string[] }>('/api/v1/plugins/reload', {}),

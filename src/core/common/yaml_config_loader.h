@@ -142,9 +142,6 @@ private:
                 if (http["listen"])
                     config.server.http_listen = http["listen"].as<std::string>();
             }
-            // 认证 token（可选）
-            if (server["auth_token"])
-                config.server.auth_token = server["auth_token"].as<std::string>();
         }
 
         // 解析 [engine] 节
