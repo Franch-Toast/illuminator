@@ -17,7 +17,6 @@
 
 #include "core/engine/feature_driver.h"
 #include "plugin/infra/feature_registry.h"
-#include "server/sse_handler.h"
 #include "plugin/features/cpu/cpu_utilization/cpu_utilization_source.h"
 
 namespace illuminator {
@@ -103,7 +102,7 @@ protected:
         source->Init(cfg);
 
         pipeline->SetSource(std::move(source));
-        pipeline->AddSink(std::make_unique<SseSink>("cpu_utilization"));
+        pipeline->AddSink(MakeSseSink(Name()));
         return pipeline;
     }
 

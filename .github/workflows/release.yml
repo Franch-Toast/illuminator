@@ -142,7 +142,7 @@ jobs:
             ```bash
             docker run -d --name illuminator \
               --cap-add CAP_BPF --cap-add CAP_PERFMON \
-              -p 9527:9527 -p 9528:9528 \
+              -p 9527:9527 \
               -v illuminator-data:/var/lib/illuminator \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.docker.outputs.version }}
             ```

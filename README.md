@@ -113,56 +113,33 @@ illuminator/
 │   └── onboarding_guide.md     #   新人入门指南
 │
 ├── src/                        # ===== 全部 C++ 源代码 =====
+│   ├── cli/                    # 命令行入口 (daemon / collect / top / plugins / version)
 │   ├── core/                   # 核心引擎
-│   │   ├── common/             #   Status, Logger(spdlog), Config, StringUtil, SelfObservability
-│   │   ├── config/             #   YAML 配置加载器 (yaml-cpp)
-│   │   ├── engine/             #   PipelineController, AsyncChannel, TimerWheel, DataBatch
-│   │   ├── memory/             #   Arena(零拷贝+OOM 回调), LockFreeQueue(MPSC 无锁环形缓冲,运行时容量)
-│   │   └── threading/          #   ThreadPool, ThreadUtil(线程命名)
-│   │
-│   ├── plugin/                 # 插件框架
-│   │   ├── api/                #   插件接口 (Source/Processor/Aggregator/Sink) + C ABI
-│   │   ├── manager/            #   PluginRegistry + SO Loader + WASM Runtime
-│   │   └── builtin/            #   内建插件强链接清单
-│   │
-│   ├── ebpf/                   # eBPF 子系统
-│   │   ├── include/            #   vmlinux.h, event_types.h, bpf_compat.h
-│   │   ├── probes/             #   BPF 探针源码 (按子系统分类)
-│   │   │   ├── cpu/            #     cpu_profiler.bpf.c, cpu_sampler.bpf.c
-│   │   │   ├── sched/          #     sched_analyzer.bpf.c, sched_tracer.bpf.c, offcpu_profiler.bpf.c
-│   │   │   ├── io/             #     bio_latency.bpf.c
-│   │   │   ├── net/            #     net_tracer.bpf.c
-│   │   │   └── memory/         #     mem_tracer.bpf.c
-│   │   └── loader/             #   FeatureProbe, StackTraceUtil
-│   │
-│   ├── plugin/                 # 插件框架 + 所有插件
-│   │   ├── api/                #   插件接口 (Source/Processor/Aggregator/Sink) + C ABI
-│   │   ├── manager/            #   PluginRegistry + SO Loader
-│   │   ├── builtin/            #   内建插件强链接清单
-│   │   ├── features/           #   FeatureDriver 实现 + FeatureRegistry
-│   │   ├── sources/            #   Source 插件 (按子系统分类)
-│   │   │   ├── ebpf_skeleton_source.h     # eBPF Push Source 基类模板
-│   │   │   ├── ebpf_skeleton_pull_source.h# eBPF Pull Source 基类模板
-│   │   │   ├── cpu/            #   cpu_profiler, cpu_utilization, process_cpu, proc_stat_reader
-│   │   │   ├── sched/          #   sched_analyzer, ebpf_sched_tracer, offcpu_profiler
-│   │   │   ├── io/             #   ebpf_io_monitor
-│   │   │   └── net/            #   ebpf_net_tracer
-│   │   ├── processors/         #   passthrough, filter, stack_symbolizer, stack_merger
-│   │   ├── aggregators/        #   cpu_stats_aggregator
-│   │   └── sinks/              #   console, file, local_storage, pprof, prometheus, otlp, recording
-│   │
-│   ├── server/                 # HTTP/SSE 服务
-│   │   ├── http_server.h       #   cpp-httplib 封装
-│   │   ├── api_routes.h        #   REST API 路由
-│   │   ├── sse_handler.h       #   SSE 实时推送
-│   │   └── storage/            #   存储抽象层
-│   │       ├── storage_backend.h #   StorageBackend 接口 + StorageFactory
-│   │   └── sqlite_backend/     #   SQLite 实现 (WAL 模式)
-│   │
-│   ├── server/                 # HTTP + SSE 服务（见上方 server/ 部分）
-│   │
-│   └── cli/                    # 命令行入口
-│       └── main.cc             #   daemon / collect / top / plugins / version
+│   │   ├── common/             # Status, Logger, Config, yaml_config_loader, data_batch
+│   │   ├── engine/             # Pipeline, FeatureDriver, FeatureBus, TimerWheel, AsyncChannel
+│   │   ├── memory/             # Arena, LockFreeQueue
+│   │   └── threading/          # ThreadPool, ThreadUtil
+│   ├── ebpf_common/            # eBPF 共享基础设施
+│   │   ├── include/            # vmlinux.h, event_types.h, bpf_compat.h, common.bpf.h
+│   │   ├── loader/             # bpf_util, feature_probe, stack_trace_util, bpf_stats_reader
+│   │   └── bpf_probe.bzl       # BPF 编译与 skeleton 生成 Bazel 规则
+│   ├── plugin/                 # 插件框架 + 全部插件实现
+│   │   ├── api/                # 插件接口 (Source/Processor/Aggregator/Sink) + EbpfSourceBase + C ABI
+│   │   ├── infra/              # PluginRegistry, FeatureRegistry, SO Loader, builtin_plugins
+│   │   ├── features/           # FeatureDriver + Source 实现 + BPF 探针 (.bpf.c)
+│   │   │   ├── cpu/            # cpu_profiler, cpu_utilization, process_cpu
+│   │   │   ├── sched/          # sched_analyzer, offcpu_profiler
+│   │   │   ├── io/             # io_monitor
+│   │   │   └── net/            # net_tracer
+│   │   ├── processors/         # passthrough, filter, stack_symbolizer, stack_merger
+│   │   ├── aggregators/        # cpu_stats_aggregator
+│   │   └── sinks/              # console, file, local_storage, pprof, prometheus, otlp, sse, recording, fanout
+│   └── server/                 # HTTP/SSE 服务 + 存储层
+│       ├── http_server.h       # cpp-httplib 封装
+│       ├── api_routes.h        # REST API v1 路由
+│       ├── api_v2_routes.h     # REST API v2 路由 (Feature 热插拔)
+│       ├── sse_handler.h       # SSE 实时推送
+│       └── storage/            # StorageBackend 接口 + SQLite 实现
 │
 ├── third_party/                # ===== 第三方库 (vendored) =====
 │   └── cpp-httplib/            #   cpp-httplib (单头文件 HTTP 服务器)
@@ -184,7 +161,7 @@ illuminator/
     │   │   └── timeSeriesStore.ts#   前端 RingBuffer 时间序列缓存
     │   ├── components/         #   共享 UI 组件
     │   │   ├── TimeControls/   #     全局时间控制器 (LIVE/PAUSED, 窗口选择)
-    │   │   └── Layout/         #     StatusBar (管道状态, WS 连接)
+    │   │   └── Layout/         #     StatusBar (管道状态, SSE 连接)
     │   ├── hooks/              #   自定义 hooks
     │   │   ├── usePolling.ts   #     通用轮询 hook (响应全局时间模式)
     │   │   ├── usePipelinePolling.ts# 管道状态轮询
@@ -459,7 +436,7 @@ pipelines:
         window_sec: 30
     sinks:
       - type: local_storage
-      - type: stream_sink
+      - type: sse_sink
 ```
 
 ---
@@ -555,22 +532,26 @@ src/
 │   ├── memory/test/           # Arena, LockFreeQueue 测试
 │   ├── threading/test/        # ThreadPool 测试
 │   └── engine/test/           # TimerWheel, AsyncChannel, DataBatch, Pipeline 集成测试
-├── processors/
-│   ├── passthrough/test/      # PassthroughProcessor 测试
-│   ├── filter/test/           # FilterProcessor 测试
-│   ├── stack_merger/test/     # StackMergerProcessor 测试
-│   └── stack_symbolizer/test/ # StackSymbolizerProcessor 测试
-├── aggregators/
-│   └── cpu_stats_aggregator/test/  # CpuStatsAggregator 测试
-└── sinks/
-    ├── console_output/test/        # ConsoleSink 测试
-    ├── fanout/test/                # SinkFanout 多路分发测试
-    ├── file_export/test/           # FileExportSink 测试
-    ├── local_storage/test/         # LocalStorageSink + SQLite 测试
-    ├── otlp_export/test/           # OtlpExportSink 测试
-    ├── pprof_export/test/          # PprofExportSink 测试
-    ├── prometheus_exposition/test/ # PrometheusSink 测试
-    └── stream_sink/test/           # StreamSink + StreamBuffer 测试
+├── plugin/
+│   ├── processors/
+│   │   ├── passthrough/test/      # PassthroughProcessor 测试
+│   │   ├── filter/test/           # FilterProcessor 测试
+│   │   ├── stack_merger/test/     # StackMergerProcessor 测试
+│   │   └── stack_symbolizer/test/ # StackSymbolizerProcessor 测试
+│   ├── aggregators/
+│   │   └── cpu_stats_aggregator/test/  # CpuStatsAggregator 测试
+│   ├── sinks/
+│   │   ├── console_output/test/        # ConsoleSink 测试
+│   │   ├── fanout/test/                # SinkFanout 多路分发测试
+│   │   ├── file_export/test/           # FileExportSink 测试
+│   │   ├── local_storage/test/         # LocalStorageSink + SQLite 测试
+│   │   ├── otlp_export/test/           # OtlpExportSink 测试
+│   │   ├── pprof_export/test/          # PprofExportSink 测试
+│   │   └── prometheus_exposition/test/ # PrometheusSink 测试
+│   ├── features/test/         # FeatureDriver 测试
+│   └── test/                  # PluginRegistry 测试
+├── server/
+│   └── test/                  # SSE handler、HTTP 路由测试
 ```
 
 ### 运行测试
@@ -659,12 +640,11 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 
 | 文档 | 说明 |
 |------|------|
-| [dynamic_plugin_architecture.md](docs/dynamic_plugin_architecture.md) | 动态插件架构设计 v2.0（热插拔 + 录制回放） |
-| [cpu_monitoring_design.md](docs/cpu_monitoring_design.md) | CPU 监控功能设计（USE 方法论 + PMC + PSI） |
+| [architecture_overview.md](docs/architecture_overview.md) | 系统架构全景分析 |
 | [pipeline_v3_design.md](docs/pipeline_v3_design.md) | Pipeline v3 事件驱动架构设计 |
-| [perf_ebpf_comparison.md](docs/perf_ebpf_comparison.md) | 与 perf_ebpf 的架构对比分析 |
-| [architecture_audit_v4.md](docs/architecture_audit_v4.md) | 全面架构审计报告 (P0-P2 缺陷追踪) |
-| [wasm_runtime_design.md](docs/wasm_runtime_design.md) | WASM 沙箱插件系统设计与路线图 |
+| [ebpf_plugin_redesign.md](docs/ebpf_plugin_redesign.md) | eBPF 插件基类重设计 RFC（EbpfSourceBase） |
+| [architecture_audit_report.md](docs/architecture_audit_report.md) | 全面架构审计报告 (P0-P2 缺陷追踪) |
+| [frontend_architecture_design.md](docs/frontend_architecture_design.md) | 前端架构设计 |
 | [onboarding_guide.md](docs/onboarding_guide.md) | 新人入门指南 |
 
 ---

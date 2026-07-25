@@ -91,6 +91,7 @@ cc_library(
         ":threading",
         "//src/plugin:api",
         "//src/plugin/sinks:recording_sink",
+        "//src/plugin/sinks:sse_sink",
         "//src/server/storage:storage",
     ],
 )

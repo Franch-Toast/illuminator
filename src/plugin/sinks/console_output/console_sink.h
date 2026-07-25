@@ -49,7 +49,7 @@ public:
     //   batch - 要输出的数据批次
     // 返回:
     //   Status::Ok() 表示操作成功
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
 
         // 输出 Record 数据

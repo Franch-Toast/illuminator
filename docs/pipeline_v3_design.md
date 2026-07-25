@@ -666,22 +666,20 @@ src/
 │   └── threading/
 │       ├── thread_pool.h          # 通用线程池
 │       └── thread_util.h          # 线程工具（SetThreadName）
-├── ebpf/                          # eBPF 探针程序（C 源码）+ 加载器
+├── ebpf_common/                   # eBPF 共享基础设施 (include, loader, bpf_probe.bzl)
 ├── plugin/
 │   ├── api/
 │   │   ├── plugin_api.h           # Plugin 基类 + C ABI 接口
 │   │   ├── source_plugin.h        # Source 插件抽象（Pull/Push 模式）
 │   │   ├── processor_plugin.h     # Processor 插件抽象
 │   │   ├── aggregator_plugin.h    # Aggregator 插件抽象
-│   │   └── sink_plugin.h          # Sink 插件抽象
-│   ├── builtin/                   # 内置插件注册
-│   ├── manager/                   # 插件管理器（注册表、so_loader、wasm_runtime）
-│   ├── features/                  # FeatureDriver 编排层
-│   ├── sources/                   # 数据源插件（CPU/内存/IO/网络/调度）
+│   │   ├── sink_plugin.h          # Sink 插件抽象
+│   │   └── ebpf_source_base.h     # EbpfSourceBase 统一 eBPF Source 基类
+│   ├── infra/                     # PluginRegistry, FeatureRegistry, SO Loader, builtin_plugins
+│   ├── features/                  # FeatureDriver + Source 实现 + BPF 探针 (.bpf.c)
 │   ├── processors/                # 处理器插件（过滤/透传/符号化/栈合并）
 │   ├── aggregators/               # 聚合器插件（CPU 统计聚合）
-│   └── sinks/                     # 数据出口插件（10+ 种）
-│       └── recording_sink/        # 录制 Sink（供 API 录制回放）
+│   └── sinks/                     # 数据出口插件（console, sse, recording 等）
 └── server/
     ├── http_server.h              # HTTP 服务器封装
     ├── api_routes.h               # REST API 路由 (控制面)

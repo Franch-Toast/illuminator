@@ -57,7 +57,7 @@ public:
 
         collect_pool_ = std::make_unique<ThreadPool>(
             config.collect_pool_threads, "collecter");
-        sink_pool_ = std::make_unique<ThreadPool>(sink_threads, "sink-write");
+        sink_pool_ = std::make_shared<ThreadPool>(sink_threads, "sink-write");
 
         timer_.Start();
 
@@ -83,7 +83,7 @@ public:
 
     TimerWheel& GetTimerWheel() { return timer_; }
     ThreadPool* GetCollectPool() { return collect_pool_.get(); }
-    ThreadPool* GetSinkPool() { return sink_pool_.get(); }
+    std::shared_ptr<ThreadPool> GetSinkPool() { return sink_pool_; }
 
 private:
     InfrastructureManager() = default;
@@ -95,7 +95,7 @@ private:
     bool started_ = false;
     TimerWheel timer_;
     std::unique_ptr<ThreadPool> collect_pool_;
-    std::unique_ptr<ThreadPool> sink_pool_;
+    std::shared_ptr<ThreadPool> sink_pool_;
 };
 
 }  // namespace illuminator

@@ -64,7 +64,7 @@ public:
     //   batch - 包含 Record 的 DataBatch
     // 返回:
     //   Status::Ok() 表示成功
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch || batch->Empty()) return Status::Ok();
 
         // 手工拼接 OTLP JSON 载荷

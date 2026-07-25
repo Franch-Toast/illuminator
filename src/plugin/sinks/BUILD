@@ -1,6 +1,20 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
+    name = "sse_sink",
+    hdrs = ["sse_sink/sse_sink.h"],
+    strip_include_prefix = "",
+    include_prefix = "plugin/sinks",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/plugin:api",
+        "//src/core:common",
+        "//src/core:data",
+        "//src/cli:json_serializer",
+    ],
+)
+
+cc_library(
     name = "console_output",
     hdrs = ["console_output/console_sink.h"],
     strip_include_prefix = "",

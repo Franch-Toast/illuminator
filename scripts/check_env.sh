@@ -362,7 +362,7 @@ check_runtime_env() {
 
     # --- 网络端口 ---
     echo -e "\n${BLUE}[端口可用性]${NC}"
-    for port in 9527 9528; do
+    for port in 9527; do
         if ! ss -tlnp 2>/dev/null | grep -q ":${port} " && \
            ! netstat -tlnp 2>/dev/null | grep -q ":${port} "; then
             check_pass "端口 $port 可用"

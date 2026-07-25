@@ -50,7 +50,7 @@ public:
     //   batch - 包含 StackSample 的数据批次
     // 返回:
     //   Status::Ok() 表示成功
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
 
         for (auto& sample : batch->stack_samples()) {

@@ -13,8 +13,8 @@
 | 插件系统 | **B-** | 接口设计优秀；双注册系统冗余，eBPF 三种实现风格不统一，C ABI 不成熟 |
 | Server 层 | **C+** | 控制面/数据面分离好；v1/v2 API 割裂，Auth 与 SSE 不兼容，多个端点缺失 |
 | 前端架构 | **B** | SSE 数据流设计出色；页面模式不统一，存在死代码，可访问性差 |
-| 目录结构 | **B+** | 实际结构合理；README 严重过时（~30% 准确度） |
-| **综合** | **B** | 核心架构优秀，正处于架构迁移期（v1→v2、WebSocket→SSE），需要清理收尾 |
+| 目录结构 | **B+** | 实际结构合理；README 与 docs 已同步更新 |
+| **综合** | **B** | 核心架构优秀，WebSocket→SSE 迁移已完成，剩余 v1/v2 API 统一等待办 |
 
 ---
 
@@ -28,14 +28,14 @@
 | 2 | **Auth 与 SSE 不兼容**: 启用 `auth_token` 后浏览器 EventSource 无法发送 Authorization header | Server | 启用认证即破坏实时数据 |
 | 3 | **`/api/v1/query` 和 `/api/v1/budget` 端点缺失**: 前端调用但后端未注册 | Server | QueryConsole 页面无法工作 |
 | 4 | **`CpuUtilizationDriver::SetConfig` 忽略 JSON 输入**: 传入的配置被丢弃 | 插件 | 前端配置修改无效果 |
-| 5 | **README.md ~30% 准确度**: 仍描述 WebSocket、旧目录结构、不存在的文件 | 文档 | 严重误导新贡献者 |
+| 5 | ~~**README.md ~30% 准确度**~~ | 文档 | 已修复：目录结构、死链接、SSE 端口 |
 | 6 | **CollectPool/Timer 关机竞态**: 定时器触发的采集任务可能在 InfrastructureManager::Stop() 销毁池后仍在运行 | 引擎 | 关机时 use-after-free |
 
 ### P1 — 应该修复（架构冗余/一致性）
 
 | # | 问题 | 模块 | 影响 |
 |---|------|------|------|
-| 7 | **双注册系统**: PluginRegistry + FeatureRegistry 并行，FeatureDriver 从不使用 PluginRegistry 创建插件 | 插件 | 复杂度高，外部插件无法成为 Feature |
+| 7 | **双注册系统**: PluginRegistry + FeatureRegistry 并行，FeatureDriver 从不使用 PluginRegistry 创建插件 | 插件 | 有意设计：Registry 为工厂/内省，Driver 硬编码组件获编译期类型安全 |
 | 8 | **eBPF 三种实现模式**: 模板(67行) vs 手写(924行)，缺乏统一基类 | 插件 | 维护成本高，bug 需同步三处 |
 | 9 | **v1/v2 API 割裂**: `/api/v1/pipelines` vs `/api/v2/features` 查询同一个 FeatureBus | Server | 术语混乱，无弃用计划 |
 | 10 | **v2 路由内联在 main.cc (~250行)**: 未提取到独立模块 | Server | 不可测试 |
@@ -57,7 +57,7 @@
 | 21 | **`mem_tracer.bpf.c` 不在 BUILD 中**: 源文件存在但无构建目标 | 死代码 | 文件孤儿 |
 | 22 | **前端死代码**: `FeatureConfigPanel`、`DataEmptyState`、`ConnectionIndicator`、`aggregationWorker`、`useProfileData` 未使用 | 前端 | 代码膨胀 |
 | 23 | **`illuminator.yaml.example` ~40% 配置键无效**: `pipelines`、`websocket`、`storage.retention` 解析但从不应用 | 配置 | 误导运维 |
-| 24 | **7 个引用文档不存在**: README 引用的 `architecture_audit_v4.md` 等文件缺失 | 文档 | 死链接 |
+| 24 | ~~**7 个引用文档不存在**~~ | 文档 | 已修复：README 文档索引仅保留现有文件 |
 | 25 | **OtlpExportSink 是空壳**: 标记 `IsStub()=true`，无实际 HTTP POST | 插件 | 功能表述不实 |
 
 ---
@@ -127,18 +127,17 @@
 ### 5. 目录结构与文档 (B+)
 
 **优势**:
-- `src/` 目录结构合理：core/ebpf/plugin/server/cli 分层清晰
+- `src/` 目录结构合理：core/ebpf_common/plugin/server/cli 分层清晰
 - `docs/architecture_overview.md` ~95% 准确
 - `docs/onboarding_guide.md` ~85% 准确
 - CI 配置合理（后端+BPF+前端+Sanitizer）
 
 **问题**:
-- **README.md 是最大的文档负债**（~30% 准确度），仍描述 WebSocket/旧目录/不存在文件
 - `illuminator.yaml.example` ~40% 配置键无效（解析但不应用）
-- 7 个引用文档不存在
-- `check_env.sh` 仍检查 9528 端口
-- `Makefile` 的 `make dev` 引用不存在的 `illuminator.yaml`
-- `Dockerfile` EXPOSE 9528（未使用）
+- ~~README.md 文档负债~~（已修复：目录结构、死链接、SSE 端口）
+- ~~`check_env.sh` 检查 9528 端口~~（已修复：仅检查 9527）
+- ~~`Makefile` 的 `make dev` 引用不存在的 `illuminator.yaml`~~（已修复：改用 `illuminator.yaml.example`）
+- ~~`Dockerfile` EXPOSE 9528~~（已修复：仅 EXPOSE 9527）
 
 ---
 
@@ -146,7 +145,7 @@
 
 | 冗余点 | 涉及文件 | 建议 |
 |--------|---------|------|
-| PluginRegistry + FeatureRegistry 双注册 | `plugin_registry.h`, `feature_registry.h` | Driver 从 Registry 解析组件，或标记 Registry 为仅内省用 |
+| PluginRegistry + FeatureRegistry 双注册 | `plugin_registry.h`, `feature_registry.h` | 有意分离：Registry 为工厂/内省，FeatureRegistry 为 Feature 编排；Driver 硬编码组件类型以获编译期安全 |
 | EngineConfig + InfrastructureConfig 重复 | `config.h`, `infrastructure_manager.h` | 统一为单一配置源 |
 | DriverInfo + FeatureStats 重叠 | `feature_driver.h` | 合并查询 DTO |
 | Pipeline::RunProcessors() + HandleData() 处理器循环 | `pipeline.h:286-294, 371-379` | 提取共享辅助函数 |

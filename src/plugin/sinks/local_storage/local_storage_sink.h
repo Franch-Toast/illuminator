@@ -62,7 +62,7 @@ public:
     //   batch - 待写入的数据批次
     // 返回:
     //   Status::Ok() 表示成功
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!backend_ || !batch) return Status::Ok();
 
         // 写入 Record 数据

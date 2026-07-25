@@ -61,7 +61,7 @@ public:
     const char* Name() const override { return "counting_sink"; }
     const char* Version() const override { return "0.1.0"; }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (batch) write_count_.fetch_add(1, std::memory_order_relaxed);
         return Status::Ok();
     }

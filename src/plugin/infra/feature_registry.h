@@ -1,6 +1,13 @@
 // ============================================================================
-// Feature Registry — 自动注册 FeatureDriver 到 FeatureBus
+// Feature Registry — Feature 编排器
 // ============================================================================
+//
+// FeatureRegistry 管理 FeatureDriver 的注册与批量 Probe（RegisterAll）。
+// 与 PluginRegistry 的职责分离是有意为之：
+//   - FeatureRegistry：编排层，负责 Driver 生命周期（注册 → 实例化 → 挂到 FeatureBus）
+//   - PluginRegistry：工厂 + 内省层，负责插件发现与外部 .so 加载后的实例化
+//
+// FeatureDriver 在 BuildPipeline() 中直接构造具体组件类型，不经过 PluginRegistry。
 //
 // 使用方式：
 //   在 Driver 实现文件底部调用宏：

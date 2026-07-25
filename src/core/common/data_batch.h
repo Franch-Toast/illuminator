@@ -248,5 +248,7 @@ private:
 
 // DataBatch 的 shared_ptr 别名，方便在代码中传递
 using DataBatchPtr = std::shared_ptr<DataBatch>;
+// Sink 只读视图：编译期禁止 Sink 修改 batch 内容
+using ConstDataBatchPtr = std::shared_ptr<const DataBatch>;
 
 }  // namespace illuminator

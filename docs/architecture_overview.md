@@ -1171,40 +1171,31 @@ src/
 │   └── threading/                     线程管理
 │       ├── thread_pool.h              通用线程池 (生产者-消费者模式)
 │       └── thread_util.h              线程命名工具
-├── ebpf/                              BPF C 程序 + 加载器
-│   ├── include/                       vmlinux.h, event_types.h, bpf_compat.h
-│   ├── probes/                        BPF 程序 (cpu/sched/io/net/memory)
-│   └── loader/                        BpfProgramManager, FeatureProbe, StackTraceUtil, BpfStatsReader
+├── ebpf_common/                       eBPF 共享基础设施
+│   ├── include/                       vmlinux.h, event_types.h, bpf_compat.h, common.bpf.h
+│   ├── loader/                        bpf_util, FeatureProbe, StackTraceUtil, BpfStatsReader
+│   └── bpf_probe.bzl                  BPF 编译与 skeleton 生成 Bazel 规则
 ├── plugin/                            完整插件体系
 │   ├── api/                           插件接口定义
 │   │   ├── plugin_api.h               Plugin 基类 + C ABI (IlPluginDescriptor)
 │   │   ├── source_plugin.h            Source 接口 (Pull/Push 模式)
 │   │   ├── processor_plugin.h         Processor 接口
 │   │   ├── aggregator_plugin.h        Aggregator 接口
-│   │   └── sink_plugin.h              Sink 接口
-│   ├── manager/                       插件管理
-│   │   ├── plugin_registry.h          集中式工厂注册表 (IL_REGISTER_* 宏)
+│   │   ├── sink_plugin.h              Sink 接口
+│   │   └── ebpf_source_base.h         EbpfSourceBase 统一 eBPF Source 基类
+│   ├── infra/                         插件基础设施
+│   │   ├── plugin_registry.h          插件工厂 + 内省 (IL_REGISTER_* 宏)
+│   │   ├── feature_registry.h         Feature 编排器 (REGISTER_FEATURE 宏)
 │   │   ├── plugin_manager.h           .so 插件发现与加载
 │   │   ├── so_loader.h                dlopen/dlsym 动态加载
-│   │   └── wasm_runtime.h             WASM 沙箱运行时 (预留)
-│   ├── builtin/                       内置插件强链接注册
-│   │   ├── builtin_plugins.h          声明
+│   │   ├── wasm_runtime.h             WASM 沙箱运行时 (预留)
+│   │   ├── builtin_plugins.h          内置插件强链接声明
 │   │   └── builtin_plugins.cc         #include 所有内置插件头文件
-│   ├── features/                      FeatureDriver 编排层
-│   │   ├── feature_registry.h         REGISTER_FEATURE() 宏 + RegisterAll()
-│   │   ├── cpu_utilization_driver.h   典型 Tier 1 Driver 实现
-│   │   ├── process_cpu_driver.h
-│   │   ├── cpu_profiler_driver.h      Tier 3: eBPF CPU Profiler
-│   │   ├── offcpu_profiler_driver.h   Tier 3: eBPF Off-CPU Profiler
-│   │   ├── io_monitor_driver.h
-│   │   ├── net_tracer_driver.h
-│   │   └── sched_analyzer_driver.h
-│   ├── sources/                       数据源插件 (按 cpu/sched/io/net 分组)
-│   │   ├── ebpf_source_base.h         eBPF 统一基类 (EbpfSourceBase + IL_SKEL_CALLBACKS)
-│   │   ├── cpu/                       cpu_utilization, process_cpu, cpu_profiler, proc_stat_reader
-│   │   ├── sched/                     sched_analyzer, offcpu_profiler, ebpf_sched_tracer
-│   │   ├── io/                        ebpf_io_monitor
-│   │   └── net/                       ebpf_net_tracer
+│   ├── features/                      FeatureDriver + Source 实现 + BPF 探针
+│   │   ├── cpu/                       cpu_utilization, process_cpu, cpu_profiler
+│   │   ├── sched/                     sched_analyzer, offcpu_profiler
+│   │   ├── io/                        io_monitor
+│   │   └── net/                       net_tracer
 │   ├── processors/                    处理器插件
 │   │   ├── passthrough/               透传处理器 (测试用)
 │   │   ├── filter/                    标签过滤处理器
@@ -1307,4 +1298,4 @@ web/src/
 
 - event_types.h: struct il_pidns_config
 - cpu_profiler.bpf.c / offcpu_profiler.bpf.c: pidns_cfg map + ns helper
-- cpu_profiler.h / offcpu_profiler.h: ConfigurePidNamespace()
+- cpu_profiler_source.h / offcpu_profiler_source.h: ConfigurePidNamespace()

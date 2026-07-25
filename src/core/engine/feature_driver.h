@@ -34,6 +34,7 @@
 #include "core/common/status.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
+#include "plugin/api/sink_plugin.h"
 
 namespace illuminator {
 
@@ -322,7 +323,11 @@ public:
         return info;
     }
 
+    static void SetSsePublishCallback(SsePublishCallback cb);
+
 protected:
+    std::unique_ptr<class SseSink> MakeSseSink(const char* feature_name);
+
     // 子类必须实现：构建自己的 Pipeline
     virtual std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) = 0;
 
@@ -374,8 +379,22 @@ protected:
 }  // namespace illuminator
 
 #include "plugin/sinks/recording_sink/recording_sink.h"
+#include "plugin/sinks/sse_sink/sse_sink.h"
 
 namespace illuminator {
+
+inline SsePublishCallback& FeatureDriverSsePublishCallbackStorage() {
+    static SsePublishCallback cb;
+    return cb;
+}
+
+inline void FeatureDriver::SetSsePublishCallback(SsePublishCallback cb) {
+    FeatureDriverSsePublishCallbackStorage() = std::move(cb);
+}
+
+inline std::unique_ptr<SseSink> FeatureDriver::MakeSseSink(const char* feature_name) {
+    return std::make_unique<SseSink>(feature_name, FeatureDriverSsePublishCallbackStorage());
+}
 
 inline Status FeatureDriver::StartRecording(const std::string& output_dir) {
     if (state_ == DriverState::kInactive || !pipeline_) {

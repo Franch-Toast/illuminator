@@ -35,7 +35,7 @@ public:
     }
 
     // 将 batch 分发到所有子 Sink（共享 ptr，零拷贝）
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
 
         std::lock_guard<std::mutex> lk(mu_);

@@ -2,12 +2,10 @@
 // Illuminator 配置系统
 // ============================================================================
 //
-// 本文件定义了三层配置结构：
+// 本文件定义了配置结构：
 // 1. ConfigValue — 扁平的键值对配置容器，支持嵌套 key 的点号表示法
 //    设计目标：避免递归类型问题，简化跨语言边界的配置传递
-// 2. PipelineConfig — 单条数据处理管道的配置结构
-//    （Source → Processors → Aggregator → Sinks）
-// 3. GlobalConfig — 全局配置，包含日志、服务器和多条管道配置
+// 2. GlobalConfig — 全局配置，包含日志、服务器和引擎设置
 //
 // 设计理念：
 // - ConfigValue 使用扁平化存储（string->string map），嵌套通过 "parent.child" 键名实现
@@ -20,7 +18,6 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-#include <optional>
 #include <cstdlib>
 
 #include "core/common/status.h"
@@ -139,25 +136,6 @@ private:
     std::unordered_map<std::string, std::string> values_;
 };
 
-// ---- PipelineConfig: 单条管道配置 ----
-//
-// 每条管道 = 一个 Source + 可选的多个 Processor + 可选的 Aggregator + 多个 Sink
-// 数据流向：Source → Processor1 → Processor2 → ... → Aggregator → Sink1, Sink2, ...
-struct PipelineConfig {
-    std::string name;  // 管道唯一名称
-
-    // 阶段配置：类型名 + 配置参数
-    struct StageConfig {
-        std::string type;      // 插件类型名（如 "cpu_utilization"、"filter"）
-        ConfigValue config;    // 该阶段的配置参数
-    };
-
-    StageConfig source;                         // 数据源（必需）
-    std::vector<StageConfig> processors;        // 处理器链（可选，按顺序执行）
-    std::optional<StageConfig> aggregator;      // 聚合器（可选，用于时间窗口聚合）
-    std::vector<StageConfig> sinks;             // 数据出口（至少一个）
-};
-
 // ---- EngineConfig: 管道引擎全局配置 ----
 struct EngineConfig {
     uint32_t collect_pool_threads = 0;  // CollectPool 线程数（0 = auto: 2）
@@ -188,15 +166,11 @@ struct GlobalConfig {
     struct ServerConfig {
         bool http_enabled = true;
         std::string http_listen = "127.0.0.1:9527";
-        bool ws_enabled = true;
         std::string auth_token;
     } server;
 
     // 管道引擎配置
     EngineConfig engine;
-
-    // 关联的管道配置列表
-    std::vector<PipelineConfig> pipelines;
 };
 
 }  // namespace illuminator

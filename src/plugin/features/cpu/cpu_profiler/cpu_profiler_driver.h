@@ -5,7 +5,6 @@
 #include "core/engine/feature_driver.h"
 #include "plugin/infra/feature_registry.h"
 #include "plugin/processors/stack_symbolizer/stack_symbolizer.h"
-#include "server/sse_handler.h"
 #include "plugin/features/cpu/cpu_profiler/cpu_profiler_source.h"
 
 namespace illuminator {
@@ -98,7 +97,7 @@ protected:
         symbolizer->Init(sym_cfg);
         pipeline->AddProcessor(std::move(symbolizer));
 
-        pipeline->AddSink(std::make_unique<SseSink>("cpu_profiler"));
+        pipeline->AddSink(MakeSseSink(Name()));
         return pipeline;
     }
 

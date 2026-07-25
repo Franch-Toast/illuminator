@@ -4,7 +4,6 @@
 
 #include "core/engine/feature_driver.h"
 #include "plugin/infra/feature_registry.h"
-#include "server/sse_handler.h"
 #include "plugin/features/sched/sched_analyzer/sched_analyzer_source.h"
 
 namespace illuminator {
@@ -54,7 +53,7 @@ protected:
         ConfigValue cfg;
         source->Init(cfg);
         pipeline->SetSource(std::move(source));
-        pipeline->AddSink(std::make_unique<SseSink>("sched_analyzer"));
+        pipeline->AddSink(MakeSseSink(Name()));
         return pipeline;
     }
 };

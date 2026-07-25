@@ -39,7 +39,7 @@ public:
     const char* Name() const override { return "mock_sink"; }
     const char* Version() const override { return "1.0.0"; }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         write_count_.fetch_add(1);
         return Status::Ok();
     }

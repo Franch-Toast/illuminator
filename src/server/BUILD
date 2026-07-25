@@ -30,6 +30,20 @@ cc_library(
 )
 
 cc_library(
+    name = "api_v2_routes",
+    hdrs = ["api_v2_routes.h"],
+    strip_include_prefix = "",
+    include_prefix = "server",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/core:common",
+        "//src/core:engine",
+        "//third_party/cpp-httplib",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
     name = "sse_handler",
     hdrs = ["sse_handler.h"],
     strip_include_prefix = "",
@@ -37,8 +51,6 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//src/core:common",
-        "//src/core:data",
-        "//src/plugin:api",
         "//third_party/cpp-httplib",
         "@nlohmann_json//:json",
     ],

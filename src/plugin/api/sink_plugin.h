@@ -20,17 +20,22 @@
 
 #pragma once
 
+#include <functional>
+#include <string>
+
 #include "plugin/api/plugin_api.h"
 
 namespace illuminator {
+
+using SsePublishCallback = std::function<void(const std::string& feature, const std::string& json_data)>;
 
 class SinkPlugin : public Plugin {
 public:
     PluginType Type() const override { return PluginType::kSink; }
 
     // ---- 写入数据 ----
-    // 将一批数据写入目标。接收 shared_ptr 以避免拷贝。
-    virtual Status Write(DataBatchPtr batch) = 0;
+    // 将一批数据写入目标。ConstDataBatchPtr 保证 Sink 只读访问，避免并行 Write 数据竞争。
+    virtual Status Write(ConstDataBatchPtr batch) = 0;
 
     // ---- 刷新缓冲 ----
     // 将内部缓冲的数据刷出到目标。

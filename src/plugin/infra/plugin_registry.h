@@ -1,8 +1,18 @@
 // ============================================================================
-// Illuminator 插件注册表 — 集中式工厂模式
+// Illuminator 插件注册表 — 插件工厂 + 内省接口
 // ============================================================================
 //
-// PluginRegistry 是 Illuminator 的插件注册和发现中心。
+// PluginRegistry 是 Illuminator 的插件工厂与内省（introspection）中心。
+// 主要服务于：
+//   - CLI `plugins` 命令（列举已注册插件）
+//   - REST API `/api/v1/plugins`（插件发现）
+//   - 外部 .so 插件加载后的实例化（CreateSource/Processor/Aggregator/Sink）
+//
+// 职责边界（设计意图，非 bug）：
+//   FeatureDriver **不** 通过 PluginRegistry 创建管道组件，而是在
+//   BuildPipeline() 中直接硬编码具体类型（如 CpuProfilerSource、FilterProcessor）。
+//   这样 FeatureDriver 在编译期获得类型安全，避免运行时字符串查找带来的错误延迟。
+//
 // 采用"注册表 + 工厂函数"模式，实现插件系统的解耦和扩展性。
 //
 // 核心机制：

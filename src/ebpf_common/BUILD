@@ -34,7 +34,6 @@ cc_library(
 cc_library(
     name = "loader",
     hdrs = [
-        "loader/bpf_program_manager.h",
         "loader/bpf_stats_reader.h",
         "loader/bpf_util.h",
         "loader/feature_probe.h",

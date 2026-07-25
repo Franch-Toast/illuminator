@@ -71,7 +71,7 @@ public:
     //   batch - 待导出的数据批次
     // 返回:
     //   Status::Ok() 表示成功
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!file_ || !batch) return Status::Ok();
 
         for (auto& rec : batch->records()) {

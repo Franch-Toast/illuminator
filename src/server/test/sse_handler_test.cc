@@ -1,6 +1,7 @@
 // SSE Handler 单元测试
 
 #include "server/sse_handler.h"
+#include "plugin/sinks/sse_sink/sse_sink.h"
 
 #include <gtest/gtest.h>
 
@@ -78,7 +79,9 @@ TEST_F(SseHandlerTest, SseSinkWritePublishes) {
     auto& handler = SseHandler::Instance();
     auto id = handler.Subscribe({"test_feature"});
 
-    SseSink sink("test_feature");
+    SseSink sink("test_feature", [&handler](const std::string& feature, const std::string& data) {
+        handler.Publish(feature, data);
+    });
     auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
     auto status = sink.Write(batch);
     EXPECT_TRUE(status.ok());
@@ -87,7 +90,7 @@ TEST_F(SseHandlerTest, SseSinkWritePublishes) {
 }
 
 TEST_F(SseHandlerTest, SseSinkNameAndVersion) {
-    SseSink sink("cpu_utilization");
+    SseSink sink("cpu_utilization", [](const std::string&, const std::string&) {});
     EXPECT_STREQ(sink.Name(), "sse_sink");
     EXPECT_STREQ(sink.Version(), "1.0.0");
 }

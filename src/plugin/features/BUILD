@@ -8,7 +8,6 @@ load("//src/ebpf_common:bpf_probe.bzl", "bpf_skeleton")
 bpf_skeleton(name = "cpu_profiler_sk", src = "cpu/cpu_profiler/cpu_profiler.bpf.c")
 bpf_skeleton(name = "sched_analyzer_sk", src = "sched/sched_analyzer/sched_analyzer.bpf.c")
 bpf_skeleton(name = "offcpu_profiler_sk", src = "sched/offcpu_profiler/offcpu_profiler.bpf.c")
-bpf_skeleton(name = "sched_tracer_sk", src = "sched/sched_tracer/sched_tracer.bpf.c")
 bpf_skeleton(name = "bio_latency_sk", src = "io/io_monitor/bio_latency.bpf.c")
 bpf_skeleton(name = "net_tracer_sk", src = "net/net_tracer/net_tracer.bpf.c")
 
@@ -48,7 +47,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
         "//src/plugin/processors:stack_symbolizer",
     ],
 )
@@ -97,7 +95,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
     ],
 )
 
@@ -131,7 +128,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
     ],
 )
 
@@ -168,7 +164,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
     ],
 )
 
@@ -205,7 +200,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
     ],
 )
 
@@ -243,7 +237,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
     ],
 )
 
@@ -284,28 +277,6 @@ cc_library(
         "//src/plugin:infra",
         "//src/plugin:feature_registry",
         "//src/core:engine",
-        "//src/server:sse_handler",
-    ],
-)
-
-# ============================================================================
-# Scheduler subsystem — sched_tracer (eBPF, no Driver)
-# ============================================================================
-
-cc_library(
-    name = "sched_tracer_source",
-    hdrs = ["sched/sched_tracer/sched_tracer_source.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/features",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        ":sched_tracer_sk_skel",
-        "//src/plugin:ebpf_source_base",
-        "//src/core:common",
-        "//src/ebpf_common:common_bpf_types",
-        "//src/plugin:api",
-        "//src/plugin:infra",
     ],
 )
 
@@ -325,7 +296,6 @@ cc_library(
         ":proc_stat_reader",
         ":process_cpu_source",
         ":sched_analyzer_source",
-        ":sched_tracer_source",
     ],
 )
 

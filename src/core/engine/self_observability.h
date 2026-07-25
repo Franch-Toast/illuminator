@@ -6,7 +6,7 @@
 // 即 Illuminator 监控自身的健康状况和资源消耗，类似于 Prometheus 的
 // 内部指标（如进程 RSS、CPU 使用率、延迟分布等）。
 //
-// 三大组件：
+// 两大组件：
 // ==========
 // 1. InternalMetrics 单例
 //    - 线程安全的内部指标收集器
@@ -21,12 +21,6 @@
 //    - 监控 Illuminator 自身的资源消耗，防止过度占用系统资源
 //    - 通过读取 /proc/self/statm 获取 RSS（常驻内存）大小
 //    - 内存超限检测：默认上限 512MB
-//    - CPU 和磁盘限制预留了扩展接口
-//
-// 3. ScopedTimer 工具类
-//    - RAII 风格的延迟测量器
-//    - 构造时记录开始时间，析构时自动上报延迟到 InternalMetrics
-//    - 配合 IL_SCOPED_TIMER 宏使用，方便在关键路径插入性能埋点
 //
 // 设计理念：
 //   - 所有指标收集器内部加锁，外部线程安全
@@ -37,7 +31,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -195,8 +188,6 @@ public:
     // 资源上限配置
     struct Limits {
         uint64_t max_memory_bytes = 512 * 1024 * 1024;  // 最大内存 512 MB
-        double max_cpu_percent = 10.0;                    // 最大 CPU 占用 10%
-        uint64_t max_disk_bytes = 1ULL * 1024 * 1024 * 1024; // 最大磁盘 1 GB
     };
 
     // 单例访问
@@ -211,9 +202,7 @@ public:
     // 当前资源使用情况
     struct Usage {
         uint64_t rss_bytes = 0;       // 常驻内存大小（字节）
-        double cpu_percent = 0;       // CPU 使用率（预留）
         bool memory_exceeded = false; // 内存是否超限
-        bool cpu_exceeded = false;    // CPU 是否超限（预留）
     };
 
     // 检查当前资源消耗是否超出限制
@@ -251,40 +240,5 @@ private:
 
     Limits limits_;
 };
-
-// ============================================================================
-// ScopedTimer — RAII 延迟测量器
-// ============================================================================
-// 在构造时记录开始时间，析构时自动计算耗时并上报到 InternalMetrics。
-// 用法：
-//   void SomeCriticalPath() {
-//       IL_SCOPED_TIMER("pipeline_process");  // 这一行等价于声明一个 ScopedTimer
-//       // ... 关键路径代码 ...
-//   }  // ScopedTimer 析构时自动上报延迟
-//
-class ScopedTimer {
-public:
-    // 构造时记录开始时间点和指标名称
-    ScopedTimer(const std::string& name)
-        : name_(name),
-          start_(std::chrono::steady_clock::now()) {}
-
-    // 析构时自动计算耗时（微秒）并上报
-    ~ScopedTimer() {
-        auto end = std::chrono::steady_clock::now();
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-            end - start_).count();
-        InternalMetrics::Instance().RecordLatency(name_, us);
-    }
-
-private:
-    std::string name_;                              // 指标名称
-    std::chrono::steady_clock::time_point start_;   // 开始时间
-};
-
-// 便捷宏：创建 ScopedTimer 并自动使用行号生成唯一变量名
-// 使用方法：在函数开头写 `IL_SCOPED_TIMER("operation_name");`
-#define IL_SCOPED_TIMER(name) \
-    ::illuminator::ScopedTimer _il_timer_##__LINE__(name)
 
 }  // namespace illuminator

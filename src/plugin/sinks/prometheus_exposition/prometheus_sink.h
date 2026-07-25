@@ -53,7 +53,7 @@ public:
     //   batch - 包含 Record 的数据批次
     // 返回:
     //   Status::Ok() 表示成功
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
 
         std::lock_guard<std::mutex> lock(mutex_);

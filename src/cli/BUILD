@@ -29,6 +29,7 @@ cc_binary(
         ":json_serializer",
         "//src/server:http_server",
         "//src/server:api_routes",
+        "//src/server:api_v2_routes",
         "//src/server:sse_handler",
         "//src/server/storage:storage",
     ],

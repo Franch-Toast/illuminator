@@ -50,6 +50,7 @@ inline json StackFramesToJson(const std::vector<StackFrame>& frames) {
 
 inline json StackSampleToJson(const StackSample& s) {
     json j;
+    j["timestamp"] = TimestampToNanos(s.timestamp) / 1000000;
     j["pid"] = s.pid;
     j["tid"] = s.tid;
     j["cpu"] = s.cpu;
@@ -65,6 +66,8 @@ inline json StackSampleToJson(const StackSample& s) {
 
 inline json RecordToJson(const Record& rec) {
     json j;
+    j["timestamp"] = TimestampToNanos(rec.timestamp) / 1000000;
+
     json labels = json::object();
     for (auto& l : rec.labels)
         labels[std::string(l.key)] = std::string(l.value);
@@ -77,21 +80,27 @@ inline json RecordToJson(const Record& rec) {
     return j;
 }
 
+inline json RecordsToJsonArray(const DataBatch& batch) {
+    json arr = json::array();
+    for (auto& rec : batch.records())
+        arr.push_back(RecordToJson(rec));
+    return arr;
+}
+
+inline json StackSamplesToJsonArray(const DataBatch& batch) {
+    json arr = json::array();
+    for (auto& s : batch.stack_samples())
+        arr.push_back(StackSampleToJson(s));
+    return arr;
+}
+
 inline std::string BatchToJson(const DataBatch& batch, const std::string& pipeline) {
     json j;
     j["pipeline"] = pipeline;
+    j["records"] = RecordsToJsonArray(batch);
 
-    json records = json::array();
-    for (auto& rec : batch.records())
-        records.push_back(RecordToJson(rec));
-    j["records"] = std::move(records);
-
-    if (!batch.stack_samples().empty()) {
-        json samples = json::array();
-        for (auto& s : batch.stack_samples())
-            samples.push_back(StackSampleToJson(s));
-        j["stack_samples"] = std::move(samples);
-    }
+    if (!batch.stack_samples().empty())
+        j["stack_samples"] = StackSamplesToJsonArray(batch);
 
     return j.dump();
 }

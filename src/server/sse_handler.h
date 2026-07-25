@@ -39,8 +39,6 @@
 
 #include "core/common/logging.h"
 #include "core/common/status.h"
-#include "core/common/data_batch.h"
-#include "plugin/api/sink_plugin.h"
 
 namespace illuminator {
 
@@ -378,130 +376,6 @@ private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, std::shared_ptr<SseSubscription>> subscriptions_;
     std::atomic<uint64_t> seq_counter_{0};
-};
-
-// ============================================================================
-// SseSink — Pipeline Sink 将数据推送到 SSE 订阅者
-// ============================================================================
-// 在 SinkPool 线程中执行，只做 queue push + notify，不阻塞。
-class SseSink : public SinkPlugin {
-public:
-    explicit SseSink(std::string feature_name)
-        : feature_name_(std::move(feature_name)) {}
-
-    const char* Name() const override { return "sse_sink"; }
-    const char* Version() const override { return "1.0.0"; }
-
-    Status Write(DataBatchPtr batch) override {
-        if (!batch) return Status::Ok();
-        SseHandler::Instance().Publish(feature_name_, SerializeBatch(*batch));
-        return Status::Ok();
-    }
-
-private:
-    std::string SerializeBatch(const DataBatch& batch) const {
-        nlohmann::json j;
-        j["feature"] = feature_name_;
-        j["seq"] = seq_++;
-        j["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-
-        switch (batch.type()) {
-            case DataBatch::Type::kMetrics:
-                j["modelType"] = "time_series";
-                j["metrics"] = SerializeRecords(batch);
-                break;
-            case DataBatch::Type::kProfile:
-                j["modelType"] = "profile";
-                j["samples"] = SerializeStackSamples(batch);
-                break;
-            case DataBatch::Type::kTrace:
-                j["modelType"] = "trace";
-                j["records"] = SerializeRecords(batch);
-                break;
-            default:
-                j["modelType"] = "generic";
-                j["records"] = SerializeRecords(batch);
-                break;
-        }
-        return j.dump();
-    }
-
-    nlohmann::json SerializeRecords(const DataBatch& batch) const {
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& record : batch.records()) {
-            nlohmann::json r;
-            r["timestamp"] = TimestampToNanos(record.timestamp) / 1000000;
-
-            nlohmann::json labels = nlohmann::json::object();
-            for (const auto& label : record.labels) {
-                labels[std::string(label.key)] = std::string(label.value);
-            }
-            r["labels"] = labels;
-
-            nlohmann::json fields = nlohmann::json::object();
-            for (const auto& [key, val] : record.fields) {
-                std::visit([&fields, &key](auto&& v) {
-                    using T = std::decay_t<decltype(v)>;
-                    if constexpr (std::is_same_v<T, std::monostate>) {
-                        fields[std::string(key)] = nullptr;
-                    } else if constexpr (std::is_same_v<T, bool>) {
-                        fields[std::string(key)] = v;
-                    } else if constexpr (std::is_same_v<T, int64_t>) {
-                        fields[std::string(key)] = v;
-                    } else if constexpr (std::is_same_v<T, uint64_t>) {
-                        fields[std::string(key)] = v;
-                    } else if constexpr (std::is_same_v<T, double>) {
-                        fields[std::string(key)] = v;
-                    } else if constexpr (std::is_same_v<T, std::string_view>) {
-                        fields[std::string(key)] = std::string(v);
-                    }
-                }, val);
-            }
-            r["fields"] = fields;
-            arr.push_back(std::move(r));
-        }
-        return arr;
-    }
-
-    nlohmann::json SerializeStackSamples(const DataBatch& batch) const {
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& sample : batch.stack_samples()) {
-            nlohmann::json s;
-            s["timestamp"] = TimestampToNanos(sample.timestamp) / 1000000;
-            s["pid"] = sample.pid;
-            s["tid"] = sample.tid;
-            s["comm"] = std::string(sample.comm);
-            s["cpu"] = sample.cpu;
-            s["count"] = sample.count;
-
-            nlohmann::json user_stack = nlohmann::json::array();
-            for (const auto& frame : sample.user_stack) {
-                nlohmann::json f;
-                f["addr"] = frame.address;
-                f["func"] = std::string(frame.function_name);
-                if (!frame.module_name.empty()) {
-                    f["module"] = std::string(frame.module_name);
-                }
-                user_stack.push_back(std::move(f));
-            }
-            s["user_stack"] = user_stack;
-
-            nlohmann::json kernel_stack = nlohmann::json::array();
-            for (const auto& frame : sample.kernel_stack) {
-                nlohmann::json f;
-                f["addr"] = frame.address;
-                f["func"] = std::string(frame.function_name);
-                kernel_stack.push_back(std::move(f));
-            }
-            s["kernel_stack"] = kernel_stack;
-            arr.push_back(std::move(s));
-        }
-        return arr;
-    }
-
-    std::string feature_name_;
-    mutable uint64_t seq_ = 0;
 };
 
 }  // namespace illuminator

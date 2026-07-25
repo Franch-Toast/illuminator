@@ -19,13 +19,13 @@ test-v: ## 运行测试 (详细输出)
 	$(BAZEL) test //src/... --test_output=all --test_summary=detailed
 
 probes: ## 编译 eBPF 探针
-	$(BAZEL) build //src/ebpf/probes:all
+	$(BAZEL) build //src/plugin/features:all
 
 clean: ## 清理构建产物
 	$(BAZEL) clean
 
 dev: build ## 启动开发模式 (后端)
-	./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml
+	./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 
 dev-web: ## 启动前端开发服务器
 	cd web && npm run dev

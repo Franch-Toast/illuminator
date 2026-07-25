@@ -41,7 +41,7 @@ public:
     const char* Name() const override { return name_.c_str(); }
     const char* Version() const override { return "0.1.0"; }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
         std::lock_guard<std::mutex> lock(mu_);
         write_count_.fetch_add(1, std::memory_order_relaxed);

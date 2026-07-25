@@ -4,7 +4,6 @@
 
 #include "core/engine/feature_driver.h"
 #include "plugin/infra/feature_registry.h"
-#include "server/sse_handler.h"
 #include "plugin/features/cpu/process_cpu/process_cpu_source.h"
 
 namespace illuminator {
@@ -55,7 +54,7 @@ protected:
         cfg["top_n"] = ConfigValue(static_cast<int64_t>(20));
         source->Init(cfg);
         pipeline->SetSource(std::move(source));
-        pipeline->AddSink(std::make_unique<SseSink>("process_cpu"));
+        pipeline->AddSink(MakeSseSink(Name()));
         return pipeline;
     }
 };

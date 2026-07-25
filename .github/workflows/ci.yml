@@ -115,7 +115,7 @@ jobs:
             clang libbpf-dev
 
       - name: Compile all BPF probes
-        run: bazel build //src/ebpf/probes:all
+        run: bazel build //src/plugin/features:all_sources
 
   frontend-build:
     name: "Frontend Build + TypeCheck"

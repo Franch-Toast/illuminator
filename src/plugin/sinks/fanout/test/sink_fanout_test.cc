@@ -13,7 +13,7 @@ public:
     const char* Name() const override { return name_; }
     const char* Version() const override { return "test"; }
     Status Init(const ConfigValue&) override { return Status::Ok(); }
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (batch) ++count_;
         return Status::Ok();
     }
@@ -28,7 +28,7 @@ public:
     const char* Name() const override { return "failing"; }
     const char* Version() const override { return "test"; }
     Status Init(const ConfigValue&) override { return Status::Ok(); }
-    Status Write(DataBatchPtr) override {
+    Status Write(ConstDataBatchPtr) override {
         return Status::Error(StatusCode::kInternal, "write failed");
     }
 };

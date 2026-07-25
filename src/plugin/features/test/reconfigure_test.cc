@@ -125,7 +125,7 @@ public:
     const char* Name() const override { return "counting_sink"; }
     const char* Version() const override { return "0.1.0"; }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (batch) write_count_.fetch_add(1, std::memory_order_relaxed);
         return Status::Ok();
     }
@@ -149,7 +149,7 @@ public:
     const char* Name() const override { return "error_sink"; }
     const char* Version() const override { return "0.1.0"; }
 
-    Status Write(DataBatchPtr) override { return Status::Ok(); }
+    Status Write(ConstDataBatchPtr) override { return Status::Ok(); }
 
     Status Reconfigure(const ConfigValue&) override {
         return Status::Error(StatusCode::kInternal, "sink reconfigure failed");
@@ -459,7 +459,7 @@ TEST_F(ReconfigureTest, RequiresRestartAndUnimplementedMix) {
     public:
         const char* Name() const override { return "unimpl_sink"; }
         const char* Version() const override { return "0.1.0"; }
-        Status Write(DataBatchPtr) override { return Status::Ok(); }
+        Status Write(ConstDataBatchPtr) override { return Status::Ok(); }
         // 使用基类默认 Reconfigure，返回 kUnimplemented
     };
 

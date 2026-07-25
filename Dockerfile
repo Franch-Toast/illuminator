@@ -97,7 +97,7 @@ USER illuminator
 
 VOLUME ["/var/lib/illuminator"]
 
-EXPOSE 9527 9528
+EXPOSE 9527
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -sf http://127.0.0.1:9527/healthz || exit 1

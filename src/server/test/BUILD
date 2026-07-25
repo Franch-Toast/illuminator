@@ -21,6 +21,7 @@ cc_test(
     srcs = ["sse_handler_test.cc"],
     deps = [
         "//src/server:sse_handler",
+        "//src/plugin/sinks:sse_sink",
         "//src/core:common",
         "//src/core:data",
         "//src/plugin:api",

@@ -66,7 +66,7 @@ namespace illuminator {
 // 每个 Pipeline 拥有独立的 AsyncChannel 和 ProcessThread。
 // 管道之间完全隔离，一个管道阻塞不影响其他管道。
 // 支持 Pull（定时轮询）和 Push（eBPF 回调）两种数据源模式。
-// SinkPool 由 FeatureDriver::Probe() 设置，Pipeline 只持有裸指针。
+// SinkPool 由 FeatureDriver::Probe() 设置，Pipeline 通过 shared_ptr 持有。
 class Pipeline {
 public:
     explicit Pipeline(const std::string& name,
@@ -147,7 +147,7 @@ public:
         return Status::Ok();
     }
 
-    void SetSinkPool(ThreadPool* pool) { sink_pool_ = pool; }
+    void SetSinkPool(std::shared_ptr<ThreadPool> pool) { sink_pool_ = std::move(pool); }
 
     // ====================================================================
     // Start — 启动管线
@@ -179,6 +179,7 @@ public:
         }
 
         running_.store(true, std::memory_order_release);
+        last_flush_time_ = std::chrono::steady_clock::now();
 
         process_thread_ = std::thread([this] {
             SetThreadName(name_.substr(0, 15));
@@ -341,6 +342,8 @@ private:
         uint32_t loop_count = 0;
 
         while (running_.load(std::memory_order_acquire)) {
+            MaybeForceFlush();
+
             auto item = ingest_channel_.Dequeue(std::chrono::milliseconds(100));
             if (!item) {
                 if (++loop_count % 100 == 0) SyncChannelMetrics();
@@ -353,11 +356,13 @@ private:
                 },
                 [this](FlushSentinel&) {
                     HandleFlush();
+                    last_flush_time_ = std::chrono::steady_clock::now();
                 },
             }, *item);
 
             if (++loop_count % 100 == 0) {
                 SyncChannelMetrics();
+                SyncSinkPoolMetrics();
                 auto usage = ResourceLimiter::Instance().Check();
                 if (usage.memory_exceeded) {
                     IL_WARN("Pipeline '{}': memory limit exceeded (RSS={} bytes)",
@@ -400,6 +405,22 @@ private:
                 SubmitToSinks(std::move(batch));
             }
         }
+        last_flush_time_ = std::chrono::steady_clock::now();
+    }
+
+    void MaybeForceFlush() {
+        if (!aggregator_) return;
+
+        const uint32_t interval_ms = aggregator_->FlushIntervalMs();
+        if (interval_ms == 0) return;
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto max_delay = std::chrono::milliseconds(interval_ms * 3);
+        if (now - last_flush_time_ >= max_delay) {
+            IL_WARN("Pipeline '{}': forced flush (no sentinel for {}ms)",
+                    name_, interval_ms * 3);
+            HandleFlush();
+        }
     }
 
     void Drain() {
@@ -417,10 +438,12 @@ private:
     }
 
     void SubmitToSinks(DataBatchPtr batch) {
+        ConstDataBatchPtr const_batch = batch;
+
         if (!sink_pool_) {
             std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
             for (auto& sink : sinks_) {
-                auto status = sink->Write(batch);
+                auto status = sink->Write(const_batch);
                 if (!status.ok()) {
                     IL_WARN("Sink write error in pipeline '{}': {}",
                             name_, status.message());
@@ -431,9 +454,21 @@ private:
         }
 
         static constexpr size_t kMaxPendingTasks = 256;
-        if (sink_pool_->PendingTasks() > kMaxPendingTasks) {
+        static constexpr size_t kSinkPoolHighWatermark = 128;
+        const size_t pending = sink_pool_->PendingTasks();
+
+        if (pending > kSinkPoolHighWatermark) {
+            InternalMetrics::Instance().SetGauge(
+                "pipeline_" + name_ + "_sink_pool_backpressure", 1.0);
+        } else {
+            InternalMetrics::Instance().SetGauge(
+                "pipeline_" + name_ + "_sink_pool_backpressure", 0.0);
+        }
+
+        if (pending > kMaxPendingTasks) {
             IL_WARN("Pipeline '{}': SinkPool overloaded ({} pending), dropping batch",
-                    name_, sink_pool_->PendingTasks());
+                    name_, pending);
+            InternalMetrics::Instance().Inc("pipeline_" + name_ + "_sink_drops_total");
             error_count_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -441,8 +476,8 @@ private:
         std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
         for (auto& sink : sinks_) {
             sink_pool_->Submit(
-                [sink, batch, this]() -> void {
-                    auto status = sink->Write(batch);
+                [sink, const_batch, this]() -> void {
+                    auto status = sink->Write(const_batch);
                     if (!status.ok()) {
                         IL_WARN("Sink write error in pipeline '{}': {}",
                                 name_, status.message());
@@ -451,6 +486,14 @@ private:
                 }
             );
         }
+    }
+
+    void SyncSinkPoolMetrics() {
+        if (!sink_pool_) return;
+        auto& m = InternalMetrics::Instance();
+        const size_t pending = sink_pool_->PendingTasks();
+        m.SetGauge("pipeline_" + name_ + "_sink_pool_pending",
+                   static_cast<double>(pending));
     }
 
     void SyncChannelMetrics() {
@@ -484,9 +527,11 @@ private:
     mutable std::shared_mutex sinks_mutex_;
 
     AsyncChannel ingest_channel_;
-    ThreadPool* sink_pool_ = nullptr;
+    std::shared_ptr<ThreadPool> sink_pool_;
 
     std::thread process_thread_;
+
+    std::chrono::steady_clock::time_point last_flush_time_{};
 
     std::atomic<bool> last_backpressure_state_{false};
 

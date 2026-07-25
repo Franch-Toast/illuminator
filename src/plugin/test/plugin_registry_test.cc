@@ -30,7 +30,7 @@ public:
     const char* Name() const override { return "mock_sink"; }
     const char* Version() const override { return "1.0.0"; }
     Status Init(const ConfigValue&) override { return Status::Ok(); }
-    Status Write(DataBatchPtr) override {
+    Status Write(ConstDataBatchPtr) override {
         written_++;
         return Status::Ok();
     }

@@ -58,7 +58,7 @@ public:
         return Status::Ok();
     }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
         std::lock_guard<std::mutex> lk(mu_);
         if (!recording_) return Status::Ok();

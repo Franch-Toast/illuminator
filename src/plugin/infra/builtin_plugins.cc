@@ -22,7 +22,6 @@
 
 // ---- 调度子系统 ----
 #include "plugin/features/sched/sched_analyzer/sched_analyzer_source.h"
-#include "plugin/features/sched/sched_tracer/sched_tracer_source.h"
 #include "plugin/features/sched/offcpu_profiler/offcpu_profiler_source.h"
 
 // ---- I/O 子系统 ----

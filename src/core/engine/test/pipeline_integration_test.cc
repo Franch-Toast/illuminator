@@ -48,7 +48,7 @@ public:
     const char* Name() const override { return "mock_sink"; }
     const char* Version() const override { return "0.1.0"; }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
         std::lock_guard<std::mutex> lock(mu_);
         received_.push_back(batch);
@@ -58,14 +58,14 @@ public:
 
     uint64_t WriteCount() const { return write_count_.load(); }
 
-    std::vector<DataBatchPtr> Received() {
+    std::vector<ConstDataBatchPtr> Received() {
         std::lock_guard<std::mutex> lock(mu_);
         return received_;
     }
 
 private:
     std::mutex mu_;
-    std::vector<DataBatchPtr> received_;
+    std::vector<ConstDataBatchPtr> received_;
     std::atomic<uint64_t> write_count_{0};
 };
 
@@ -396,7 +396,7 @@ public:
 
     explicit SlowSink(int delay_ms = 100) : delay_ms_(delay_ms) {}
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
         write_count_.fetch_add(1, std::memory_order_relaxed);
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms_));
@@ -441,7 +441,7 @@ public:
     const char* Name() const override { return "tag_check_sink"; }
     const char* Version() const override { return "0.1.0"; }
 
-    Status Write(DataBatchPtr batch) override {
+    Status Write(ConstDataBatchPtr batch) override {
         if (!batch) return Status::Ok();
         write_count_.fetch_add(1, std::memory_order_relaxed);
         for (const auto& rec : batch->records()) {
