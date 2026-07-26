@@ -1,7 +1,7 @@
 # Illuminator 系统架构全景分析
 
-> **版本**: 2.0  
-> **日期**: 2026-07-12  
+> **版本**: 3.0  
+> **日期**: 2026-07-26  
 > **状态**: 当前实现 (Implemented)  
 > **目标读者**: 架构师、核心开发者、技术评审
 
@@ -216,7 +216,7 @@ FeatureDriver::Probe()
     │
     ├─ 3. BuildPipeline(infra) ← 子类实现，构建 Source + Processor + Sink 链
     │     │
-    │     ├─ 创建 Source 插件 (Pull 或 Push 模式)
+    │     ├─ 创建 Source 插件 (统一 Collect 模式)
     │     ├─ 创建 Processor 链 (可选: filter, symbolizer, merger)
     │     └─ 附加 SseSink (SSE 实时推送)
     │
@@ -228,7 +228,7 @@ FeatureDriver::Probe()
     ├─ 6. pipeline_->Start() ← 启动 ProcessThread
     │
     ├─ 7. RegisterTimers(infra) ← 基类默认实现
-    │     ├─ Pull Source: TimerWheel::AddRepeating → CollectPool::Submit(Collect)
+    │     ├─ TimerWheel::AddRepeating → CollectPool::Submit(Collect)
     │     └─ Aggregator: TimerWheel::AddRepeating → pipeline_->InjectFlush()
     │
     └─ 8. state_ = kActive
@@ -269,8 +269,8 @@ daemon 启动
 ┌─ Pipeline (每个 FeatureDriver 持有一个) ─────────────────────────────────────┐
 │                                                                              │
 │   ┌─────────────┐                                                            │
-│   │   Source    │ ─── Pull 模式: CollectPool 定时调用 Collect()               │
-│   │   Plugin    │ ─── Push 模式: eBPF callback 直接 Enqueue                  │
+│   │   Source    │ ─── 统一模式: CollectPool 定时调用 Collect()                │
+│   │   Plugin    │     Collect() 内部处理 ring buffer 消费 + map 读取          │
 │   └──────┬──────┘                                                            │
 │          │ TryEnqueue(DataBatchPtr)                                           │
 │          ▼                                                                    │
@@ -308,7 +308,10 @@ daemon 启动
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Pull Source 数据流时序
+### 4.2 统一数据流时序 (Collect 模式)
+
+所有 Source（无论是 procfs 读取还是 eBPF ring buffer 消费）都通过统一的 `Collect()` 入口
+被 TimerWheel + CollectPool 定期驱动。
 
 ```
 TimerWheel       CollectPool      AsyncChannel     ProcessThread     SinkPool        SseHandler
@@ -320,7 +323,9 @@ TimerWheel       CollectPool      AsyncChannel     ProcessThread     SinkPool   
     │───┼───────────→│                │                │                │                │
     │                │                │                │                │                │
     │                │ Collect()      │                │                │                │
-    │                │──┐ 读 /proc    │                │                │                │
+    │                │──┐             │                │                │                │
+    │                │  │ procfs 源: 读 /proc          │                │                │
+    │                │  │ eBPF 源: ring_buffer__consume + CollectFromMaps               │
     │                │←─┘             │                │                │                │
     │                │                │                │                │                │
     │                │ TryEnqueue()   │                │                │                │
@@ -343,40 +348,41 @@ TimerWheel       CollectPool      AsyncChannel     ProcessThread     SinkPool   
     │                │                │                │                │                │──→ 前端
 ```
 
-### 4.3 Push Source (eBPF) 数据流时序
+### 4.3 eBPF Source Collect() 内部流程
 
 ```
-Linux Kernel          eBPF ringbuf         CpuProfilerSource    AsyncChannel     ProcessThread
-    │                      │                      │                  │                │
-    │ perf_event 中断       │                      │                  │                │
-    │──→ BPF 程序执行       │                      │                  │                │
-    │    tgid 过滤 ✓        │                      │                  │                │
-    │    采样 stack trace   │                      │                  │                │
-    │──→ bpf_ringbuf_output │                      │                  │                │
-    │                      │                      │                  │                │
-    │                      │ ring_buffer callback  │                  │                │
-    │                      │─────────────────────→│                  │                │
-    │                      │                      │                  │                │
-    │                      │                      │ Enqueue(batch)   │                │
-    │                      │                      │─────────────────→│                │
-    │                      │                      │  (无锁 CAS)      │                │
-    │                      │                      │                  │ Dequeue()      │
-    │                      │                      │                  │───────────────→│
-    │                      │                      │                  │                │
-    │                      │                      │                  │ Symbolize +    │
-    │                      │                      │                  │ StackMerge     │
-    │                      │                      │                  │ → SseSink      │
-    │                      │                      │                  │ → 前端火焰图    │
+EbpfSourceBase::Collect()
+    │
+    ├─ stub_mode_? ──→ 返回空 DataBatch (优雅降级)
+    │
+    ├─ ring_buf_ 存在?
+    │   ├─ 有 GetEventCallback()?
+    │   │   ├─ pending_batch_ = MakeEventBatch()
+    │   │   ├─ ring_buffer__consume(ring_buf_)    ← 批量排空 ring buffer
+    │   │   │   └─ 每个事件触发 callback → 填入 pending_batch_
+    │   │   └─ event_batch = pending_batch_
+    │   │
+    │   └─ 无 callback → ring_buffer__consume() (仅排空, 不生成 batch)
+    │
+    ├─ map_result = CollectFromMaps()             ← 从 BPF maps 读聚合数据
+    │
+    └─ 返回优先级: event_batch (非空) > map_result
 ```
 
-### 4.4 eBPF Source 架构（EbpfSourceBase）
+### 4.4 eBPF Source 架构（EbpfSourceBase 统一模型）
 
 所有 eBPF Source 插件统一继承 `EbpfSourceBase`，采用 Linux 驱动框架风格的
-"框架 + hooks" 设计模式。PID/Comm 过滤、perf_event 管理等能力通过 `bpf_util`
-工具函数按需调用（类似 Linux `devm_*`），基类不强制使用。
+"框架 + hooks" 设计模式。**不再区分 Push/Pull 模式**，所有数据源由 Pipeline 引擎
+通过 TimerWheel + CollectPool 统一调度 `Collect()`。
+
+PID/Comm 过滤、perf_event 管理等能力通过 `bpf_util` 工具函数按需调用
+（类似 Linux `devm_*`），基类不强制使用。
 
 ```
 SourcePlugin (抽象基类)
+│  - Collect() → 唯一数据入口
+│  - IntervalMs() → 采集周期
+│  - PauseCollection() / ResumeCollection()
 │
 └── EbpfSourceBase                       统一 eBPF Source 基类
     │  - Skeleton 生命周期: open → configure → load → attach → destroy
@@ -384,24 +390,28 @@ SourcePlugin (抽象基类)
     │  - Gate 管理 + MetaStats 自观测
     │  - IL_SKEL_CALLBACKS(skel_name) 宏: 一行生成 skeleton 回调表
     │
-    │  Push 模式: ConsumeAndBatch() — ring_buffer__consume() 批量排空
-    │  Pull 模式: Collect() → CollectFromMaps() 从 BPF maps 读聚合数据
-    │  无独立 poll 线程 — 由 Pipeline 引擎 (TimerWheel + CollectPool) 统一调度
+    │  统一 Collect() 流程:
+    │    1. ring buffer 存在 → ring_buffer__consume() 批量排空
+    │       - 有 GetEventCallback() → 事件填入 pending_batch_ → 返回 event_batch
+    │       - 无 callback → 仅排空不生成 batch
+    │    2. CollectFromMaps() → 从 BPF maps 读聚合数据
+    │    3. 优先返回 event_batch, 否则返回 map_result
     │
     │  子类 Hooks (类似 Linux struct xxx_ops):
     │    OnConfigureRodata()   — load 前写 rodata
     │    OnConfigureMaps()     — load 后配置 BPF maps
     │    OnPostAttach()        — attach 后额外挂载 (如 perf_event)
     │    OnPreDestroy()        — 停止时清理额外资源
-    │    GetEventCallback()    — Push: ring buffer 事件回调
-    │    CollectFromMaps()     — Pull: 从 maps 读聚合数据
+    │    GetEventCallback()    — ring buffer 事件回调 (可选)
+    │    CollectFromMaps()     — 从 maps 读聚合数据 (可选)
+    │    MakeEventBatch()      — 创建事件数据 batch (可选)
     │
-    ├── EbpfIoMonitor          (70 行)   Push — bio tracepoint
-    ├── EbpfNetTracer          (81 行)   Push — inet_sock tracepoint
-    ├── EbpfSchedTracer        (82 行)   Push — sched tracepoint
-    ├── CpuProfilerSource     (337 行)   Pull/Push — perf_event 采样
-    ├── OffcpuProfilerSource  (496 行)   Pull — off-CPU 分析 + 符号解析
-    └── SchedAnalyzerSource   (403 行)   Pull/Push — 调度聚合 + 详细事件
+    ├── EbpfIoMonitor          (70 行)   事件流 — bio tracepoint
+    ├── EbpfNetTracer          (81 行)   事件流 — inet_sock tracepoint
+    ├── EbpfSchedTracer        (82 行)   事件流 — sched tracepoint
+    ├── CpuProfilerSource     (337 行)   事件流 + 聚合 — perf_event 采样
+    ├── OffcpuProfilerSource  (496 行)   聚合 — off-CPU 分析 + 符号解析
+    └── SchedAnalyzerSource   (403 行)   事件流 + 聚合 — 调度分析
 ```
 
 **bpf_util 工具函数** (`src/ebpf_common/loader/bpf_util.h`):
@@ -416,16 +426,23 @@ bpf_util::DisablePerfEvents()       — ioctl PERF_EVENT_IOC_DISABLE
 bpf_util::AdjustPerfFrequency()     — 运行时调整采样频率 (反压)
 ```
 
-**Push vs Pull 数据流对比**:
+**统一 Collect() 数据流**:
 
 ```
-Push (EbpfSourceBase + ConsumeAndBatch):
-  内核 BPF → ring buffer → TimerWheel 定时触发
-           → ring_buffer__consume() 批量排空 → pending_batch_ → pipeline
+统一 Collect() 模型 — 所有 Source 共用同一调度路径:
 
-Pull (EbpfSourceBase + CollectFromMaps):
-  内核 BPF → 内核 map [聚合统计]
-           → TimerWheel Collect() → CollectFromMaps() → pipeline
+  TimerWheel → CollectPool::Submit → Source::Collect()
+    │
+    ├─ procfs 源: 直接读取 /proc → 返回 DataBatch
+    │
+    ├─ eBPF 事件源 (io_monitor, net_tracer 等):
+    │   ring_buffer__consume() 批量排空 → event callback → event_batch → pipeline
+    │
+    ├─ eBPF 聚合源 (offcpu_profiler 等):
+    │   CollectFromMaps() 读 BPF hash map → 返回 DataBatch
+    │
+    └─ eBPF 混合源 (cpu_profiler, sched_analyzer):
+        ring_buffer__consume() + CollectFromMaps() → 择一返回
 ```
 
 ---
@@ -484,7 +501,7 @@ Pull (EbpfSourceBase + CollectFromMaps):
 │  eBPF/procfs 采集                                                               │
 │       │                                                                         │
 │       ▼                                                                         │
-│  Source::Collect() / eBPF callback                                              │
+│  Source::Collect() (统一入口)                                                   │
 │       │                                                                         │
 │       ▼                                                                         │
 │  AsyncChannel (无锁队列, 4096 slots)                                             │
@@ -702,8 +719,8 @@ Pull (EbpfSourceBase + CollectFromMaps):
 │  │    5. ApplyFilterMaps(): 通过 skel_->maps.xxx 直接写入                  │    │
 │  │    6. ring_buffer__new() → 注册 callback                               │    │
 │  │                                                                         │    │
-│  │  Callback (Push 模式):                                                  │    │
-│  │    解析事件 → 构建 StackSample → DataBatch → Enqueue(channel)           │    │
+│  │  Collect() 时:                                                          │    │
+│  │    ring_buffer__consume() → callback → StackSample → DataBatch          │    │
 │  │                                                                         │    │
 │  └─────────────────────────────────────────────────────────────────────────┘    │
 │                                                                                 │
@@ -1129,15 +1146,15 @@ illuminator.yaml.example
 
 ## 十五、已实现的 FeatureDriver 列表
 
-| Driver | Name | Tier | 模式 | 数据源 | 自动启动 |
-|--------|------|------|------|--------|---------|
-| CpuUtilizationDriver | cpu_utilization | Monitoring | Pull | /proc/stat | ✅ |
-| ProcessCpuDriver | process_cpu | Monitoring | Pull | /proc/[pid]/stat | ✅ |
-| CpuProfilerDriver | cpu_profiler | Profiling | Push (eBPF) | perf_event + BPF | ❌ (手动) |
-| OffcpuProfilerDriver | offcpu_profiler | Profiling | Push (eBPF) | sched tracepoint | ❌ (手动) |
-| IoMonitorDriver | io_monitor | Tracing | Push (eBPF) | block I/O tracepoint | ✅ |
-| NetTracerDriver | net_tracer | Tracing | Push (eBPF) | TCP tracepoint | ✅ |
-| SchedAnalyzerDriver | sched_analyzer | Tracing | Push (eBPF) | sched tracepoint | ✅ |
+| Driver | Name | Tier | Collect 策略 | 数据源 | 自动启动 |
+|--------|------|------|-------------|--------|---------|
+| CpuUtilizationDriver | cpu_utilization | Monitoring | procfs 读取 | /proc/stat | ✅ |
+| ProcessCpuDriver | process_cpu | Monitoring | procfs 读取 | /proc/[pid]/stat | ✅ |
+| CpuProfilerDriver | cpu_profiler | Profiling | ring buffer + maps | perf_event + BPF | ❌ (手动) |
+| OffcpuProfilerDriver | offcpu_profiler | Profiling | maps 聚合 | sched tracepoint | ❌ (手动) |
+| IoMonitorDriver | io_monitor | Tracing | ring buffer 事件 | block I/O tracepoint | ✅ |
+| NetTracerDriver | net_tracer | Tracing | ring buffer 事件 | TCP tracepoint | ✅ |
+| SchedAnalyzerDriver | sched_analyzer | Tracing | ring buffer + maps | sched tracepoint | ✅ |
 
 ---
 
@@ -1179,7 +1196,7 @@ src/
 ├── plugin/                            完整插件体系
 │   ├── api/                           插件接口定义
 │   │   ├── plugin_api.h               Plugin 基类 + C ABI (IlPluginDescriptor)
-│   │   ├── source_plugin.h            Source 接口 (Pull/Push 模式)
+│   │   ├── source_plugin.h            Source 接口 (统一 Collect 模式)
 │   │   ├── processor_plugin.h         Processor 接口
 │   │   ├── aggregator_plugin.h        Aggregator 接口
 │   │   ├── sink_plugin.h              Sink 接口
@@ -1262,7 +1279,7 @@ web/src/
 
 | 维度 | Illuminator | Prometheus | Grafana Agent | Vector |
 |------|-------------|-----------|---------------|--------|
-| 采集模型 | Push (eBPF) + Pull (procfs) | Pull only | Push + Pull | Push + Pull |
+| 采集模型 | 统一 Collect (eBPF + procfs) | Pull only | Push + Pull | Push + Pull |
 | 数据传输 | SSE (直推) | HTTP Scrape | gRPC/HTTP | TCP/HTTP |
 | 管道架构 | Per-Feature Pipeline | 无管道 | Component DAG | Topology DAG |
 | 驱动模型 | Linux Driver 风格 | 无 | Component 注册 | Transform 链 |

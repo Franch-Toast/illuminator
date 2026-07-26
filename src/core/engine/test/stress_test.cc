@@ -71,54 +71,27 @@ uint64_t GetRssBytes() {
 // Mock 组件
 // ===========================================================================
 
-// HighThroughputPushSource — Push 模式高速数据源
-// 以可控速率推送数据，用于高吞吐测试。
-class HighThroughputPushSource : public SourcePlugin {
+// HighThroughputSource — 高速数据源
+// Collect() 每次返回一条记录，由外部定时器以高频调用。
+class HighThroughputSource : public SourcePlugin {
 public:
-    const char* Name() const override { return "ht_push_source"; }
+    const char* Name() const override { return "ht_source"; }
     const char* Version() const override { return "0.1.0"; }
-    bool IsPushMode() const override { return true; }
+    uint32_t IntervalMs() const override { return 1; }
 
-    // interval_us: 每次推送之间的间隔（微秒），0 = 尽可能快
-    explicit HighThroughputPushSource(int interval_us = 0)
-        : interval_us_(interval_us) {}
-
-    Status Start() override {
-        running_ = true;
-        push_thread_ = std::thread([this] {
-            while (running_) {
-                if (callback_) {
-                    auto batch = std::make_shared<DataBatch>(
-                        DataBatch::Type::kMetrics);
-                    auto& rec = batch->AddRecord();
-                    rec.SetField(batch->InternString("seq"),
-                                 static_cast<int64_t>(
-                                     pushed_count_.load()));
-                    callback_(std::move(batch));
-                    pushed_count_.fetch_add(1, std::memory_order_relaxed);
-                }
-                if (interval_us_ > 0) {
-                    std::this_thread::sleep_for(
-                        std::chrono::microseconds(interval_us_));
-                }
-            }
-        });
-        return Status::Ok();
+    StatusOr<DataBatchPtr> Collect() override {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        auto& rec = batch->AddRecord();
+        rec.SetField(batch->InternString("seq"),
+                     static_cast<int64_t>(
+                         collected_count_.fetch_add(1, std::memory_order_relaxed)));
+        return batch;
     }
 
-    Status Stop() override {
-        running_ = false;
-        if (push_thread_.joinable()) push_thread_.join();
-        return Status::Ok();
-    }
-
-    uint64_t PushedCount() const { return pushed_count_.load(); }
+    uint64_t CollectedCount() const { return collected_count_.load(); }
 
 private:
-    int interval_us_;
-    std::atomic<bool> running_{false};
-    std::atomic<uint64_t> pushed_count_{0};
-    std::thread push_thread_;
+    std::atomic<uint64_t> collected_count_{0};
 };
 
 // FastCountingSink — 快速计数 Sink，仅递增计数器，无 I/O
@@ -180,11 +153,34 @@ protected:
     }
 
     void TearDown() override {
+        for (auto id : timer_ids_) {
+            InfrastructureManager::Instance().GetTimerWheel().Cancel(id);
+        }
+        timer_ids_.clear();
         auto& infra = InfrastructureManager::Instance();
         if (infra.IsStarted()) {
             infra.Stop();
         }
     }
+
+    uint64_t DriveCollect(Pipeline* pipe, uint32_t interval_ms = 1) {
+        auto& infra = InfrastructureManager::Instance();
+        auto id = infra.GetTimerWheel().AddRepeating(
+            std::chrono::milliseconds(interval_ms),
+            [pipe, &infra] {
+                infra.GetCollectPool()->Submit([pipe] {
+                    auto* src = pipe->GetSource();
+                    if (!src) return 0;
+                    auto result = src->Collect();
+                    if (result.ok()) pipe->Enqueue(std::move(result.value()));
+                    return 0;
+                });
+            });
+        timer_ids_.push_back(id);
+        return id;
+    }
+
+    std::vector<uint64_t> timer_ids_;
 };
 
 // ===========================================================================
@@ -194,7 +190,7 @@ TEST_F(StressTest, SinglePipelineHighThroughputNoLoss) {
     auto duration = std::chrono::seconds(GetStressDurationSec());
 
     auto pipe = std::make_unique<Pipeline>("stress_ht", 65536);
-    auto source = std::make_unique<HighThroughputPushSource>(10);  // ~100k/s
+    auto source = std::make_unique<HighThroughputSource>();
     auto* source_ptr = source.get();
     pipe->SetSource(std::move(source));
 
@@ -204,6 +200,7 @@ TEST_F(StressTest, SinglePipelineHighThroughputNoLoss) {
     pipe->SetSinkPool(InfrastructureManager::Instance().GetSinkPool());
 
     ASSERT_TRUE(pipe->Start().ok());
+    DriveCollect(pipe.get());
 
     auto start = std::chrono::steady_clock::now();
     std::this_thread::sleep_for(duration);
@@ -213,7 +210,7 @@ TEST_F(StressTest, SinglePipelineHighThroughputNoLoss) {
 
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         end - start).count();
-    uint64_t pushed = source_ptr->PushedCount();
+    uint64_t pushed = source_ptr->CollectedCount();
     uint64_t received = sink_ptr->BatchCount();
     uint64_t dropped = pipe->ChannelDropped();
 
@@ -248,7 +245,7 @@ TEST_F(StressTest, MultiplePipelinesParallelThroughput) {
 
     struct PipelineCtx {
         std::unique_ptr<Pipeline> pipe;
-        HighThroughputPushSource* source;
+        HighThroughputSource* source;
         FastCountingSink* sink;
     };
 
@@ -260,7 +257,7 @@ TEST_F(StressTest, MultiplePipelinesParallelThroughput) {
         ctx.pipe = std::make_unique<Pipeline>(
             "stress_multi_" + std::to_string(i), 16384);
 
-        auto source = std::make_unique<HighThroughputPushSource>(50);  // ~20k/s
+        auto source = std::make_unique<HighThroughputSource>();
         ctx.source = source.get();
         ctx.pipe->SetSource(std::move(source));
 
@@ -271,6 +268,7 @@ TEST_F(StressTest, MultiplePipelinesParallelThroughput) {
             InfrastructureManager::Instance().GetSinkPool());
 
         ASSERT_TRUE(ctx.pipe->Start().ok());
+        DriveCollect(ctx.pipe.get());
         ctxs.push_back(std::move(ctx));
     }
 
@@ -280,7 +278,7 @@ TEST_F(StressTest, MultiplePipelinesParallelThroughput) {
     uint64_t total_received = 0;
     for (auto& ctx : ctxs) {
         ctx.pipe->Stop();
-        total_pushed += ctx.source->PushedCount();
+        total_pushed += ctx.source->CollectedCount();
         total_received += ctx.sink->BatchCount();
     }
 
@@ -289,7 +287,7 @@ TEST_F(StressTest, MultiplePipelinesParallelThroughput) {
 
     // 每个 Pipeline 都应该处理了数据
     for (size_t i = 0; i < ctxs.size(); ++i) {
-        EXPECT_GT(ctxs[i].source->PushedCount(), 0u)
+        EXPECT_GT(ctxs[i].source->CollectedCount(), 0u)
             << "Pipeline " << i << " pushed no data";
         EXPECT_GT(ctxs[i].sink->BatchCount(), 0u)
             << "Pipeline " << i << " received no data";
@@ -311,7 +309,7 @@ TEST_F(StressTest, DynamicSinkAddRemoveDuringRun) {
     auto duration = std::chrono::seconds(GetStressDurationSec());
 
     auto pipe = std::make_unique<Pipeline>("stress_dynamic_sink", 8192);
-    pipe->SetSource(std::make_unique<HighThroughputPushSource>(100));
+    pipe->SetSource(std::make_unique<HighThroughputSource>());
 
     // 初始静态 Sink
     auto static_sink = std::make_unique<FastCountingSink>();
@@ -320,6 +318,7 @@ TEST_F(StressTest, DynamicSinkAddRemoveDuringRun) {
     pipe->SetSinkPool(InfrastructureManager::Instance().GetSinkPool());
 
     ASSERT_TRUE(pipe->Start().ok());
+    DriveCollect(pipe.get());
 
     std::atomic<bool> stop{false};
     std::atomic<int> add_count{0};
@@ -433,13 +432,14 @@ TEST_F(StressTest, MemoryStabilityRssGrowth) {
     uint64_t rss_before = GetRssBytes();
 
     auto pipe = std::make_unique<Pipeline>("stress_mem", 16384);
-    pipe->SetSource(std::make_unique<HighThroughputPushSource>(50));
+    pipe->SetSource(std::make_unique<HighThroughputSource>());
     auto sink = std::make_unique<FastCountingSink>();
     auto* sink_ptr = sink.get();
     pipe->AddSink(std::move(sink));
     pipe->SetSinkPool(InfrastructureManager::Instance().GetSinkPool());
 
     ASSERT_TRUE(pipe->Start().ok());
+    DriveCollect(pipe.get());
 
     std::this_thread::sleep_for(duration);
 

@@ -201,36 +201,21 @@ TEST_F(FeatureDriverTest, BusListDrivers) {
 }
 
 // ========================================================================
-// Push-mode Pause/Resume 测试
+// Pause/Resume 测试
 // ========================================================================
 
-class MockPushSource : public SourcePlugin {
+class MockPausableSource : public SourcePlugin {
 public:
-    const char* Name() const override { return "mock_push"; }
+    const char* Name() const override { return "mock_pausable"; }
     const char* Version() const override { return "1.0.0"; }
-    bool IsPushMode() const override { return true; }
+    uint32_t IntervalMs() const override { return 30; }
 
-    Status Start() override {
-        running_ = true;
-        push_thread_ = std::thread([this] {
-            while (running_) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(30));
-                if (running_ && !paused_ && callback_) {
-                    auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
-                    batch->AddRecord();
-                    callback_(std::move(batch));
-                    push_count_.fetch_add(1);
-                }
-            }
-        });
-        return Status::Ok();
-    }
-
-    Status Stop() override {
-        running_ = false;
-        paused_ = false;
-        if (push_thread_.joinable()) push_thread_.join();
-        return Status::Ok();
+    StatusOr<DataBatchPtr> Collect() override {
+        if (paused_) return std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        batch->AddRecord();
+        collect_count_.fetch_add(1);
+        return batch;
     }
 
     Status PauseCollection() override {
@@ -245,32 +230,30 @@ public:
         return Status::Ok();
     }
 
-    int PushCount() const { return push_count_.load(); }
+    int CollectCount() const { return collect_count_.load(); }
     int PauseCalled() const { return pause_called_.load(); }
     int ResumeCalled() const { return resume_called_.load(); }
 
 private:
-    std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
-    std::atomic<int> push_count_{0};
+    std::atomic<int> collect_count_{0};
     std::atomic<int> pause_called_{0};
     std::atomic<int> resume_called_{0};
-    std::thread push_thread_;
 };
 
-class PushTestDriver : public FeatureDriver {
+class PauseTestDriver : public FeatureDriver {
 public:
-    const char* Name() const override { return "push_test"; }
-    const char* DisplayName() const override { return "Push Test"; }
+    const char* Name() const override { return "pause_test"; }
+    const char* DisplayName() const override { return "Pause Test"; }
     const char* Category() const override { return "test"; }
     DriverTier Tier() const override { return DriverTier::kMonitoring; }
 
-    MockPushSource* GetMockSource() { return mock_src_; }
+    MockPausableSource* GetMockSource() { return mock_src_; }
 
 protected:
     std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) override {
-        auto pipeline = std::make_unique<Pipeline>("push_test");
-        auto src = std::make_unique<MockPushSource>();
+        auto pipeline = std::make_unique<Pipeline>("pause_test");
+        auto src = std::make_unique<MockPausableSource>();
         mock_src_ = src.get();
         pipeline->SetSource(std::move(src));
         pipeline->AddSink(std::make_unique<MockSink>());
@@ -278,12 +261,12 @@ protected:
     }
 
 private:
-    MockPushSource* mock_src_ = nullptr;
+    MockPausableSource* mock_src_ = nullptr;
 };
 
-TEST_F(FeatureDriverTest, PushModePauseCallsPauseCollection) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, PauseCallsPauseCollection) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
     EXPECT_EQ(driver.GetMockSource()->PauseCalled(), 0);
@@ -295,9 +278,9 @@ TEST_F(FeatureDriverTest, PushModePauseCallsPauseCollection) {
     driver.Remove();
 }
 
-TEST_F(FeatureDriverTest, PushModeResumeCallsResumeCollection) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, ResumeCallsResumeCollection) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
     ASSERT_TRUE(driver.Pause().ok());
@@ -309,51 +292,51 @@ TEST_F(FeatureDriverTest, PushModeResumeCallsResumeCollection) {
     driver.Remove();
 }
 
-TEST_F(FeatureDriverTest, PushModePauseStopsDataFlow) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, PauseStopsDataFlow) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
-    int before_pause = driver.GetMockSource()->PushCount();
+    int before_pause = driver.GetMockSource()->CollectCount();
     EXPECT_GT(before_pause, 0);
 
     ASSERT_TRUE(driver.Pause().ok());
 
-    int at_pause = driver.GetMockSource()->PushCount();
+    int at_pause = driver.GetMockSource()->CollectCount();
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
-    int after_pause = driver.GetMockSource()->PushCount();
+    int after_pause = driver.GetMockSource()->CollectCount();
 
     EXPECT_EQ(at_pause, after_pause)
-        << "Push source should not emit events while paused";
+        << "Source should not collect data while paused";
 
     driver.Remove();
 }
 
-TEST_F(FeatureDriverTest, PushModePauseResumeFullCycle) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, PauseResumeFullCycle) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     ASSERT_TRUE(driver.Pause().ok());
-    int paused_count = driver.GetMockSource()->PushCount();
+    int paused_count = driver.GetMockSource()->CollectCount();
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_EQ(driver.GetMockSource()->PushCount(), paused_count);
+    EXPECT_EQ(driver.GetMockSource()->CollectCount(), paused_count);
 
     ASSERT_TRUE(driver.Resume().ok());
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    EXPECT_GT(driver.GetMockSource()->PushCount(), paused_count)
-        << "Push source should resume emitting after resume";
+    EXPECT_GT(driver.GetMockSource()->CollectCount(), paused_count)
+        << "Source should resume collecting after resume";
 
     driver.Remove();
 }
 
-TEST_F(FeatureDriverTest, PushModePauseTwiceReturnsError) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, PauseTwiceReturnsError) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
     EXPECT_TRUE(driver.Pause().ok());
@@ -361,18 +344,18 @@ TEST_F(FeatureDriverTest, PushModePauseTwiceReturnsError) {
     driver.Remove();
 }
 
-TEST_F(FeatureDriverTest, PushModeResumeWithoutPauseReturnsError) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, ResumeWithoutPauseReturnsError) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
     EXPECT_FALSE(driver.Resume().ok());
     driver.Remove();
 }
 
-TEST_F(FeatureDriverTest, PushModeRemoveWhilePaused) {
-    PushTestDriver driver;
-    FeatureBus::Instance().Unregister("push_test");
+TEST_F(FeatureDriverTest, RemoveWhilePaused) {
+    PauseTestDriver driver;
+    FeatureBus::Instance().Unregister("pause_test");
 
     ASSERT_TRUE(driver.Probe().ok());
     ASSERT_TRUE(driver.Pause().ok());
@@ -380,8 +363,8 @@ TEST_F(FeatureDriverTest, PushModeRemoveWhilePaused) {
     EXPECT_EQ(driver.State(), DriverState::kInactive);
 }
 
-// Pull-mode 回归测试：确认 PauseCollection 也被调用但是 no-op
-TEST_F(FeatureDriverTest, PullModePauseStillCallsPauseCollection) {
+// 默认源回归测试：确认 PauseCollection 也被调用但是 no-op
+TEST_F(FeatureDriverTest, DefaultSourcePauseStillCallsPauseCollection) {
     TestDriver driver;
     ASSERT_TRUE(driver.Probe().ok());
     EXPECT_TRUE(driver.Pause().ok());

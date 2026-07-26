@@ -22,7 +22,7 @@ public:
         d.category = "io"; d.version = "1.0.0";
         d.tier = DriverTier::kTracing;
         d.model = DataModelType::kTrace;
-        d.supports_push = true; d.supports_pull = false;
+        d.supports_pull = true;
         d.supports_pause = true; d.has_bpf_probe = true;
         return d;
     }

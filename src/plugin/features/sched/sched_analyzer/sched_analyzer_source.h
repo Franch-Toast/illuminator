@@ -5,9 +5,9 @@
 // 基于 EbpfSourceBase 重写。
 // 旧版实现保留在 sched_analyzer.legacy.h 作为功能参考。
 //
-// 两种工作模式：
-//   - 聚合模式（Pull，默认）：Collect() → CollectFromMaps() 从 sched_agg 读聚合统计
-//   - 详细模式（Push，detailed_mode=true）：ring buffer 推送每条调度事件
+// 两种工作模式（统一由 Collect() 处理）：
+//   - 聚合模式（默认）：CollectFromMaps() 从 sched_agg 读聚合统计
+//   - 详细模式（detailed_mode=true）：GetEventCallback() 消费 ring buffer 中的逐条事件
 // ============================================================================
 
 #pragma once
@@ -66,7 +66,6 @@ class SchedAnalyzerSource : public EbpfSourceBase {
 public:
     const char* Name() const override { return "sched_analyzer"; }
     const char* Version() const override { return "2.0.0"; }
-    bool IsPushMode() const override { return detailed_mode_; }
     uint32_t IntervalMs() const override { return aggregate_interval_ms_; }
 
     Status Init(const ConfigValue& config) override {
@@ -106,7 +105,7 @@ public:
         return detailed_mode_ ? HandleDetailedEvent : nullptr;
     }
 
-    DataBatchPtr MakePushBatch() override {
+    DataBatchPtr MakeEventBatch() override {
         return std::make_shared<DataBatch>(DataBatch::Type::kTrace);
     }
 

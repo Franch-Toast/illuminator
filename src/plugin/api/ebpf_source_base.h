@@ -11,8 +11,7 @@
 //   3. MetaStats 自观测统计
 //   4. 状态管理 (running / paused / stub)
 //   5. Start/Stop/Pause/Resume 标准流程
-//   6. Push 模式：ring_buffer__consume() 批量排空（无独立 poll 线程）
-//   7. Pull 模式：CollectFromMaps() 从 BPF maps 读取聚合数据
+//   6. 统一的 Collect() 入口：自动消费 ring buffer + 读取 BPF maps
 //
 // 子类只需填充 hooks（类似 Linux 驱动填写 xxx_ops）：
 //   - MakeSkelCallbacks()    — 必须：skeleton 操作函数指针
@@ -20,8 +19,8 @@
 //   - OnConfigureMaps()      — 可选：load 后写 BPF maps
 //   - OnPostAttach()         — 可选：attach 后额外挂载（如 perf_event）
 //   - OnPreDestroy()         — 可选：停止时清理额外资源
-//   - GetEventCallback()     — Push 模式：ring buffer 事件回调
-//   - CollectFromMaps()      — Pull 模式：从 maps 读聚合数据
+//   - GetEventCallback()     — 可选：ring buffer 事件回调（返回非空则消费事件）
+//   - CollectFromMaps()      — 可选：从 BPF maps 读聚合数据
 //
 // PID/Comm 过滤、perf_event 管理等能力通过 bpf_util 工具函数提供，
 // 子类在自己的 hook 中按需调用，基类不强制使用。
@@ -237,36 +236,35 @@ public:
     }
 
     // ================================================================
-    // Collect — Pull 模式入口
+    // Collect — 统一的数据采集入口
     // ================================================================
+    // TimerWheel 定时调用。自动处理两种数据源：
+    //   1. ring buffer 事件（如果 GetEventCallback() 返回非空）
+    //   2. BPF map 聚合数据（如果子类覆写了 CollectFromMaps()）
+    // 两种可以单独使用，也可以在同一个 Source 中共存。
     StatusOr<DataBatchPtr> Collect() override {
         if (stub_mode_) {
             return std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
         }
+
+        DataBatchPtr event_batch;
         if (ring_buf_) {
-            ring_buffer__consume(ring_buf_);
+            if (GetEventCallback()) {
+                pending_batch_ = MakeEventBatch();
+                ring_buffer__consume(ring_buf_);
+                event_batch = std::move(pending_batch_);
+                pending_batch_ = nullptr;
+            } else {
+                ring_buffer__consume(ring_buf_);
+            }
         }
-        return CollectFromMaps();
-    }
 
-    // ================================================================
-    // ConsumeAndBatch — Push 模式：非阻塞批量消费 ring buffer
-    // ================================================================
-    // 由 TimerWheel + CollectPool 定时调用。
-    // 子类的 HandleEvent 回调将事件添加到 pending_batch_，
-    // 消费完成后整个 batch 一次性入队 pipeline。
-    void ConsumeAndBatch() {
-        if (!ring_buf_ || !running_.load(std::memory_order_acquire) ||
-            paused_.load(std::memory_order_acquire))
-            return;
+        auto map_result = CollectFromMaps();
 
-        pending_batch_ = MakePushBatch();
-        ring_buffer__consume(ring_buf_);
-
-        if (pending_batch_ && !pending_batch_->Empty() && callback_) {
-            callback_(std::move(pending_batch_));
+        if (event_batch && !event_batch->Empty()) {
+            return event_batch;
         }
-        pending_batch_ = nullptr;
+        return map_result;
     }
 
 protected:
@@ -297,16 +295,16 @@ protected:
     // Data Hooks — 子类至少实现一个
     // ================================================================
 
-    // Push 模式：返回 ring buffer 事件回调函数指针
-    // 返回 nullptr 表示不使用 Push 模式
+    // ring buffer 事件回调。返回非空时，Collect() 会消费 ring buffer
+    // 并将事件打包到 pending_batch_ 中。返回 nullptr 表示不消费事件。
     virtual ring_buffer_sample_fn GetEventCallback() const { return nullptr; }
 
-    // Push 模式：创建用于批量打包的空 DataBatch
-    virtual DataBatchPtr MakePushBatch() {
+    // 创建 ring buffer 事件的批量容器（子类可覆写以指定 DataBatch 类型）
+    virtual DataBatchPtr MakeEventBatch() {
         return std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
     }
 
-    // Pull 模式：从 BPF maps 读取聚合数据
+    // 从 BPF maps 读取聚合数据（子类可覆写以读取 HashMap 等）
     virtual StatusOr<DataBatchPtr> CollectFromMaps() {
         return std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
     }

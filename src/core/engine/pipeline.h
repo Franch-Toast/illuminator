@@ -11,14 +11,13 @@
 //   SinkPool (K threads)   — 并行执行 Sink::Write()
 //
 // 数据流：
-//   Push Source → channel.TryEnqueue(DataBatch)  ─┐
-//   TimerWheel → CollectPool → src.Collect()     ─┤→ AsyncChannel(ChannelItem)
-//   TimerWheel → channel.InjectFlush()           ─┘        │
-//                                                          ▼
-//                                                   ProcessThread
-//                                                   match event:
-//                                                     DataBatch  → Process → Sink
-//                                                     Sentinel   → Flush   → Sink
+//   TimerWheel → CollectPool → src.Collect()     ─┐→ AsyncChannel(ChannelItem)
+//   TimerWheel → channel.InjectFlush()            ─┘        │
+//                                                           ▼
+//                                                    ProcessThread
+//                                                    match event:
+//                                                      DataBatch  → Process → Sink
+//                                                      Sentinel   → Flush   → Sink
 //
 // 生命周期：
 //   构造 → SetSource/AddProcessor/SetAggregator/AddSink → SetSinkPool
@@ -76,7 +75,7 @@ inline DropPolicy ResolveDropPolicy(const std::string& policy) {
 //
 // 每个 Pipeline 拥有独立的 AsyncChannel 和 ProcessThread。
 // 管道之间完全隔离，一个管道阻塞不影响其他管道。
-// 支持 Pull（定时轮询）和 Push（eBPF 回调）两种数据源模式。
+// 所有数据源统一通过 TimerWheel 定时调用 Collect() 采集。
 // SinkPool 由 FeatureDriver::Probe() 设置，Pipeline 通过 shared_ptr 持有。
 class Pipeline {
 public:
@@ -197,12 +196,6 @@ public:
             SetThreadName(name_.substr(0, 15));
             ProcessLoop();
         });
-
-        if (source_->IsPushMode()) {
-            source_->SetCallback([this](DataBatchPtr batch) {
-                Enqueue(std::move(batch));
-            });
-        }
 
         IL_INFO("Pipeline '{}' started (v3 event-driven, channel capacity={})",
                 name_, ingest_channel_.capacity());

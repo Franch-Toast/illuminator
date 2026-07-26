@@ -259,57 +259,38 @@ TEST(PipelineIntegrationTest, RunProcessorsDirectlyAppliesProcessorChain) {
     EXPECT_EQ(result.value(), batch);
 }
 
-// MockPushSource: 模拟 Push-mode 数据源（如 eBPF 探针）
-class MockPushSource : public SourcePlugin {
+// MockEventSource: 模拟产生 ring buffer 事件的 eBPF 数据源
+class MockEventSource : public SourcePlugin {
 public:
-    const char* Name() const override { return "mock_push_source"; }
+    const char* Name() const override { return "mock_event_source"; }
     const char* Version() const override { return "0.1.0"; }
-    bool IsPushMode() const override { return true; }
+    uint32_t IntervalMs() const override { return 50; }
 
-    Status Start() override {
-        running_ = true;
-        push_thread_ = std::thread([this] {
-            while (running_) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                if (callback_) {
-                    auto batch = std::make_shared<DataBatch>(
-                        DataBatch::Type::kProfile);
-                    auto& s = batch->AddStackSample();
-                    s.pid = 1234;
-                    s.tid = 1234;
-                    s.count = 1;
-                    callback_(std::move(batch));
-                    push_count_.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-        });
-        return Status::Ok();
+    StatusOr<DataBatchPtr> Collect() override {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        auto& s = batch->AddStackSample();
+        s.pid = 1234;
+        s.tid = 1234;
+        s.count = 1;
+        collect_count_.fetch_add(1, std::memory_order_relaxed);
+        return batch;
     }
 
-    Status Stop() override {
-        running_ = false;
-        if (push_thread_.joinable())
-            push_thread_.join();
-        return Status::Ok();
-    }
-
-    uint64_t PushCount() const { return push_count_.load(); }
+    uint64_t CollectCount() const { return collect_count_.load(); }
 
 private:
-    std::atomic<bool> running_{false};
-    std::atomic<uint64_t> push_count_{0};
-    std::thread push_thread_;
+    std::atomic<uint64_t> collect_count_{0};
 };
 
-// 测试：Push-mode 源通过 Pipeline 直接工作
-TEST(PipelineIntegrationTest, PushModeSourceWorksDirectly) {
+// 测试：事件源通过 Pipeline + TimerWheel 工作
+TEST(PipelineIntegrationTest, EventSourceWorksWithCollect) {
     auto& infra = InfrastructureManager::Instance();
     if (!infra.IsStarted()) {
         infra.Start({.collect_pool_threads = 1, .sink_pool_threads = 2});
     }
 
-    auto pipe = std::make_unique<Pipeline>("test_push_mode");
-    pipe->SetSource(std::make_unique<MockPushSource>());
+    auto pipe = std::make_unique<Pipeline>("test_event_source");
+    pipe->SetSource(std::make_unique<MockEventSource>());
 
     auto sink = std::make_unique<MockSink>();
     auto* sink_ptr = sink.get();
@@ -318,31 +299,37 @@ TEST(PipelineIntegrationTest, PushModeSourceWorksDirectly) {
 
     ASSERT_TRUE(pipe->Start().ok());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    auto* src = pipe->GetSource();
+    for (int i = 0; i < 5; ++i) {
+        auto result = src->Collect();
+        if (result.ok()) pipe->Enqueue(std::move(result.value()));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     pipe->Stop();
 
     EXPECT_GT(sink_ptr->WriteCount(), 0u);
 }
 
-// 测试：多个 Push-mode Pipeline 可以独立启动
-TEST(PipelineIntegrationTest, MultiplePushModePipelinesStartIndependently) {
+// 测试：多个 Pipeline 可以独立启动
+TEST(PipelineIntegrationTest, MultiplePipelinesStartIndependently) {
     auto& infra = InfrastructureManager::Instance();
     if (!infra.IsStarted()) {
         infra.Start({.collect_pool_threads = 1, .sink_pool_threads = 2});
     }
 
-    auto create_push_pipeline = [&](const std::string& name) {
+    auto create_pipeline = [&](const std::string& name) {
         auto pipe = std::make_unique<Pipeline>(name);
-        pipe->SetSource(std::make_unique<MockPushSource>());
+        pipe->SetSource(std::make_unique<MockEventSource>());
         pipe->AddSink(std::make_unique<MockSink>());
         pipe->SetSinkPool(infra.GetSinkPool());
         return pipe;
     };
 
-    auto p1 = create_push_pipeline("push_1");
-    auto p2 = create_push_pipeline("push_2");
-    auto p3 = create_push_pipeline("push_3");
+    auto p1 = create_pipeline("evt_1");
+    auto p2 = create_pipeline("evt_2");
+    auto p3 = create_pipeline("evt_3");
 
     ASSERT_TRUE(p1->Start().ok());
     ASSERT_TRUE(p2->Start().ok());
@@ -526,50 +513,64 @@ private:
     std::atomic<uint64_t> foreign_count_{0};
 };
 
-// PausablePushSource — 支持 PauseCollection/ResumeCollection 的 push 源
-class PausablePushSource : public SourcePlugin {
+// PausableSource — 支持 PauseCollection/ResumeCollection 的数据源
+class PausableSource : public SourcePlugin {
 public:
-    const char* Name() const override { return "pausable_push_source"; }
+    const char* Name() const override { return "pausable_source"; }
     const char* Version() const override { return "0.1.0"; }
-    bool IsPushMode() const override { return true; }
+    uint32_t IntervalMs() const override { return 50; }
 
-    Status Start() override {
-        running_ = true;
-        push_thread_ = std::thread([this] {
-            while (running_) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                if (!paused_ && callback_) {
-                    auto batch = std::make_shared<DataBatch>(
-                        DataBatch::Type::kProfile);
-                    auto& s = batch->AddStackSample();
-                    s.pid = 1234;
-                    s.tid = 1234;
-                    s.count = 1;
-                    callback_(std::move(batch));
-                    push_count_.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-        });
-        return Status::Ok();
-    }
-
-    Status Stop() override {
-        running_ = false;
-        if (push_thread_.joinable()) push_thread_.join();
-        return Status::Ok();
+    StatusOr<DataBatchPtr> Collect() override {
+        if (paused_) return std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kProfile);
+        auto& s = batch->AddStackSample();
+        s.pid = 1234;
+        s.tid = 1234;
+        s.count = 1;
+        collect_count_.fetch_add(1, std::memory_order_relaxed);
+        return batch;
     }
 
     Status PauseCollection() override { paused_ = true; return Status::Ok(); }
     Status ResumeCollection() override { paused_ = false; return Status::Ok(); }
 
-    uint64_t PushCount() const { return push_count_.load(); }
+    uint64_t CollectCount() const { return collect_count_.load(); }
     bool IsPaused() const { return paused_.load(); }
 
 private:
-    std::atomic<bool> running_{false};
     std::atomic<bool> paused_{false};
-    std::atomic<uint64_t> push_count_{0};
-    std::thread push_thread_;
+    std::atomic<uint64_t> collect_count_{0};
+};
+
+class CollectDriver {
+public:
+    CollectDriver(Pipeline* pipe, uint32_t interval_ms = 0)
+        : pipe_(pipe), running_(true) {
+        if (interval_ms == 0 && pipe->GetSource()) {
+            interval_ms = pipe->GetSource()->IntervalMs();
+        }
+        if (interval_ms == 0) interval_ms = 50;
+        thread_ = std::thread([this, interval_ms] {
+            while (running_.load(std::memory_order_relaxed)) {
+                if (auto* src = pipe_->GetSource()) {
+                    auto result = src->Collect();
+                    if (result.ok() && result.value() && !result.value()->Empty()) {
+                        pipe_->Enqueue(std::move(result.value()));
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+            }
+        });
+    }
+    ~CollectDriver() { Stop(); }
+    void Stop() {
+        running_.store(false, std::memory_order_relaxed);
+        if (thread_.joinable()) thread_.join();
+    }
+private:
+    Pipeline* pipe_;
+    std::atomic<bool> running_;
+    std::thread thread_;
 };
 
 // =========================================================================
@@ -642,13 +643,14 @@ TEST(PipelineIntegrationTest, PauseResumeStopsAndResumesDataFlow) {
     }
 
     auto pipe = std::make_unique<Pipeline>("test_pause_resume_int");
-    pipe->SetSource(std::make_unique<PausablePushSource>());
+    pipe->SetSource(std::make_unique<PausableSource>());
     auto sink = std::make_unique<MockSink>();
     auto* sink_ptr = sink.get();
     pipe->AddSink(std::move(sink));
     pipe->SetSinkPool(infra.GetSinkPool());
 
     ASSERT_TRUE(pipe->Start().ok());
+    CollectDriver driver(pipe.get());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     uint64_t count_before = sink_ptr->WriteCount();
@@ -657,18 +659,23 @@ TEST(PipelineIntegrationTest, PauseResumeStopsAndResumesDataFlow) {
     // 暂停采集
     auto* src = pipe->GetSource();
     ASSERT_TRUE(src->PauseCollection().ok());
-    EXPECT_TRUE(static_cast<PausablePushSource*>(src)->IsPaused());
+    EXPECT_TRUE(static_cast<PausableSource*>(src)->IsPaused());
 
+    uint64_t count_at_pause = sink_ptr->WriteCount();
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    uint64_t count_during_pause = sink_ptr->WriteCount();
+    EXPECT_EQ(count_during_pause, count_at_pause)
+        << "Data should not flow while paused";
 
     // 恢复采集
     ASSERT_TRUE(src->ResumeCollection().ok());
-    EXPECT_FALSE(static_cast<PausablePushSource*>(src)->IsPaused());
+    EXPECT_FALSE(static_cast<PausableSource*>(src)->IsPaused());
 
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
     uint64_t count_after = sink_ptr->WriteCount();
-    EXPECT_GT(count_after, count_before);
+    EXPECT_GT(count_after, count_during_pause);
 
+    driver.Stop();
     pipe->Stop();
 }
 

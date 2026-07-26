@@ -5,9 +5,9 @@
 // 基于 EbpfSourceBase 重写。
 // 旧版实现保留在 cpu_profiler.legacy.h 作为功能参考。
 //
-// 两种工作模式：
-//   - aggregated（Pull，默认）：Collect() → CollectFromMaps() 从 stack_counts 读聚合数据
-//   - stream（Push）：ring buffer → ConsumeAndBatch() 批量消费
+// 两种工作模式（统一由 Collect() 处理）：
+//   - aggregated（默认）：CollectFromMaps() 从 stack_counts 读聚合数据
+//   - stream：GetEventCallback() 消费 ring buffer 中的逐条采样事件
 //
 // perf_event 管理通过 bpf_util 工具函数完成，无独立线程。
 // ============================================================================
@@ -39,7 +39,6 @@ class CpuProfilerSource : public EbpfSourceBase {
 public:
     const char* Name() const override { return "cpu_profiler"; }
     const char* Version() const override { return "2.0.0"; }
-    bool IsPushMode() const override { return stream_mode_; }
 
     Status Init(const ConfigValue& config) override {
         frequency_hz_ = static_cast<int>(
@@ -102,21 +101,13 @@ public:
         bpf_util::DetachPerfEvents(perf_fds_);
     }
 
-    // ================================================================
-    // Push 模式
-    // ================================================================
-
     ring_buffer_sample_fn GetEventCallback() const override {
         return stream_mode_ ? HandleStreamEvent : nullptr;
     }
 
-    DataBatchPtr MakePushBatch() override {
+    DataBatchPtr MakeEventBatch() override {
         return std::make_shared<DataBatch>(DataBatch::Type::kProfile);
     }
-
-    // ================================================================
-    // Pull 模式
-    // ================================================================
 
     StatusOr<DataBatchPtr> CollectFromMaps() override {
         if (counts_fd_ < 0 || stacks_fd_ < 0)

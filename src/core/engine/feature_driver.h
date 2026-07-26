@@ -106,7 +106,7 @@ struct FeatureDescriptor {
     DataModelType model = DataModelType::kTimeSeries;
 
     bool supports_pull = true;
-    bool supports_push = false;
+    bool supports_push = false;  // deprecated: 所有源统一使用 Collect()
     bool supports_pause = true;
     bool supports_configure = false;
     bool has_bpf_probe = false;
@@ -250,9 +250,7 @@ public:
         return Status::Ok();
     }
 
-    // Pause — 暂停采集
-    //   Pull 模式：取消定时器即可
-    //   Push 模式：额外关闭 BPF gate + 停止 poll 线程
+    // Pause — 暂停采集：取消定时器 + 通知 Source 暂停（关闭 BPF gate 等）
     Status Pause() {
         if (state_ != DriverState::kActive) {
             return Status::Error(StatusCode::kInvalidArgument,
@@ -268,9 +266,7 @@ public:
         return Status::Ok();
     }
 
-    // Resume — 恢复采集
-    //   Push 模式：先恢复 Source（启动 poll + 开 BPF gate）
-    //   Pull 模式：重新注册定时器
+    // Resume — 恢复采集：先恢复 Source（开启 BPF gate 等），再重新注册定时器
     Status Resume() {
         if (state_ != DriverState::kPaused) {
             return Status::Error(StatusCode::kInvalidArgument,
@@ -355,25 +351,24 @@ protected:
     // 子类必须实现：构建自己的 Pipeline
     virtual std::unique_ptr<Pipeline> BuildPipeline(InfrastructureManager& infra) = 0;
 
-    // 子类可选覆写：注册/取消定时器
     virtual void RegisterTimers(InfrastructureManager& infra) {
         if (!pipeline_ || !pipeline_->GetSource()) return;
         auto* src = pipeline_->GetSource();
-        if (!src->IsPushMode()) {
-            collect_timer_id_ = infra.GetTimerWheel().AddRepeating(
-                std::chrono::milliseconds(src->IntervalMs()),
-                [this, &infra] {
-                    if (state_ != DriverState::kActive) return;
-                    infra.GetCollectPool()->Submit([this] {
-                        if (!pipeline_ || !pipeline_->GetSource()) return 0;
-                        auto result = pipeline_->GetSource()->Collect();
-                        if (result.ok()) {
-                            pipeline_->Enqueue(std::move(result.value()));
-                        }
-                        return 0;
-                    });
+
+        collect_timer_id_ = infra.GetTimerWheel().AddRepeating(
+            std::chrono::milliseconds(src->IntervalMs()),
+            [this, &infra] {
+                if (state_ != DriverState::kActive) return;
+                infra.GetCollectPool()->Submit([this] {
+                    if (!pipeline_ || !pipeline_->GetSource()) return 0;
+                    auto result = pipeline_->GetSource()->Collect();
+                    if (result.ok()) {
+                        pipeline_->Enqueue(std::move(result.value()));
+                    }
+                    return 0;
                 });
-        }
+            });
+
         if (pipeline_->HasAggregator() && pipeline_->FlushIntervalMs() > 0) {
             flush_timer_id_ = infra.GetTimerWheel().AddRepeating(
                 std::chrono::milliseconds(pipeline_->FlushIntervalMs()),

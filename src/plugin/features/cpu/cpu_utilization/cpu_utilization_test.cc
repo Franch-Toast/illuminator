@@ -9,7 +9,6 @@ TEST(CpuUtilizationSourceTest, BasicProperties) {
     EXPECT_STREQ(source.Name(), "cpu_utilization");
     EXPECT_STREQ(source.Version(), "1.0.0");
     EXPECT_EQ(source.Type(), PluginType::kSource);
-    EXPECT_FALSE(source.IsPushMode());
 }
 
 TEST(CpuUtilizationSourceTest, InitWithDefaults) {

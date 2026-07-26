@@ -27,7 +27,6 @@ class EbpfNetTracer : public EbpfSourceBase {
 public:
     const char* Name() const override { return "ebpf_net_tracer"; }
     const char* Version() const override { return "2.0.0"; }
-    bool IsPushMode() const override { return true; }
 
 protected:
     void OnConfigureMaps(void* /*s*/) override {
