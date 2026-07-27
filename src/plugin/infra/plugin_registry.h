@@ -59,6 +59,8 @@
 #include <vector>
 
 #include "core/common/logging.h"
+#include "core/engine/feature_bus.h"
+#include "core/engine/feature_driver.h"
 #include "plugin/api/plugin_api.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/api/processor_plugin.h"
@@ -162,6 +164,32 @@ public:
     }
 
     // ==================================================================
+    // FeatureDriver 注册（原 FeatureRegistry 功能，统一到此处）
+    // ==================================================================
+
+    using DriverFactory = std::function<std::unique_ptr<FeatureDriver>()>;
+
+    void AddDriver(DriverFactory factory) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        driver_factories_.push_back(std::move(factory));
+    }
+
+    void RegisterAllDrivers() {
+        auto& bus = FeatureBus::Instance();
+        std::vector<DriverFactory> snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            snapshot = driver_factories_;
+        }
+        for (auto& factory : snapshot) {
+            auto driver = factory();
+            if (driver) bus.Register(std::move(driver));
+        }
+        IL_INFO("PluginRegistry: registered {} drivers to FeatureBus",
+                snapshot.size());
+    }
+
+    // ==================================================================
     // 列表方法：列出所有已注册的插件名称
     // ==================================================================
     std::vector<std::string> ListSources() const {
@@ -193,11 +221,12 @@ private:
         return keys;
     }
 
-    mutable std::mutex mutex_;                                  // 保护所有注册表的互斥锁
-    std::unordered_map<std::string, SourceFactory> sources_;     // 数据源工厂映射
-    std::unordered_map<std::string, ProcessorFactory> processors_; // 处理器工厂映射
-    std::unordered_map<std::string, AggregatorFactory> aggregators_; // 聚合器工厂映射
-    std::unordered_map<std::string, SinkFactory> sinks_;         // 数据出口工厂映射
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, SourceFactory> sources_;
+    std::unordered_map<std::string, ProcessorFactory> processors_;
+    std::unordered_map<std::string, AggregatorFactory> aggregators_;
+    std::unordered_map<std::string, SinkFactory> sinks_;
+    std::vector<DriverFactory> driver_factories_;
 };
 
 // ==================================================================
@@ -240,6 +269,20 @@ private:
     static bool _il_reg_sink_##cls = [] { \
         ::illuminator::PluginRegistry::Instance().RegisterSink( \
             name, [] { return std::make_unique<cls>(); }); \
+        return true; \
+    }()
+
+// ==================================================================
+// FeatureDriver 自动注册宏（原 REGISTER_FEATURE，统一到 PluginRegistry）
+// ==================================================================
+// 在 Driver 实现文件底部调用：
+//   REGISTER_FEATURE(CpuUtilizationDriver);
+// Driver 将在 PluginRegistry::RegisterAllDrivers() 时实例化并注册到 FeatureBus。
+
+#define REGISTER_FEATURE(DriverClass) \
+    static bool _il_reg_feat_##DriverClass = [] { \
+        ::illuminator::PluginRegistry::Instance().AddDriver( \
+            [] { return std::make_unique<DriverClass>(); }); \
         return true; \
     }()
 

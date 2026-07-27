@@ -20,14 +20,7 @@
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
 #include "plugin/infra/feature_driver_factories.h"
-#include "plugin/infra/feature_registry.h"
-#include "plugin/features/cpu/cpu_utilization/cpu_utilization_driver.h"
-#include "plugin/features/cpu/process_cpu/process_cpu_driver.h"
-#include "plugin/features/cpu/cpu_profiler/cpu_profiler_driver.h"
-#include "plugin/features/io/io_monitor/io_monitor_driver.h"
-#include "plugin/features/net/net_tracer/net_tracer_driver.h"
-#include "plugin/features/sched/sched_analyzer/sched_analyzer_driver.h"
-#include "plugin/features/sched/offcpu_profiler/offcpu_profiler_driver.h"
+#include "plugin/infra/plugin_registry.h"
 #include "plugin/infra/builtin_plugins.h"
 #include "plugin/infra/plugin_manager.h"
 #include "server/http_server.h"
@@ -158,7 +151,7 @@ static int RunDaemon(const std::string& config_path, const std::string& log_leve
         [](const std::string& feature, const std::string& dir) {
             return illuminator::MakeFeatureRecordingSinkPair(feature, dir);
         });
-    illuminator::FeatureRegistry::RegisterAll();
+    illuminator::PluginRegistry::Instance().RegisterAllDrivers();
     if (config.auto_start) {
         illuminator::FeatureBus::Instance().ProbeAll();
         IL_INFO("FeatureBus: all registered drivers probed (auto_start=true)");
@@ -217,7 +210,7 @@ static int RunCollect(int duration_sec, const std::string& log_level) {
         return 1;
     }
 
-    illuminator::FeatureRegistry::RegisterAll();
+    illuminator::PluginRegistry::Instance().RegisterAllDrivers();
     illuminator::FeatureBus::Instance().ProbeAll();
 
     std::this_thread::sleep_for(std::chrono::seconds(duration_sec));

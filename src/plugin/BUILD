@@ -59,6 +59,7 @@ cc_library(
     deps = [
         ":api",
         "//src/core:common",
+        "//src/core:engine",
     ],
 )
 
@@ -73,17 +74,6 @@ cc_library(
         "//src/core:engine",
         "//src/plugin/sinks:recording_sink",
         "//src/plugin/sinks:sse_sink",
-    ],
-)
-
-cc_library(
-    name = "feature_registry",
-    hdrs = ["infra/feature_registry.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin",
-    visibility = ["//visibility:public"],
-    deps = [
-        "//src/core:engine",
     ],
 )
 

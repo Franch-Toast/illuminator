@@ -12,7 +12,6 @@ cc_binary(
         "//src/core:yaml_config",
         "//src/plugin/features:all_drivers",
         "//src/plugin:infra",
-        "//src/plugin:feature_registry",
         "//src/plugin:feature_driver_factories",
         "//src/plugin:builtin",
         "//src/server:http_server",
