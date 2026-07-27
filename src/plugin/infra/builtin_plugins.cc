@@ -37,7 +37,7 @@
 #include "plugin/processors/stack_merger/stack_merger.h"               // 堆栈合并器（相同调用栈计数累加）
 
 // ---- 聚合器 ----
-#include "plugin/aggregators/cpu_stats_aggregator/cpu_stats_aggregator.h"  // CPU 统计聚合器
+// （当前无内置聚合器）
 
 // ---- 数据出口 ----
 #include "plugin/sinks/console_output/console_sink.h"                  // 控制台输出（文本/JSON 格式）
@@ -45,7 +45,6 @@
 #include "plugin/sinks/local_storage/local_storage_sink.h"             // 本地存储（委托给 StorageBackend）
 #include "plugin/sinks/pprof_export/pprof_export_sink.h"               // pprof 格式导出（折叠栈兼容 FlameGraph）
 #include "plugin/sinks/prometheus_exposition/prometheus_sink.h"        // Prometheus 指标暴露
-#include "plugin/sinks/otlp_export/otlp_export_sink.h"                 // OTLP 导出（JSON over HTTP）
 
 // ---- 存储后端（强制链接） ----
 #include "server/storage/sqlite_backend/sqlite_backend.h"              // SQLite 持久化存储

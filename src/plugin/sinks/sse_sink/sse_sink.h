@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <chrono>
 #include <string>
 #include <utility>
 
@@ -35,31 +34,7 @@ public:
 
 private:
     std::string SerializeBatch(const DataBatch& batch) const {
-        json j;
-        j["feature"] = feature_name_;
-        j["seq"] = seq_++;
-        j["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-
-        switch (batch.type()) {
-            case DataBatch::Type::kMetrics:
-                j["modelType"] = "time_series";
-                j["metrics"] = RecordsToJsonArray(batch);
-                break;
-            case DataBatch::Type::kProfile:
-                j["modelType"] = "profile";
-                j["samples"] = StackSamplesToJsonArray(batch);
-                break;
-            case DataBatch::Type::kTrace:
-                j["modelType"] = "trace";
-                j["records"] = RecordsToJsonArray(batch);
-                break;
-            default:
-                j["modelType"] = "generic";
-                j["records"] = RecordsToJsonArray(batch);
-                break;
-        }
-        return j.dump();
+        return BatchToSseJson(batch, feature_name_, seq_++);
     }
 
     std::string feature_name_;

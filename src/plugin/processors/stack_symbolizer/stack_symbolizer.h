@@ -127,23 +127,8 @@ public:
     }
 
 private:
-    // 对 C++ 修饰名执行 demangle，转换为可读的函数签名
-    // 使用 __cxa_demangle 进行转换
-    // 参数:
-    //   sym - 可能被修饰的符号名称
-    // 返回:
-    //   反修饰后的可读名称，失败则返回原字符串
     std::string DemangleMaybe(const std::string& sym) const {
-        if (!demangle_ || sym.empty())
-            return sym;
-        int status = 0;
-        char* dm =
-            abi::__cxa_demangle(sym.c_str(), nullptr, nullptr, &status);
-        if (status != 0 || !dm)
-            return sym;
-        std::string out(dm);
-        std::free(dm);
-        return out;
+        return DemangleSymbol(sym, demangle_);
     }
 
     // 清理已过期的 maps 缓存条目
@@ -215,83 +200,7 @@ private:
         return &ins.first->second;
     }
 
-    bool TryLoadDebugInfo(const std::string& elf_path, ElfSymbolCache& cache) {
-        // 策略 1: build-id 查找（最准确）
-        std::string build_id = ExtractBuildId(elf_path);
-        if (build_id.size() >= 4) {
-            std::string bid_path = "/usr/lib/debug/.build-id/"
-                + build_id.substr(0, 2) + "/" + build_id.substr(2) + ".debug";
-            if (cache.Load(bid_path)) return true;
-        }
-
-        // 策略 2: 标准路径
-        std::string debug_path = "/usr/lib/debug" + elf_path + ".debug";
-        if (cache.Load(debug_path)) return true;
-        debug_path = "/usr/lib/debug" + elf_path;
-        if (cache.Load(debug_path)) return true;
-
-        // 策略 3: 同目录 .debug 子目录
-        auto last_slash = elf_path.rfind('/');
-        if (last_slash != std::string::npos) {
-            std::string dir = elf_path.substr(0, last_slash + 1);
-            std::string base = elf_path.substr(last_slash + 1);
-            debug_path = dir + ".debug/" + base;
-            if (cache.Load(debug_path)) return true;
-        }
-        return false;
-    }
-
-    // 从 ELF 文件中提取 .note.gnu.build-id 的 hex 字符串
-    static std::string ExtractBuildId(const std::string& path) {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) return {};
-
-        std::vector<char> buf((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
-        if (buf.size() < sizeof(Elf64_Ehdr)) return {};
-
-        auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(buf.data());
-        if (ehdr->e_ident[EI_MAG0] != ELFMAG0) return {};
-        if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
-            return {};
-
-        auto* shdrs = reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
-        for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
-            if (shdrs[i].sh_type != SHT_NOTE) continue;
-            if (shdrs[i].sh_offset + shdrs[i].sh_size > buf.size()) continue;
-
-            const char* note_data = buf.data() + shdrs[i].sh_offset;
-            size_t remaining = shdrs[i].sh_size;
-            size_t pos = 0;
-            while (pos + 12 <= remaining) {
-                uint32_t namesz = *reinterpret_cast<const uint32_t*>(note_data + pos);
-                uint32_t descsz = *reinterpret_cast<const uint32_t*>(note_data + pos + 4);
-                uint32_t type = *reinterpret_cast<const uint32_t*>(note_data + pos + 8);
-                size_t name_start = pos + 12;
-                size_t name_aligned = (namesz + 3) & ~3u;
-                size_t desc_start = name_start + name_aligned;
-                size_t desc_aligned = (descsz + 3) & ~3u;
-
-                if (desc_start + descsz > remaining) break;
-
-                // NT_GNU_BUILD_ID = 3, name = "GNU\0"
-                if (type == 3 && namesz == 4 &&
-                    std::memcmp(note_data + name_start, "GNU", 4) == 0) {
-                    std::string hex;
-                    hex.reserve(descsz * 2);
-                    for (size_t j = 0; j < descsz; ++j) {
-                        char h[3];
-                        std::snprintf(h, sizeof(h), "%02x",
-                                      static_cast<uint8_t>(note_data[desc_start + j]));
-                        hex += h;
-                    }
-                    return hex;
-                }
-                pos = desc_start + desc_aligned;
-            }
-        }
-        return {};
-    }
+    // 委托给 stack_symbol_resolver.h 中的共享实现
 
     // 解析用户态地址对应的符号名
     // 流程:

@@ -12,7 +12,7 @@
 |------|------|----------|
 | 核心引擎层 | **A-** | Pipeline v3 设计成熟；sink 线程安全、关机顺序、channel 配置传递已修复 |
 | 插件系统 | **B+** | EbpfSourceBase 统一 eBPF 插件；双注册为有意设计，C ABI 仍不成熟 |
-| Server 层 | **B-** | 控制面/数据面分离好；v2 路由已提取；Auth+SSE 部分修复（`?token=`） |
+| Server 层 | **B-** | 控制面/数据面分离好；v2 路由已提取；认证非设计目标（本地工具） |
 | 前端架构 | **B** | SSE 数据流设计出色；页面模式不统一，存在死代码，可访问性差 |
 | 目录结构 | **B+** | 实际结构合理；README 与 docs 已同步更新 |
 | **综合** | **B+** | 核心架构优秀，P0 正确性问题大部分已修复，剩余 v1/v2 API 统一等待办 |
@@ -26,8 +26,8 @@
 | # | 问题 | 模块 | 影响 | 状态 |
 |---|------|------|------|------|
 | 1 | **Pipeline sink 列表线程安全**: `GetSinks()` 和 `Reconfigure()` 未加锁，与 `AddSinkRuntime` 竞态 | 引擎 | 数据竞争，可能崩溃 | ✅ **已修复** — `shared_mutex` 保护 sinks |
-| 2 | **Auth 与 SSE 不兼容**: 启用 `auth_token` 后浏览器 EventSource 无法发送 Authorization header | Server | 启用认证即破坏实时数据 | ⚠️ **部分修复** — 支持 `?token=` 查询参数 |
-| 3 | **`/api/v1/query` 和 `/api/v1/budget` 端点缺失**: 前端调用但后端未注册 | Server | QueryConsole 页面无法工作 | 待实现 |
+| 2 | ~~**Auth 与 SSE 不兼容**~~: 启用 `auth_token` 后浏览器 EventSource 无法发送 Authorization header | Server | 启用认证即破坏实时数据 | 🚫 **设计决策：本地工具，不需要认证** — Won't Fix |
+| 3 | ~~**QueryConsole 与 `/api/v1/query`**~~: 前端 SQL 查询控制台及对应 API | Server | 功能已移除 | 🚫 **已删除，Won't Fix** |
 | 4 | **`CpuUtilizationDriver::SetConfig` 忽略 JSON 输入**: 传入的配置被丢弃 | 插件 | 前端配置修改无效果 | ✅ **已修复** — 解析 JSON 并 Reconfigure |
 | 5 | ~~**README.md ~30% 准确度**~~ | 文档 | 已修复：目录结构、死链接、SSE 端口 | ✅ **已修复** |
 | 6 | **CollectPool/Timer 关机竞态**: 定时器触发的采集任务可能在 InfrastructureManager::Stop() 销毁池后仍在运行 | 引擎 | 关机时 use-after-free | ✅ **已修复** — 关机顺序与取消机制完善 |
@@ -51,7 +51,7 @@
 | # | 问题 | 模块 | 影响 | 状态 |
 |---|------|------|------|------|
 | 16 | **`bpf_program_manager.h` 废弃**: 在 BUILD 中但无处引用 | 死代码 | 占空间，误导 | 待清理 |
-| 17 | **`wasm_runtime.h` 空壳**: 不在任何 BUILD target 中 | 死代码 | 增加审计范围 | ⚠️ **已标注 STUB** |
+| 17 | ~~**`wasm_runtime.h` 空壳**~~: 不在任何 BUILD target 中 | 死代码 | 增加审计范围 | 🚫 **已删除** |
 | 18 | **`ebpf_sched_tracer` 孤儿插件**: 注册了但无 FeatureDriver，与 sched_analyzer 重叠 | 死代码 | 混乱 | 待清理 |
 | 19 | **`CpuStatsAggregator` 无 Feature 集成**: 注册了但无 Driver 使用 | 死代码 | 代码质量误导 | ⚠️ **已标注** — PluginRegistry 可用，未接入 FeatureDriver |
 | 20 | **`SinkFanout` 未链接到生产二进制**: 有 BUILD 但 builtin_plugins.cc 不 include | 死代码 | 运行时不可用 | ⚠️ **已标注** — 保留供测试与未来接入 |
@@ -59,7 +59,7 @@
 | 22 | **前端死代码**: `FeatureConfigPanel`、`DataEmptyState`、`ConnectionIndicator`、`aggregationWorker`、`useProfileData` 未使用 | 前端 | 代码膨胀 | 待清理 |
 | 23 | **`illuminator.yaml.example` 无效配置键**: `pipelines`、`websocket`、`storage.retention` 等 | 配置 | 误导运维 | ✅ **部分修复** — `global.auto_start`、`global.data_dir`、`engine.channel.*` 已生效 |
 | 24 | ~~**7 个引用文档不存在**~~ | 文档 | 已修复：README 文档索引仅保留现有文件 | ✅ **已修复** |
-| 25 | **OtlpExportSink 是空壳**: 标记 `IsStub()=true`，无实际 HTTP POST | 插件 | 功能表述不实 | ⚠️ **已标注 STUB** |
+| 25 | ~~**OtlpExportSink 是空壳**~~: 标记 `IsStub()=true`，无实际 HTTP POST | 插件 | 功能表述不实 | 🚫 **已删除** |
 
 ---
 
@@ -96,7 +96,7 @@
 - FeatureDriver 从不通过 PluginRegistry 解析插件，直接硬编码具体类型
 - C ABI `IlPluginDescriptor` 不成熟：`create(nullptr)` 不传配置，`destroy()` 从未调用，`process()` 字段从未使用
 - `.so` 插件无法成为 Feature（缺少桥接）
-- 多数 Sink（console/file/prometheus/pprof/otlp）仅在 Registry 中注册，无 Feature 集成
+- 多数 Sink（console/file/prometheus/pprof）仅在 Registry 中注册，无 Feature 集成
 
 ### 3. Server 层 (B-)
 
@@ -108,10 +108,8 @@
 
 **已修复**:
 - ✅ v2 路由模块化
-- ⚠️ Auth+SSE：`?token=` 查询参数支持（EventSource 仍无法发 Authorization header）
 
 **剩余问题**:
-- 前端调用的 `/api/v1/query` 和 `/api/v1/budget` 后端未实现
 - SSE 背压静默丢弃（outbox >= 256 时无指标/日志）
 - 录制 API 字段名前后端不一致（`output_dir` vs `file_path` vs `file`）
 - JSON 序列化在 SseSink 和 json_serializer.h 中重复实现
@@ -188,7 +186,7 @@
 | 新增 C++ Source + FeatureDriver | ✅ 简单 | 需同时写两个文件（Source + Driver） |
 | 新增 Processor/Sink | ⚠️ 注册成功但无 Feature 使用 | Driver 硬编码组件 |
 | 外部 .so 插件 | ❌ 不可用 | C ABI 不成熟，无法成为 Feature |
-| WASM 插件 | ❌ 空壳（已标注 STUB） | 未实现 |
+| WASM 插件 | 🚫 **已删除** | 非当前设计目标 |
 | 前端新增 Feature 页面 | ⚠️ 需大量样板 | 无统一页面模板 |
 | 运行时动态组合 Pipeline | ❌ 已移除 | YAML pipelines 不再运行；改由 /api/v2/features 控制 |
 | 跨平台支持 | ❌ 纯 Linux | timerfd/epoll/eBPF 深度绑定 |
@@ -201,11 +199,11 @@
 |--------|------|---------|------|
 | P0-1 | **修复 Pipeline sink 列表线程安全** | 消除数据竞争 | ✅ 已修复 |
 | P0-2 | **重写 README.md** | 准确描述当前架构 | ✅ 已修复 |
-| P0-3 | **实现或删除 `/api/v1/query`** | QueryConsole 可用 | 待办 |
-| P0-4 | **解决 Auth+SSE 不兼容** | 认证可真正使用 | ⚠️ 部分修复（`?token=`） |
+| P0-3 | ~~**实现或删除 `/api/v1/query`**~~ | QueryConsole 已移除 | 🚫 **已删除，Won't Fix** |
+| P0-4 | ~~**解决 Auth+SSE 不兼容**~~ | 本地工具无需认证 | 🚫 **设计决策：本地工具，不需要认证** — Won't Fix |
 | P1-1 | **统一 eBPF 插件基类**（参见 ebpf_plugin_redesign.md） | 消除三种实现模式 | ✅ 已完成 |
 | P1-2 | **提取 v2 路由到独立模块** | 可测试性 | ✅ 已完成 |
 | P1-3 | **Push 模式批量排空 ring buffer** | 性能提升 + 消除 poll 线程 | 待办 |
 | P1-4 | **统一前端页面模板** | 减少页面维护负担 | 待办 |
-| P2-1 | **清理死代码**（wasm/bpf_program_manager/fanout/sched_tracer） | 代码干净度 | ⚠️ 部分完成（STUB 标注） |
+| P2-1 | **清理死代码**（bpf_program_manager/fanout/sched_tracer） | 代码干净度 | ⚠️ 部分完成（wasm/otlp 已删除） |
 | P2-2 | **清理 YAML 配置**（删除无效键或实现它们） | 运维不被误导 | ⚠️ 部分完成（auto_start/data_dir/channel 已生效） |

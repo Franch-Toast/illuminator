@@ -10,15 +10,14 @@
 
 - **eBPF 零侵入采集**：基于 libbpf + CO-RE + bpftool skeleton 的现代 eBPF 模式（BPF 字节码嵌入二进制），支持 CPU 性能剖析、内存分配追踪、网络连接监控、块 I/O 延迟分析、调度事件追踪
 - **事件驱动异步管道 (v3)**：`Source → AsyncChannel → Processor → Aggregator → Sink` 四阶段管道，基于 TimerWheel (timerfd+epoll) 统一调度、CollectPool 并行采集、ProcessThread 纯事件处理、SinkPool I/O 隔离，支持 Pull/Push 双模式、FlushSentinel 信号机制、水位线反压
-- **三层插件系统**：
+- **双层插件系统**：
   - **Builtin**（内建）：编译时链接，零开销
   - **Shared Object**（动态库）：运行时 `.so` 加载，稳定 C ABI
-  - **WASM**（沙箱）：多语言编写，内存隔离
 - **存储抽象层**：可插拔后端（SQLite 默认）
-- **多格式导出**：pprof、OTLP、Prometheus、JSON
-- **Web 可视化平台**：实时仪表盘、火焰图（On-CPU/Off-CPU）、调度器分析、差异火焰图、SQL 查询控制台、系统健康监控
+- **多格式导出**：pprof、Prometheus、JSON
+- **Web 可视化平台**：实时仪表盘、火焰图（On-CPU/Off-CPU）、调度器分析、差异火焰图、系统健康监控
   - **全局时间控制**：LIVE/PAUSED 模式切换、30s/1m/5m/15m 时间窗口、键盘快捷键（Space/T/?）
-  - **Zustand 状态管理**：全局时间、管道状态、过滤器三大 Store
+  - **Zustand 状态管理**：全局时间、Feature 状态、过滤器三大 Store
   - **TimeSeriesStore**：前端 RingBuffer 时间序列缓存，支持按时间范围查询和订阅通知
 - **SSE 实时推送**：基于 Server-Sent Events 的订阅式数据推送（HTTP 端口 9527），支持 64KB 帧分割、Last-Event-ID 重放、15s 心跳、动态订阅更新
 - **动态 Feature 管理（热插拔）**：用户可通过 API/前端实时启动/停止功能模块，无需重启。内置 `SseSink`（SSE 实时推送）、`RecordingSink`（按需录制为 `.ilr` NDJSON 文件，支持大小限制）
@@ -57,26 +56,26 @@
   │                                                                  │
   │  Shared Infra: Arena + LockFreeQueue + ThreadPool                │
   │  eBPF Subsystem: bpftool gen skeleton (嵌入字节码) + Ring Buffer + BTF │
-  │  Plugin Manager: SO Loader + WASM Runtime + Plugin Registry      │
+  │  Plugin Manager: SO Loader + Plugin Registry                     │
   │  Storage Layer: SQLite (WAL 模式)                                │
-  │  Export Layer: pprof / OTLP / Prometheus / JSON                  │
+  │  Export Layer: pprof / Prometheus / JSON                         │
   │  Self-Observability: InternalMetrics / ResourceLimiter / /metrics│
   └──────────────────────┬─────────────────────────────────────────┘
                          │ HTTP + SSE (cpp-httplib, port 9527)
   ┌──────────────────────▼─────────────────────────────────────────┐
   │              Web 可视化平台 (React + TypeScript + Zustand)         │
   │  TimeControls │ Overview │ CPU │ Memory │ IO │ Network │ GPU    │
-  │  Query Console │ Plugins │ System │ Replay │ Keyboard Shortcuts  │
+  │  Plugins │ System │ Replay │ Keyboard Shortcuts                  │
   └────────────────────────────────────────────────────────────────┘
 ```
 
-### 线程模型 (N 管道)
+### 线程模型 (N Feature)
 
 | 线程 | 数量 | 命名 | 职责 |
 |------|------|------|------|
 | TimerWheel | 1 | `timer-wheel` | timerfd+epoll 事件调度，不执行实际工作 |
 | CollectPool | M (默认 2) | `collect-N` | 并行执行 Source::Collect() I/O |
-| ProcessThread | N (每管道 1) | `{pipeline_name}` | 纯事件处理器 — variant dispatch |
+| ProcessThread | N (每 Feature 1) | `{pipeline_name}` | 纯事件处理器 — variant dispatch |
 | SinkPool | K (默认 4) | `sink-write-N` | 并行执行 Sink::Write() I/O |
 | HTTP | 1 | `http-server` | REST API + SSE 数据面 + 静态文件 |
 | eBPF 轮询 | 按需 | `profiler-poll` / `sched-poll` 等 | Push Source ring buffer 轮询 |
@@ -133,7 +132,7 @@ illuminator/
 │   │   │   └── net/            # net_tracer
 │   │   ├── processors/         # passthrough, filter, stack_symbolizer, stack_merger
 │   │   ├── aggregators/        # cpu_stats_aggregator
-│   │   └── sinks/              # console, file, local_storage, pprof, prometheus, otlp (STUB), sse, recording, fanout
+│   │   └── sinks/              # console, file, local_storage, pprof, prometheus, sse, recording, fanout
 │   └── server/                 # HTTP/SSE 服务 + 存储层
 │       ├── http_server.h       # cpp-httplib 封装
 │       ├── api_routes.h        # REST API v1 路由
@@ -151,7 +150,7 @@ illuminator/
     │   ├── App.tsx             #   路由 + 全局键盘快捷键 (Space/T/?) + 快捷键帮助
     │   ├── stores/             #   Zustand 全局状态管理
     │   │   ├── useTimeStore.ts #     全局时间 (LIVE/PAUSED, 时间窗口, 游标)
-    │   │   ├── usePipelineStore.ts#  管道状态
+    │   │   ├── usePipelineStore.ts#  Feature 状态
     │   │   └── useFilterStore.ts#    全局过滤器 (PID, comm, CPU)
     │   ├── services/           #   数据服务层
     │   │   ├── apiClient.ts    #     统一 REST API 客户端 (类型安全)
@@ -161,22 +160,21 @@ illuminator/
     │   │   └── timeSeriesStore.ts#   前端 RingBuffer 时间序列缓存
     │   ├── components/         #   共享 UI 组件
     │   │   ├── TimeControls/   #     全局时间控制器 (LIVE/PAUSED, 窗口选择)
-    │   │   └── Layout/         #     StatusBar (管道状态, SSE 连接)
+    │   │   └── Layout/         #     StatusBar (Feature 状态, SSE 连接)
     │   ├── hooks/              #   自定义 hooks
     │   │   ├── usePolling.ts   #     通用轮询 hook (响应全局时间模式)
-    │   │   ├── usePipelinePolling.ts# 管道状态轮询
+    │   │   ├── usePipelinePolling.ts# Feature 状态轮询
     │   │   ├── useCpuData.ts   #     CPU 指标专用 hook
     │   │   └── useFeatureStream.ts #  Feature 数据流 hook
     │   ├── styles/
     │   │   └── theme.ts        #     设计令牌 (颜色、间距、字体)
-    │   └── pages/              #   7 个页面组件
-    │       ├── CpuOverview.tsx  #     Dashboard (利用率/热力图/Core Timeline/Pipeline Health)
+    │   └── pages/              #   6 个页面组件
+    │       ├── CpuOverview.tsx  #     Dashboard (利用率/热力图/Core Timeline/Feature Health)
     │       ├── ProcessExplorer.tsx#   进程/线程浏览器 (Top-N, 排序/过滤)
     │       ├── FlameGraph.tsx   #     Profiler (On-CPU/Off-CPU, 快照缓存, SVG 导出)
     │       ├── Timeline.tsx     #     Scheduler (Overview/TimeSeries/Gantt/Wakeups)
     │       ├── DiffView.tsx     #     Compare (双 Profile 捕获, 差异火焰图, Diff 表格)
-    │       ├── QueryConsole.tsx #     SQL 查询控制台
-    │       └── SystemPage.tsx   #     System (健康状态, 管道详情, 内部指标)
+    │       └── SystemPage.tsx   #     System (健康状态, Feature 详情, 内部指标)
     └── dist/                   #   前端构建产物
 ```
 
@@ -335,12 +333,12 @@ sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 **Web 界面**
 - `http://localhost:9527` — 可视化仪表盘（CPU 概览 / 进程 / 火焰图 / 调度器）
 
-**REST API — 传统管道接口**
+**REST API — 传统 Feature 接口**
 - `GET /healthz` — 健康检查
 - `GET /metrics` — Prometheus exposition 格式指标
-- `GET /api/v1/pipelines` — 管道状态（含 channel 统计）
-- `GET /api/v1/pipelines/:name/collect` — 触发指定管道一次性采集
-- `GET /api/v1/channel_stats` — 所有管道 channel 详细统计
+- `GET /api/v1/pipelines` — Feature 状态（含 channel 统计）
+- `GET /api/v1/pipelines/:name/collect` — 触发指定 Feature 一次性采集
+- `GET /api/v1/channel_stats` — 所有 Feature channel 详细统计
 - `GET /api/v1/cpu/utilization` — CPU 利用率
 - `GET /api/v1/cpu/processes` — 进程 CPU 指标
 - `GET /api/v1/cpu/profile/flamegraph` — On-CPU 火焰图
@@ -349,13 +347,12 @@ sudo ./bazel-bin/src/cli/illuminator daemon --config illuminator.yaml.example
 - `GET /api/v1/cpu/sched/history` — 调度历史
 - `GET /api/v1/cpu/sched/events` — 调度事件
 - `GET /api/v1/cpu/sched/wakeups` — Wakeup 链
-- `POST /api/v1/query` — SQL 查询（只读 SELECT，返回 JSON 行数据）
 - `GET /api/v1/internal_metrics` — 内部指标（JSON）
 
 **REST API — 动态 Feature 控制接口（热插拔）**
 - `GET /api/v1/features` — 列出所有已注册 Feature 及其状态
-- `POST /api/v1/features/:name/start` — 启动指定 Feature（触发管道创建）
-- `POST /api/v1/features/:name/stop` — 停止指定 Feature（销毁管道释放资源）
+- `POST /api/v1/features/:name/start` — 启动指定 Feature
+- `POST /api/v1/features/:name/stop` — 停止指定 Feature（释放资源）
 - `GET /api/v1/features/:name/collect` — 获取 Feature 最新数据快照
 - `GET /api/v1/features/:name/stream?cursor=N` — 增量拉取（cursor 机制，实时流）
 - `POST /api/v1/features/:name/record/start` — 开始录制（数据落盘为 .ilr 文件）
@@ -420,6 +417,8 @@ engine:
     backpressure_high: 0.8    # 触发反压水位线
     backpressure_low: 0.2     # 解除反压水位线
 ```
+
+> **注意**：Illuminator 设计为本地运行工具，HTTP 服务默认监听 `0.0.0.0:9527`，不包含认证机制。如需在共享网络环境中使用，请通过防火墙规则或反向代理限制访问。
 
 Feature 的启停与运行时参数由前端 REST API 控制（`/api/v2/features/*`），不再通过 YAML `pipelines:` 节编排。
 
@@ -529,7 +528,6 @@ src/
 │   │   ├── fanout/test/                # SinkFanout 多路分发测试
 │   │   ├── file_export/test/           # FileExportSink 测试
 │   │   ├── local_storage/test/         # LocalStorageSink + SQLite 测试
-│   │   ├── otlp_export/test/           # OtlpExportSink 测试
 │   │   ├── pprof_export/test/          # PprofExportSink 测试
 │   │   └── prometheus_exposition/test/ # PrometheusSink 测试
 │   ├── features/test/         # FeatureDriver 测试
@@ -565,7 +563,7 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Integration** | Pipeline E2E | 1 | Source→Sink 数据流、统计计数器、错误路径 |
 | **Processors** | passthrough, filter, stack_merger, stack_symbolizer | 4 | 透传、标签过滤、堆栈合并分组、符号化 |
 | **Aggregators** | cpu_stats_aggregator | 1 | 窗口聚合、avg/min/max/p50/p99、Flush 清空 |
-| **Sinks** | console, file, local_storage, otlp, pprof, prometheus, recording, fanout | 8 | I/O 写入、格式化、SSE 推送、录制落盘、多路分发 |
+| **Sinks** | console, file, local_storage, pprof, prometheus, recording, fanout | 7 | I/O 写入、格式化、SSE 推送、录制落盘、多路分发 |
 | **Sources** | cpu_utilization | 1 | Init/Collect、配置解析、Load Average |
 | **Server** | api_routes, auth middleware | 1 | /healthz、认证绕过、401/403/200 |
 | **Plugin** | PluginRegistry | 1 | 注册/创建/列举、Source/Processor/Sink |
@@ -582,7 +580,7 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | 功能 | 说明 |
 |------|------|
 | **TimeControls** | 顶部工具栏，LIVE/PAUSED 模式切换，30s/1m/5m/15m 时间窗口选择 |
-| **StatusBar** | 底部状态栏，显示运行管道数和 SSE 连接状态 |
+| **StatusBar** | 底部状态栏，显示运行 Feature 数和 SSE 连接状态 |
 | **键盘快捷键** | `Space` 暂停/恢复、`T` 切换时间窗口、`?` 显示帮助 |
 
 ### 页面功能
@@ -596,9 +594,8 @@ bazel test //src/core/engine/test:pipeline_integration_test --test_output=all
 | **Network** | `/network` | 网络流量、TCP 连接、重传统计（依赖 net_tracer feature） |
 | **GPU** | `/gpu` | GPU 监控（WIP） |
 | **Replay** | `/replay` | 录制回放 |
-| **Query** | `/query` | SQL 查询控制台（只读 SELECT）、示例查询、执行耗时统计 |
 | **Plugins** | `/plugins` | Feature Health Dashboard、热插拔管理 |
-| **System** | `/system` | 系统健康状态、Pipeline 详情表格（RUN/STOP/batch/record 计数）、内部指标 JSON |
+| **System** | `/system` | 系统健康状态、Feature 详情表格（RUN/STOP/batch/record 计数）、内部指标 JSON |
 
 ---
 

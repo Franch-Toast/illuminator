@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <string_view>
@@ -102,6 +103,40 @@ inline std::string BatchToJson(const DataBatch& batch, const std::string& pipeli
     if (!batch.stack_samples().empty())
         j["stack_samples"] = StackSamplesToJsonArray(batch);
 
+    return j.dump();
+}
+
+// SSE 推送专用序列化：添加 feature/seq/timestamp/modelType envelope，
+// 按 DataBatch::Type 选择字段名（metrics/samples/events/records）
+inline std::string BatchToSseJson(const DataBatch& batch,
+                                   const std::string& feature,
+                                   uint64_t seq) {
+    json j;
+    j["feature"] = feature;
+    j["seq"] = seq;
+    j["timestamp"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    switch (batch.type()) {
+        case DataBatch::Type::kMetrics:
+            j["modelType"] = "time_series";
+            j["metrics"] = RecordsToJsonArray(batch);
+            break;
+        case DataBatch::Type::kProfile:
+            j["modelType"] = "profile";
+            j["samples"] = StackSamplesToJsonArray(batch);
+            break;
+        case DataBatch::Type::kTrace:
+            j["modelType"] = "trace";
+            j["events"] = RecordsToJsonArray(batch);
+            break;
+        default:
+            j["modelType"] = "generic";
+            j["records"] = RecordsToJsonArray(batch);
+            if (!batch.stack_samples().empty())
+                j["stack_samples"] = StackSamplesToJsonArray(batch);
+            break;
+    }
     return j.dump();
 }
 

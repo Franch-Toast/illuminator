@@ -10,9 +10,9 @@
 //   1. 基础工具函数（JsonError）
 //   2. RegisterApiRoutes() — 核心 API 路由
 //      - /healthz:                健康检查（无需认证）
-//      - /api/v1/pipelines:       管道列表（FeatureBus 管理的管道）
-//      - /api/v1/pipelines/:name/collect: 同步采集（调试用）
-//      - /api/v1/channel_stats:   通道统计（所有管道的 AsyncChannel 指标）
+//      - /api/v1/features:        Feature 列表（FeatureBus 管理，/api/v1/pipelines 向后兼容）
+//      - /api/v1/features/:name/collect: 同步采集（/api/v1/pipelines/:name/collect 向后兼容）
+//      - /api/v1/channel_stats:   通道统计（所有 Feature 的 AsyncChannel 指标）
 //      - /metrics:                Prometheus 格式指标
 //      - /api/v1/internal_metrics: JSON 格式内部指标
 //   3. 录制 API
@@ -28,7 +28,7 @@
 //      - /api/v1/plugins:        插件列表
 //
 // 【API 版本演进】
-//   v1 路由保留 pipelines/collect/channel_stats/metrics 等核心运维端点。
+//   v1/v2 术语已统一为 features；v1 保留 /api/v1/pipelines 等旧路由向后兼容。
 //   Feature 管理通过 /api/v2/features/* 路由（定义在 api_v2_routes.h 中）。
 // ============================================================================
 
@@ -88,71 +88,75 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
     });
 
     // ========================================================================
-    // /api/v1/pipelines — 管道列表 (通过 FeatureBus 查询)
+    // /api/v1/features — Feature 列表 (通过 FeatureBus 查询)
+    // /api/v1/pipelines — 向后兼容别名
     // ========================================================================
-    srv.Get("/api/v1/pipelines",
-            [](const httplib::Request&, httplib::Response& res) {
-                auto& bus = FeatureBus::Instance();
-                auto drivers = bus.ListDrivers();
-                json arr = json::array();
-                for (auto& info : drivers) {
-                    auto* drv = bus.GetDriver(info.name);
-                    Pipeline* pipeline = drv ? drv->GetPipeline() : nullptr;
-                    json entry;
-                    entry["name"] = info.name;
-                    entry["running"] = (info.state == DriverState::kActive);
-                    entry["origin"] = "feature_bus";
-                    entry["batches"] = info.batches_processed;
-                    entry["records"] = info.records_processed;
-                    if (pipeline) {
-                        entry["channel"] = {
-                            {"capacity", pipeline->ChannelCapacity()},
-                            {"size", pipeline->ChannelSize()},
-                            {"enqueued", pipeline->ChannelEnqueued()},
-                            {"dequeued", pipeline->ChannelDequeued()},
-                            {"dropped", pipeline->ChannelDropped()},
-                            {"flush_injected", pipeline->ChannelFlushInjected()},
-                            {"backpressure_events", pipeline->ChannelBackpressureEvents()},
-                            {"backpressured", pipeline->ChannelBackpressured()},
-                        };
-                    }
-                    arr.push_back(std::move(entry));
-                }
-                res.set_content(
-                    json{{"pipelines", std::move(arr)}}.dump() + "\n",
-                    "application/json");
-            });
+    auto features_handler = [](const httplib::Request&, httplib::Response& res) {
+        auto& bus = FeatureBus::Instance();
+        auto drivers = bus.ListDrivers();
+        json arr = json::array();
+        for (auto& info : drivers) {
+            auto* drv = bus.GetDriver(info.name);
+            Pipeline* pipeline = drv ? drv->GetPipeline() : nullptr;
+            json entry;
+            entry["name"] = info.name;
+            entry["running"] = (info.state == DriverState::kActive);
+            entry["origin"] = "feature_bus";
+            entry["batches"] = info.batches_processed;
+            entry["records"] = info.records_processed;
+            if (pipeline) {
+                entry["channel"] = {
+                    {"capacity", pipeline->ChannelCapacity()},
+                    {"size", pipeline->ChannelSize()},
+                    {"enqueued", pipeline->ChannelEnqueued()},
+                    {"dequeued", pipeline->ChannelDequeued()},
+                    {"dropped", pipeline->ChannelDropped()},
+                    {"flush_injected", pipeline->ChannelFlushInjected()},
+                    {"backpressure_events", pipeline->ChannelBackpressureEvents()},
+                    {"backpressured", pipeline->ChannelBackpressured()},
+                };
+            }
+            arr.push_back(std::move(entry));
+        }
+        res.set_content(
+            json{{"features", std::move(arr)}}.dump() + "\n",
+            "application/json");
+    };
+    srv.Get("/api/v1/pipelines", features_handler);
+    srv.Get("/api/v1/features", features_handler);
 
     // ========================================================================
-    // /api/v1/pipelines/:name/collect — 同步采集（通过 FeatureBus）
+    // /api/v1/features/:name/collect — 同步采集（通过 FeatureBus）
+    // /api/v1/pipelines/:name/collect — 向后兼容别名
     // ========================================================================
-    srv.Get("/api/v1/pipelines/:name/collect",
-            [](const httplib::Request& req, httplib::Response& res) {
-                auto name = req.path_params.at("name");
-                auto& bus = FeatureBus::Instance();
-                auto* drv = bus.GetDriver(name);
-                if (!drv || !drv->GetPipeline()) {
-                    JsonError(res, "feature '" + name + "' not found or inactive", 404);
-                    return;
-                }
-                auto* source = drv->GetPipeline()->GetSource();
-                if (!source) {
-                    JsonError(res, "feature '" + name + "' has no source");
-                    return;
-                }
-                auto result = source->Collect();
-                if (!result.ok()) {
-                    JsonError(res, result.status().message());
-                    return;
-                }
-                auto processed = drv->GetPipeline()->RunProcessors(std::move(*result));
-                if (!processed.ok()) {
-                    JsonError(res, processed.status().message());
-                    return;
-                }
-                res.set_content(BatchToJson(**processed, name) + "\n",
-                                "application/json");
-            });
+    auto collect_handler = [](const httplib::Request& req, httplib::Response& res) {
+        auto name = req.path_params.at("name");
+        auto& bus = FeatureBus::Instance();
+        auto* drv = bus.GetDriver(name);
+        if (!drv || !drv->GetPipeline()) {
+            JsonError(res, "feature '" + name + "' not found or inactive", 404);
+            return;
+        }
+        auto* source = drv->GetPipeline()->GetSource();
+        if (!source) {
+            JsonError(res, "feature '" + name + "' has no source");
+            return;
+        }
+        auto result = source->Collect();
+        if (!result.ok()) {
+            JsonError(res, result.status().message());
+            return;
+        }
+        auto processed = drv->GetPipeline()->RunProcessors(std::move(*result));
+        if (!processed.ok()) {
+            JsonError(res, processed.status().message());
+            return;
+        }
+        res.set_content(BatchToJson(**processed, name) + "\n",
+                        "application/json");
+    };
+    srv.Get("/api/v1/pipelines/:name/collect", collect_handler);
+    srv.Get("/api/v1/features/:name/collect", collect_handler);
 
     // ========================================================================
     // /api/v1/channel_stats — 通道统计（通过 FeatureBus 获取）
@@ -167,7 +171,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                     Pipeline* pipeline = drv ? drv->GetPipeline() : nullptr;
                     if (!pipeline) continue;
                     arr.push_back({
-                        {"pipeline", info.name},
+                        {"feature", info.name},
                         {"capacity", pipeline->ChannelCapacity()},
                         {"size", pipeline->ChannelSize()},
                         {"utilization", pipeline->ChannelCapacity() > 0
@@ -182,7 +186,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                     });
                 }
                 res.set_content(
-                    json{{"channels", std::move(arr)}}.dump() + "\n",
+                    json{{"channel_stats", std::move(arr)}}.dump() + "\n",
                     "application/json");
             });
 

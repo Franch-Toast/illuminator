@@ -9,7 +9,9 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <cxxabi.h>
 #include <elf.h>
 #include <fstream>
 #include <string>
@@ -305,5 +307,97 @@ struct MapsCacheEntry {
     std::vector<ProcMapEntry> maps;
     std::chrono::steady_clock::time_point loaded_at{};
 };
+
+// ============================================================================
+// 共享符号解析工具函数
+// ============================================================================
+
+// C++ 名称反修饰（demangle）
+inline std::string DemangleSymbol(const std::string& sym, bool enabled = true) {
+    if (!enabled || sym.empty()) return sym;
+    int status = 0;
+    char* dm = abi::__cxa_demangle(sym.c_str(), nullptr, nullptr, &status);
+    if (status != 0 || !dm) return sym;
+    std::string out(dm);
+    std::free(dm);
+    return out;
+}
+
+// 从 ELF 文件中提取 .note.gnu.build-id 的十六进制字符串
+inline std::string ExtractBuildId(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+
+    std::vector<char> buf((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+    if (buf.size() < sizeof(Elf64_Ehdr)) return {};
+
+    auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(buf.data());
+    if (ehdr->e_ident[EI_MAG0] != ELFMAG0) return {};
+    if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
+        return {};
+
+    auto* shdrs = reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
+    for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
+        if (shdrs[i].sh_type != SHT_NOTE) continue;
+        if (shdrs[i].sh_offset + shdrs[i].sh_size > buf.size()) continue;
+
+        const char* note_data = buf.data() + shdrs[i].sh_offset;
+        size_t remaining = shdrs[i].sh_size;
+        size_t pos = 0;
+        while (pos + 12 <= remaining) {
+            uint32_t namesz = *reinterpret_cast<const uint32_t*>(note_data + pos);
+            uint32_t descsz = *reinterpret_cast<const uint32_t*>(note_data + pos + 4);
+            uint32_t type = *reinterpret_cast<const uint32_t*>(note_data + pos + 8);
+            size_t name_start = pos + 12;
+            size_t name_aligned = (namesz + 3) & ~3u;
+            size_t desc_start = name_start + name_aligned;
+            size_t desc_aligned = (descsz + 3) & ~3u;
+
+            if (desc_start + descsz > remaining) break;
+
+            if (type == 3 && namesz == 4 &&
+                std::memcmp(note_data + name_start, "GNU", 4) == 0) {
+                std::string hex;
+                hex.reserve(descsz * 2);
+                for (size_t j = 0; j < descsz; ++j) {
+                    char h[3];
+                    std::snprintf(h, sizeof(h), "%02x",
+                                  static_cast<uint8_t>(note_data[desc_start + j]));
+                    hex += h;
+                }
+                return hex;
+            }
+            pos = desc_start + desc_aligned;
+        }
+    }
+    return {};
+}
+
+// 尝试通过 build-id 或标准调试路径加载 ELF 调试符号
+inline bool TryLoadDebugInfo(const std::string& elf_path, ElfSymbolCache& cache) {
+    std::string build_id = ExtractBuildId(elf_path);
+    if (build_id.size() >= 4) {
+        std::string bid_path = "/usr/lib/debug/.build-id/"
+            + build_id.substr(0, 2) + "/" + build_id.substr(2) + ".debug";
+        if (cache.Load(bid_path)) return true;
+    }
+
+    std::string debug_path = "/usr/lib/debug" + elf_path + ".debug";
+    if (cache.Load(debug_path)) return true;
+    debug_path = "/usr/lib/debug" + elf_path;
+    if (cache.Load(debug_path)) return true;
+
+    auto last_slash = elf_path.rfind('/');
+    if (last_slash != std::string::npos) {
+        std::string dir = elf_path.substr(0, last_slash + 1);
+        std::string base = elf_path.substr(last_slash + 1);
+        debug_path = dir + ".debug/" + base + ".debug";
+        if (cache.Load(debug_path)) return true;
+        debug_path = dir + ".debug/" + base;
+        if (cache.Load(debug_path)) return true;
+    }
+    return false;
+}
 
 }  // namespace illuminator

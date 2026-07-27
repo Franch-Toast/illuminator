@@ -242,7 +242,8 @@ public:
             IL_WARN("Pipeline '{}': channel full, data dropped", name_);
         }
 
-        bool bp = ingest_channel_.IsBackpressured();
+        bool bp = ingest_channel_.IsBackpressured() ||
+                  sink_pool_backpressured_.load(std::memory_order_acquire);
         if (bp != last_backpressure_state_) {
             last_backpressure_state_ = bp;
             source_->OnBackpressure(bp);
@@ -465,9 +466,11 @@ private:
         if (pending > kSinkPoolHighWatermark) {
             InternalMetrics::Instance().SetGauge(
                 "pipeline_" + name_ + "_sink_pool_backpressure", 1.0);
+            sink_pool_backpressured_.store(true, std::memory_order_release);
         } else {
             InternalMetrics::Instance().SetGauge(
                 "pipeline_" + name_ + "_sink_pool_backpressure", 0.0);
+            sink_pool_backpressured_.store(false, std::memory_order_release);
         }
 
         if (pending > kMaxPendingTasks) {
@@ -539,6 +542,7 @@ private:
     std::chrono::steady_clock::time_point last_flush_time_{};
 
     std::atomic<bool> last_backpressure_state_{false};
+    std::atomic<bool> sink_pool_backpressured_{false};
 
     std::atomic<uint64_t> batches_processed_{0};
     std::atomic<uint64_t> records_processed_{0};

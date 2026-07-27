@@ -71,19 +71,6 @@ cc_library(
 )
 
 cc_library(
-    name = "otlp_export",
-    hdrs = ["otlp_export/otlp_export_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-    ],
-)
-
-cc_library(
     name = "prometheus_exposition",
     hdrs = ["prometheus_exposition/prometheus_sink.h"],
     strip_include_prefix = "",
@@ -91,21 +78,6 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = True,
     deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-    ],
-)
-
-
-cc_library(
-    name = "fanout",
-    hdrs = ["fanout/sink_fanout.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/core:common",
         "//src/plugin:api",
         "//src/plugin:infra",
     ],

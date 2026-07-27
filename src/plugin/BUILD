@@ -51,7 +51,6 @@ cc_library(
         "infra/plugin_registry.h",
         "infra/so_loader.h",
         "infra/plugin_manager.h",
-        "infra/wasm_runtime.h",
     ],
     strip_include_prefix = "",
     include_prefix = "plugin",
@@ -106,15 +105,12 @@ cc_library(
         "//src/plugin/processors:filter",
         "//src/plugin/processors:stack_symbolizer",
         "//src/plugin/processors:stack_merger",
-        # Aggregators
-        "//src/plugin/aggregators:cpu_stats_aggregator",
         # Sinks
         "//src/plugin/sinks:console_output",
         "//src/plugin/sinks:file_export",
         "//src/plugin/sinks:local_storage",
         "//src/plugin/sinks:pprof_export",
         "//src/plugin/sinks:prometheus_exposition",
-        "//src/plugin/sinks:otlp_export",
         # Storage
         "//src/server/storage:sqlite_backend",
     ],

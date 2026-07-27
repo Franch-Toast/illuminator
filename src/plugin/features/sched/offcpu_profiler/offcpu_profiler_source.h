@@ -368,79 +368,7 @@ private:
         return !entry.maps.empty();
     }
 
-    bool TryLoadDebugInfo(const std::string& elf_path,
-                          ElfSymbolCache& cache) {
-        std::string build_id = ExtractBuildId(elf_path);
-        if (build_id.size() >= 4) {
-            std::string bid_path = "/usr/lib/debug/.build-id/"
-                + build_id.substr(0, 2) + "/"
-                + build_id.substr(2) + ".debug";
-            if (cache.Load(bid_path)) return true;
-        }
-        std::string debug_path = "/usr/lib/debug" + elf_path + ".debug";
-        if (cache.Load(debug_path)) return true;
-        debug_path = "/usr/lib/debug" + elf_path;
-        if (cache.Load(debug_path)) return true;
-
-        auto last_slash = elf_path.rfind('/');
-        if (last_slash != std::string::npos) {
-            std::string dir = elf_path.substr(0, last_slash + 1);
-            std::string base = elf_path.substr(last_slash + 1);
-            debug_path = dir + ".debug/" + base + ".debug";
-            if (cache.Load(debug_path)) return true;
-            debug_path = dir + ".debug/" + base;
-            if (cache.Load(debug_path)) return true;
-        }
-        return false;
-    }
-
-    static std::string ExtractBuildId(const std::string& path) {
-        std::ifstream f(path, std::ios::binary);
-        if (!f) return {};
-        std::vector<char> buf((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
-        if (buf.size() < sizeof(Elf64_Ehdr)) return {};
-        auto* ehdr = reinterpret_cast<Elf64_Ehdr*>(buf.data());
-        if (ehdr->e_ident[EI_MAG0] != ELFMAG0) return {};
-        if (ehdr->e_shoff == 0 || ehdr->e_shentsize != sizeof(Elf64_Shdr))
-            return {};
-        auto* shdrs =
-            reinterpret_cast<Elf64_Shdr*>(buf.data() + ehdr->e_shoff);
-        for (uint16_t i = 0; i < ehdr->e_shnum; ++i) {
-            if (shdrs[i].sh_type != SHT_NOTE) continue;
-            if (shdrs[i].sh_offset + shdrs[i].sh_size > buf.size()) continue;
-            const char* nd = buf.data() + shdrs[i].sh_offset;
-            size_t rem = shdrs[i].sh_size;
-            size_t pos = 0;
-            while (pos + 12 <= rem) {
-                uint32_t namesz =
-                    *reinterpret_cast<const uint32_t*>(nd + pos);
-                uint32_t descsz =
-                    *reinterpret_cast<const uint32_t*>(nd + pos + 4);
-                uint32_t type =
-                    *reinterpret_cast<const uint32_t*>(nd + pos + 8);
-                size_t name_start = pos + 12;
-                size_t name_aligned = (namesz + 3) & ~3u;
-                size_t desc_start = name_start + name_aligned;
-                size_t desc_aligned = (descsz + 3) & ~3u;
-                if (desc_start + descsz > rem) break;
-                if (type == 3 && namesz == 4 &&
-                    std::memcmp(nd + name_start, "GNU", 4) == 0) {
-                    std::string hex;
-                    hex.reserve(descsz * 2);
-                    for (size_t j = 0; j < descsz; ++j) {
-                        char h[3];
-                        std::snprintf(h, sizeof(h), "%02x",
-                            static_cast<uint8_t>(nd[desc_start + j]));
-                        hex += h;
-                    }
-                    return hex;
-                }
-                pos = desc_start + desc_aligned;
-            }
-        }
-        return {};
-    }
+    // TryLoadDebugInfo 和 ExtractBuildId 已提取到 stack_symbol_resolver.h 中的共享实现
 
     std::string AnnotateLibraryOffset(const std::string& lib_path,
                                       uint64_t file_off,
@@ -465,14 +393,7 @@ private:
         return {};
     }
 
-    static std::string DemangleSymbol(const std::string& sym) {
-        int status = 0;
-        char* dm = abi::__cxa_demangle(sym.c_str(), nullptr, nullptr, &status);
-        if (status != 0 || !dm) return sym;
-        std::string out(dm);
-        std::free(dm);
-        return out;
-    }
+    // DemangleSymbol 已提取到 stack_symbol_resolver.h，直接使用命名空间级别函数
 
     uint32_t min_duration_us_ = 10000;
     int stacks_fd_ = -1;
