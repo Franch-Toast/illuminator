@@ -174,6 +174,7 @@ public:
         if (pipeline_) {
             stats.batches_processed = pipeline_->BatchesProcessed();
             stats.records_processed = pipeline_->RecordsProcessed();
+            stats.errors = pipeline_->ErrorCount();
 
             auto* source = pipeline_->GetSource();
             if (source && source->HasBpfProbe()) {
@@ -184,7 +185,7 @@ public:
                 stats.bpf_filtered = bpf_stats.filtered;
             }
         }
-        if (state_ != DriverState::kInactive) {
+        if (state_.load(std::memory_order_acquire) != DriverState::kInactive) {
             auto now = std::chrono::steady_clock::now();
             stats.uptime_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - start_time_).count();
@@ -194,7 +195,7 @@ public:
 
     // Probe — 构建 Pipeline 并启动 Feature
     Status Probe() {
-        if (state_ != DriverState::kInactive) {
+        if (state_.load(std::memory_order_acquire) != DriverState::kInactive) {
             return Status::Error(StatusCode::kInvalidArgument,
                                  std::string(Name()) + " already active");
         }
@@ -220,7 +221,7 @@ public:
 
         RegisterTimers(infra);
 
-        state_ = DriverState::kActive;
+        state_.store(DriverState::kActive, std::memory_order_release);
         start_time_ = std::chrono::steady_clock::now();
         IL_INFO("FeatureDriver '{}' probed successfully", Name());
         return Status::Ok();
@@ -228,9 +229,11 @@ public:
 
     // Remove — 停止并销毁 Pipeline
     Status Remove() {
-        if (state_ == DriverState::kInactive) return Status::Ok();
+        if (state_.load(std::memory_order_acquire) == DriverState::kInactive) {
+            return Status::Ok();
+        }
 
-        state_ = DriverState::kInactive;
+        state_.store(DriverState::kInactive, std::memory_order_release);
         UnregisterTimers(InfrastructureManager::Instance());
 
         if (recording_sink_) {
@@ -252,7 +255,7 @@ public:
 
     // Pause — 暂停采集：取消定时器 + 通知 Source 暂停（关闭 BPF gate 等）
     Status Pause() {
-        if (state_ != DriverState::kActive) {
+        if (state_.load(std::memory_order_acquire) != DriverState::kActive) {
             return Status::Error(StatusCode::kInvalidArgument,
                                  std::string(Name()) + " not active");
         }
@@ -261,14 +264,14 @@ public:
             auto status = pipeline_->GetSource()->PauseCollection();
             if (!status.ok()) return status;
         }
-        state_ = DriverState::kPaused;
+        state_.store(DriverState::kPaused, std::memory_order_release);
         IL_INFO("FeatureDriver '{}' paused", Name());
         return Status::Ok();
     }
 
     // Resume — 恢复采集：先恢复 Source（开启 BPF gate 等），再重新注册定时器
     Status Resume() {
-        if (state_ != DriverState::kPaused) {
+        if (state_.load(std::memory_order_acquire) != DriverState::kPaused) {
             return Status::Error(StatusCode::kInvalidArgument,
                                  std::string(Name()) + " not paused");
         }
@@ -277,7 +280,7 @@ public:
             if (!status.ok()) return status;
         }
         RegisterTimers(InfrastructureManager::Instance());
-        state_ = DriverState::kActive;
+        state_.store(DriverState::kActive, std::memory_order_release);
         IL_INFO("FeatureDriver '{}' resumed", Name());
         return Status::Ok();
     }
@@ -292,7 +295,9 @@ public:
         return pipeline_->Reconfigure(params);
     }
 
-    DriverState State() const { return state_; }
+    DriverState State() const {
+        return state_.load(std::memory_order_acquire);
+    }
     Pipeline* GetPipeline() { return pipeline_.get(); }
 
     // ====================================================================
@@ -310,12 +315,12 @@ public:
         info.display_name = DisplayName();
         info.category = Category();
         info.tier = Tier();
-        info.state = state_;
+        info.state = state_.load(std::memory_order_acquire);
         if (pipeline_) {
             info.batches_processed = pipeline_->BatchesProcessed();
             info.records_processed = pipeline_->RecordsProcessed();
         }
-        if (state_ != DriverState::kInactive) {
+        if (state_.load(std::memory_order_acquire) != DriverState::kInactive) {
             auto now = std::chrono::steady_clock::now();
             info.uptime_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - start_time_).count();
@@ -358,7 +363,9 @@ protected:
         collect_timer_id_ = infra.GetTimerWheel().AddRepeating(
             std::chrono::milliseconds(src->IntervalMs()),
             [this, &infra] {
-                if (state_ != DriverState::kActive) return;
+                if (state_.load(std::memory_order_acquire) != DriverState::kActive) {
+                    return;
+                }
                 infra.GetCollectPool()->Submit([this] {
                     if (!pipeline_ || !pipeline_->GetSource()) return 0;
                     auto result = pipeline_->GetSource()->Collect();
@@ -387,7 +394,7 @@ protected:
         }
     }
 
-    DriverState state_ = DriverState::kInactive;
+    std::atomic<DriverState> state_{DriverState::kInactive};
     std::unique_ptr<Pipeline> pipeline_;
     RecordableInterface* recording_sink_ = nullptr;
     std::chrono::steady_clock::time_point start_time_;

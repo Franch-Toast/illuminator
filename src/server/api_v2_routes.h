@@ -34,6 +34,33 @@
 
 namespace illuminator {
 
+inline ConfigValue JsonToConfigValue(const nlohmann::json& body) {
+    ConfigValue cfg;
+    for (auto& [key, val] : body.items()) {
+        if (val.is_array()) {
+            std::string joined;
+            for (size_t i = 0; i < val.size(); ++i) {
+                if (i > 0) joined += ",";
+                if (val[i].is_number()) {
+                    joined += std::to_string(val[i].get<int64_t>());
+                } else {
+                    joined += val[i].get<std::string>();
+                }
+            }
+            cfg.Set(key, joined);
+        } else if (val.is_number_integer()) {
+            cfg.Set(key, static_cast<int64_t>(val.get<int64_t>()));
+        } else if (val.is_number()) {
+            cfg.Set(key, std::to_string(val.get<double>()));
+        } else if (val.is_boolean()) {
+            cfg.Set(key, val.get<bool>() ? "true" : "false");
+        } else if (val.is_string()) {
+            cfg.Set(key, val.get<std::string>());
+        }
+    }
+    return cfg;
+}
+
 // ============================================================================
 // RegisterApiV2Routes — 注册 FeatureBus v2 API 路由
 // ============================================================================
@@ -58,7 +85,7 @@ inline void RegisterApiV2Routes(httplib::Server& svr) {
             j["supports_configure"] = d.supports_configure;
             j["has_bpf_probe"] = d.has_bpf_probe;
             j["session_required"] = d.session_required;
-            auto* drv = bus.GetDriver(d.name);
+            auto drv = bus.GetDriver(d.name);
             if (drv) {
                 j["state"] = DriverStateToString(drv->State());
                 auto stats = drv->GetStats();
@@ -125,29 +152,7 @@ inline void RegisterApiV2Routes(httplib::Server& svr) {
             if (!req.body.empty()) {
                 try {
                     auto body = nlohmann::json::parse(req.body);
-                    ConfigValue cfg;
-                    for (auto& [key, val] : body.items()) {
-                        if (val.is_array()) {
-                            std::string joined;
-                            for (size_t i = 0; i < val.size(); ++i) {
-                                if (i > 0) joined += ",";
-                                if (val[i].is_number()) {
-                                    joined += std::to_string(val[i].get<int64_t>());
-                                } else {
-                                    joined += val[i].get<std::string>();
-                                }
-                            }
-                            cfg.Set(key, joined);
-                        } else if (val.is_number_integer()) {
-                            cfg.Set(key, static_cast<int64_t>(val.get<int64_t>()));
-                        } else if (val.is_number()) {
-                            cfg.Set(key, std::to_string(val.get<double>()));
-                        } else if (val.is_boolean()) {
-                            cfg.Set(key, val.get<bool>() ? "true" : "false");
-                        } else if (val.is_string()) {
-                            cfg.Set(key, val.get<std::string>());
-                        }
-                    }
+                    auto cfg = JsonToConfigValue(body);
                     auto reconf_status = bus.Reconfigure(name, cfg);
                     if (!reconf_status.ok() &&
                         reconf_status.code() != StatusCode::kRequiresRestart) {
@@ -213,28 +218,7 @@ inline void RegisterApiV2Routes(httplib::Server& svr) {
             ConfigValue cfg;
             try {
                 auto body = nlohmann::json::parse(req.body);
-                for (auto& [key, val] : body.items()) {
-                    if (val.is_array()) {
-                        std::string joined;
-                        for (size_t i = 0; i < val.size(); ++i) {
-                            if (i > 0) joined += ",";
-                            if (val[i].is_number()) {
-                                joined += std::to_string(val[i].get<int64_t>());
-                            } else {
-                                joined += val[i].get<std::string>();
-                            }
-                        }
-                        cfg.Set(key, joined);
-                    } else if (val.is_number_integer()) {
-                        cfg.Set(key, static_cast<int64_t>(val.get<int64_t>()));
-                    } else if (val.is_number()) {
-                        cfg.Set(key, std::to_string(val.get<double>()));
-                    } else if (val.is_boolean()) {
-                        cfg.Set(key, val.get<bool>() ? "true" : "false");
-                    } else if (val.is_string()) {
-                        cfg.Set(key, val.get<std::string>());
-                    }
-                }
+                cfg = JsonToConfigValue(body);
             } catch (const std::exception& e) {
                 res.status = 400;
                 nlohmann::json err = {{"error", std::string("invalid JSON: ") + e.what()}};
@@ -259,7 +243,7 @@ inline void RegisterApiV2Routes(httplib::Server& svr) {
     svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/stats)",
         [&bus](const httplib::Request& req, httplib::Response& res) {
             auto name = req.matches[1].str();
-            auto* drv = bus.GetDriver(name);
+            auto drv = bus.GetDriver(name);
             if (!drv) {
                 res.status = 404;
                 res.set_content(R"({"error":"feature not found"})", "application/json");

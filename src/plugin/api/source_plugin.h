@@ -62,7 +62,7 @@ public:
     }
 
     virtual Status Reconfigure(const ConfigValue& /*params*/) {
-        return Status::Error(StatusCode::kUnimplemented, "reconfigure not supported");
+        return Status::Ok();
     }
 
     // 暂停/恢复接口 — FeatureDriver::Pause()/Resume() 调用。

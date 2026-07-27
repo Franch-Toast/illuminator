@@ -66,7 +66,8 @@ std::unique_ptr<SinkPlugin> FeatureDriver::MakeSseSink(const char* feature_name)
 }
 
 Status FeatureDriver::StartRecording(const std::string& output_dir) {
-    if (state_ == DriverState::kInactive || !pipeline_) {
+    if (state_.load(std::memory_order_acquire) == DriverState::kInactive ||
+        !pipeline_) {
         return Status::Error(StatusCode::kInvalidArgument, "Feature not active");
     }
     if (recording_sink_) {

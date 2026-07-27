@@ -176,17 +176,32 @@ public:
         auto status = source_->Start();
         if (!status.ok()) return status;
 
+        size_t started_processors = 0;
         for (auto& p : processors_) {
             status = p->Start();
-            if (!status.ok()) return status;
+            if (!status.ok()) {
+                RollbackStart(started_processors, false, 0);
+                return status;
+            }
+            ++started_processors;
         }
+        bool aggregator_started = false;
         if (aggregator_) {
             status = aggregator_->Start();
-            if (!status.ok()) return status;
+            if (!status.ok()) {
+                RollbackStart(started_processors, false, 0);
+                return status;
+            }
+            aggregator_started = true;
         }
+        size_t started_sinks = 0;
         for (auto& s : sinks_) {
             status = s->Start();
-            if (!status.ok()) return status;
+            if (!status.ok()) {
+                RollbackStart(started_processors, aggregator_started, started_sinks);
+                return status;
+            }
+            ++started_sinks;
         }
 
         running_.store(true, std::memory_order_release);
@@ -237,6 +252,7 @@ public:
 
     void Enqueue(DataBatchPtr batch) {
         if (!batch || batch->Empty()) return;
+        if (!running_.load(std::memory_order_acquire)) return;
 
         if (!ingest_channel_.TryEnqueue(std::move(batch))) {
             IL_WARN("Pipeline '{}': channel full, data dropped", name_);
@@ -344,6 +360,21 @@ public:
     }
 
 private:
+    void RollbackStart(size_t started_processors,
+                       bool aggregator_started,
+                       size_t started_sinks) {
+        for (size_t i = 0; i < started_sinks; ++i) {
+            sinks_[i]->Stop();
+        }
+        if (aggregator_started) {
+            aggregator_->Stop();
+        }
+        for (size_t i = 0; i < started_processors; ++i) {
+            processors_[i]->Stop();
+        }
+        source_->Stop();
+    }
+
     void ProcessLoop() {
         uint32_t loop_count = 0;
 

@@ -35,6 +35,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstring>
 #include <mutex>
 #include <string>
 
@@ -69,6 +70,49 @@ inline void JsonError(httplib::Response& res, const std::string& msg,
     res.set_content(json{{"error", msg}}.dump() + "\n", "application/json");
 }
 
+inline bool ValidateOutputDir(const std::string& path, std::string* error) {
+    if (path.empty()) {
+        if (error) *error = "output_dir cannot be empty";
+        return false;
+    }
+    if (path.find("..") != std::string::npos) {
+        if (error) *error = "output_dir must not contain '..'";
+        return false;
+    }
+    static constexpr const char* kDangerous = ";|&$`\"'<>*?\\";
+    for (char c : path) {
+        if (c == '\0' || (static_cast<unsigned char>(c) < 32)) {
+            if (error) *error = "output_dir contains invalid characters";
+            return false;
+        }
+        if (std::strchr(kDangerous, c) != nullptr) {
+            if (error) *error = "output_dir contains invalid characters";
+            return false;
+        }
+    }
+    if (path[0] != '/') {
+        return true;
+    }
+    auto is_under = [](const std::string& p, const std::string& prefix) {
+        if (p == prefix) return true;
+        return p.size() > prefix.size() && p[prefix.size()] == '/' &&
+               p.compare(0, prefix.size(), prefix) == 0;
+    };
+    static const char* kAllowedPrefixes[] = {
+        "/tmp/illuminator_data",
+        "/tmp/illuminator_recordings",
+    };
+    for (const char* prefix : kAllowedPrefixes) {
+        if (is_under(path, prefix)) return true;
+    }
+    const std::string& default_dir = FeatureDriver::GetDefaultDataDir();
+    if (!default_dir.empty() && is_under(path, default_dir)) return true;
+    if (error) {
+        *error = "output_dir must be a relative path or under an allowed directory";
+    }
+    return false;
+}
+
 // ============================================================================
 // RegisterApiRoutes — 注册核心 API 路由
 // ============================================================================
@@ -96,7 +140,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
         auto drivers = bus.ListDrivers();
         json arr = json::array();
         for (auto& info : drivers) {
-            auto* drv = bus.GetDriver(info.name);
+            auto drv = bus.GetDriver(info.name);
             Pipeline* pipeline = drv ? drv->GetPipeline() : nullptr;
             json entry;
             entry["name"] = info.name;
@@ -132,7 +176,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
     auto collect_handler = [](const httplib::Request& req, httplib::Response& res) {
         auto name = req.path_params.at("name");
         auto& bus = FeatureBus::Instance();
-        auto* drv = bus.GetDriver(name);
+        auto drv = bus.GetDriver(name);
         if (!drv || !drv->GetPipeline()) {
             JsonError(res, "feature '" + name + "' not found or inactive", 404);
             return;
@@ -167,7 +211,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                 auto drivers = bus.ListDrivers();
                 json arr = json::array();
                 for (auto& info : drivers) {
-                    auto* drv = bus.GetDriver(info.name);
+                    auto drv = bus.GetDriver(info.name);
                     Pipeline* pipeline = drv ? drv->GetPipeline() : nullptr;
                     if (!pipeline) continue;
                     arr.push_back({
@@ -216,7 +260,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
              [](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
                  auto& bus = FeatureBus::Instance();
-                 auto* drv = bus.GetDriver(name);
+                 auto drv = bus.GetDriver(name);
                  if (!drv) {
                      JsonError(res, "Feature not found: " + name, 404);
                      return;
@@ -226,6 +270,11 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                      auto j = json::parse(req.body);
                      if (j.contains("output_dir") && j["output_dir"].is_string()) {
                          output_dir = j["output_dir"];
+                         std::string err;
+                         if (!ValidateOutputDir(output_dir, &err)) {
+                             JsonError(res, err, 400);
+                             return;
+                         }
                      }
                  } catch (...) {
                      // 解析失败时使用默认目录
@@ -247,7 +296,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
              [](const httplib::Request& req, httplib::Response& res) {
                  auto name = req.path_params.at("name");
                  auto& bus = FeatureBus::Instance();
-                 auto* drv = bus.GetDriver(name);
+                 auto drv = bus.GetDriver(name);
                  if (!drv) {
                      JsonError(res, "Feature not found: " + name, 404);
                      return;
@@ -271,7 +320,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
             [](const httplib::Request& req, httplib::Response& res) {
                 auto name = req.path_params.at("name");
                 auto& bus = FeatureBus::Instance();
-                auto* drv = bus.GetDriver(name);
+                auto drv = bus.GetDriver(name);
                 if (!drv || !drv->IsRecording()) {
                     res.set_content(
                         json{{"feature", name}, {"recording", false}}.dump() + "\n",
@@ -299,6 +348,11 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                      auto j = json::parse(req.body);
                      if (j.contains("output_dir") && j["output_dir"].is_string()) {
                          output_dir = j["output_dir"];
+                         std::string err;
+                         if (!ValidateOutputDir(output_dir, &err)) {
+                             JsonError(res, err, 400);
+                             return;
+                         }
                      }
                  } catch (...) {
                      // 解析失败时使用默认目录
@@ -307,7 +361,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                  json started = json::array();
                  json errors = json::array();
                  for (auto& info : bus.ListDrivers()) {
-                     auto* drv = bus.GetDriver(info.name);
+                     auto drv = bus.GetDriver(info.name);
                      if (!drv) continue;
                      if (drv->IsRecording()) {
                          started.push_back(info.name);
@@ -332,7 +386,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                      auto sink = registry.Get(name);
                      if (!sink || !sink->IsRecording()) continue;
                      auto session = sink->GetSession();
-                     auto* drv = bus.GetDriver(name);
+                     auto drv = bus.GetDriver(name);
                      if (!drv) continue;
                      auto st = drv->StopRecording();
                      if (!st.ok()) continue;
@@ -354,7 +408,7 @@ inline void RegisterApiRoutes(httplib::Server& srv) {
                 json recording_features = json::array();
                 uint64_t total_bytes = 0;
                 for (auto& info : bus.ListDrivers()) {
-                    auto* drv = bus.GetDriver(info.name);
+                    auto drv = bus.GetDriver(info.name);
                     if (!drv || !drv->IsRecording()) continue;
                     any_recording = true;
                     auto sink = RecordingSinkRegistry::Instance().Get(info.name);

@@ -55,6 +55,7 @@ struct SseSubscription {
     std::deque<std::pair<uint64_t, std::string>> recent_messages;
     std::atomic<bool> active{true};
     std::atomic<bool> replay_done{false};
+    std::atomic<uint64_t> messages_dropped{0};
 };
 
 class SseHandler {
@@ -346,13 +347,15 @@ private:
             }
 
             std::lock_guard lock(sub->mu);
-            for (auto& msg : frames) {
-                if (sub->outbox.size() < kSseQueueMaxSize) {
+            if (sub->outbox.size() + frames.size() <= kSseQueueMaxSize) {
+                for (auto& msg : frames) {
                     sub->outbox.push(msg);
                     CacheRecentMessage(sub, event_id, msg);
                 }
+                sub->cv.notify_one();
+            } else {
+                sub->messages_dropped.fetch_add(1);
             }
-            sub->cv.notify_one();
         }
     }
 

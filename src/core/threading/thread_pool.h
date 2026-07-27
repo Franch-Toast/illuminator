@@ -92,6 +92,18 @@ public:
         return future;
     }
 
+    // 停止接收新任务并等待已提交任务完成
+    void DrainAndStop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (auto& w : workers_) {
+            if (w.joinable()) w.join();
+        }
+    }
+
     // ---- 查询 ----
     // 当前排队的任务数
     size_t PendingTasks() const {

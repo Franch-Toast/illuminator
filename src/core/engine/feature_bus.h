@@ -51,7 +51,7 @@ public:
             return Status::Error(StatusCode::kAlreadyExists,
                                  "driver already registered: " + name);
         }
-        drivers_[name] = std::move(driver);
+        drivers_[name] = std::shared_ptr<FeatureDriver>(std::move(driver));
         IL_INFO("FeatureBus: registered '{}'", name);
         return Status::Ok();
     }
@@ -171,11 +171,11 @@ public:
         return Status::Ok();
     }
 
-    // GetDriver — 获取 Driver 指针（只读查询）
-    FeatureDriver* GetDriver(const std::string& name) {
+    // GetDriver — 获取 Driver 引用（只读查询）
+    std::shared_ptr<FeatureDriver> GetDriver(const std::string& name) {
         std::shared_lock lock(mu_);
         auto it = drivers_.find(name);
-        return (it != drivers_.end()) ? it->second.get() : nullptr;
+        return (it != drivers_.end()) ? it->second : nullptr;
     }
 
     // ListDrivers — 列出所有 Driver 的运行时信息
@@ -251,7 +251,7 @@ private:
     FeatureBus& operator=(const FeatureBus&) = delete;
 
     mutable std::shared_mutex mu_;
-    std::unordered_map<std::string, std::unique_ptr<FeatureDriver>> drivers_;
+    std::unordered_map<std::string, std::shared_ptr<FeatureDriver>> drivers_;
     StateChangeCallback state_callback_;
 };
 

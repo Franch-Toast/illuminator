@@ -167,7 +167,7 @@ TEST_F(FeatureDriverTest, BusRegisterAndProbe) {
     status = bus.Probe("test_feature");
     EXPECT_TRUE(status.ok());
 
-    auto* drv = bus.GetDriver("test_feature");
+    auto drv = bus.GetDriver("test_feature");
     EXPECT_NE(drv, nullptr);
     EXPECT_EQ(drv->State(), DriverState::kActive);
 

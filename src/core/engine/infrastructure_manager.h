@@ -70,8 +70,15 @@ public:
         if (!started_) return Status::Ok();
 
         timer_.Stop();
-        collect_pool_.reset();
-        sink_pool_.reset();
+
+        if (collect_pool_) {
+            collect_pool_->DrainAndStop();
+            collect_pool_.reset();
+        }
+        if (sink_pool_) {
+            sink_pool_->DrainAndStop();
+            sink_pool_.reset();
+        }
 
         IL_INFO("InfrastructureManager stopped");
         started_ = false;
