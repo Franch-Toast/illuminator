@@ -27,7 +27,7 @@ const mainNav: NavItem[] = [
 ];
 
 const featureNav: NavItem[] = [
-  { icon: <Cpu size={18} />, label: 'CPU', path: '/feature/cpu_utilization' },
+  { icon: <Cpu size={18} />, label: 'CPU', path: '/cpu' },
   { icon: <MemoryStick size={18} />, label: 'Memory', path: '/feature/memory_usage' },
   { icon: <HardDrive size={18} />, label: 'Disk I/O', path: '/feature/disk_io' },
   { icon: <Network size={18} />, label: 'Network', path: '/feature/network_io' },

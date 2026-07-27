@@ -1,9 +1,11 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { lazy, Suspense } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
 import { AppLayout } from './components/layout/AppLayout';
+import { initDataBus } from './services/data-bus';
 
 const Landing = lazy(() => import('./pages/Landing').then((m) => ({ default: m.Landing })));
 const Overview = lazy(() => import('./pages/Overview').then((m) => ({ default: m.Overview })));
+const CpuPage = lazy(() => import('./pages/CpuPage').then((m) => ({ default: m.CpuPage })));
 const FeatureDetail = lazy(() => import('./pages/FeatureDetail').then((m) => ({ default: m.FeatureDetail })));
 const FlameGraph = lazy(() => import('./pages/FlameGraph').then((m) => ({ default: m.FlameGraph })));
 const PluginManager = lazy(() => import('./pages/PluginManager').then((m) => ({ default: m.PluginManager })));
@@ -17,6 +19,8 @@ function PageLoader() {
 }
 
 export function App() {
+  useEffect(() => { initDataBus(); }, []);
+
   return (
     <BrowserRouter>
       <Suspense fallback={<PageLoader />}>
@@ -24,6 +28,7 @@ export function App() {
           <Route index element={<Landing />} />
           <Route element={<AppLayout />}>
             <Route path="dashboard" element={<Overview />} />
+            <Route path="cpu" element={<CpuPage />} />
             <Route path="feature/:name" element={<FeatureDetail />} />
             <Route path="flamegraph" element={<FlameGraph />} />
             <Route path="plugins" element={<PluginManager />} />

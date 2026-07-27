@@ -240,6 +240,40 @@ inline void RegisterApiV2Routes(httplib::Server& svr) {
             res.set_content(resp.dump(), "application/json");
         });
 
+    // GET /api/v2/features/:name/query?q=threads&pid=123
+    svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/query)",
+        [&bus](const httplib::Request& req, httplib::Response& res) {
+            auto name = req.matches[1].str();
+            auto drv = bus.GetDriver(name);
+            if (!drv) {
+                res.status = 404;
+                nlohmann::json err = {{"error", "feature not found: " + name}};
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+
+            std::string query_name = req.get_param_value("q");
+            if (query_name.empty()) {
+                res.status = 400;
+                res.set_content(R"({"error":"missing 'q' parameter"})", "application/json");
+                return;
+            }
+
+            QueryParams params;
+            for (auto& [k, v] : req.params) {
+                if (k != "q") params[k] = v;
+            }
+
+            auto result = drv->QueryExtra(query_name, params);
+            if (!result.ok()) {
+                res.status = (result.status().code() == StatusCode::kUnimplemented) ? 501 : 400;
+                nlohmann::json err = {{"error", result.status().message()}};
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+            res.set_content(result.value(), "application/json");
+        });
+
     svr.Get(R"(/api/v2/features/([a-zA-Z0-9_-]+)/stats)",
         [&bus](const httplib::Request& req, httplib::Response& res) {
             auto name = req.matches[1].str();

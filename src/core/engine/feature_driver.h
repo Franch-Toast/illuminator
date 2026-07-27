@@ -168,6 +168,15 @@ public:
         return Status::Error(StatusCode::kUnimplemented, "SetConfig not supported");
     }
 
+    // ---- QueryExtra — 透传到 SourcePlugin 的按需查询 ----
+    StatusOr<std::string> QueryExtra(
+        const std::string& query, const QueryParams& params) {
+        if (!pipeline_ || !pipeline_->GetSource()) {
+            return Status::Error(StatusCode::kInvalidArgument, "pipeline or source not available");
+        }
+        return pipeline_->GetSource()->QueryExtra(query, params);
+    }
+
     // ---- 统计接口 ----
     virtual FeatureStats GetStats() const {
         FeatureStats stats;
