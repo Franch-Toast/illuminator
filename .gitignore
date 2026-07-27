@@ -61,3 +61,4 @@ illuminator.yaml
 # Uncomment the next line if you don't want to track it:
 # MODULE.bazel.lock
 
+.cursor/
