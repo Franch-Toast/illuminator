@@ -1,54 +1,12 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
-cc_library(
-    name = "passthrough",
-    hdrs = ["passthrough/passthrough_processor.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/processors",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-    ],
-)
-
-cc_library(
-    name = "filter",
-    hdrs = ["filter/filter_processor.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/processors",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-    ],
-)
-
-cc_library(
-    name = "stack_symbolizer",
-    hdrs = ["stack_symbolizer/stack_symbolizer.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/processors",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:common_utils",
-        "//src/plugin:infra",
-    ],
-)
-
-cc_library(
-    name = "stack_merger",
-    hdrs = ["stack_merger/stack_merger.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/processors",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-    ],
-)
+# ============================================================================
+# Processor 插件 BUILD 文件
+# ============================================================================
+# 所有具体 Processor 实现已清除，等待按照新架构规范重新实现。
+#
+# 添加新 Processor 时：
+#   1. 在子目录（如 filter/、stack_symbolizer/）下创建 xxx_processor.h
+#   2. 在本文件中添加 cc_library target
+#   3. 在 builtin_plugins.cc 中 #include 头文件
+# ============================================================================

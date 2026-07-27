@@ -1,5 +1,17 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
 
+# ============================================================================
+# Sink 插件 BUILD 文件
+# ============================================================================
+# 用户级 Sink 实现已清除，等待按照新架构规范重新实现。
+# 保留 sse_sink 和 recording_sink — 它们是 FeatureDriver 框架的基础设施组件。
+#
+# 添加新 Sink 时：
+#   1. 在子目录（如 console_output/）下创建 xxx_sink.h
+#   2. 在本文件中添加 cc_library target
+#   3. 在 builtin_plugins.cc 中 #include 头文件
+# ============================================================================
+
 cc_library(
     name = "sse_sink",
     hdrs = ["sse_sink/sse_sink.h"],
@@ -11,75 +23,6 @@ cc_library(
         "//src/core:common",
         "//src/core:data",
         "//src/core:serialization",
-    ],
-)
-
-cc_library(
-    name = "console_output",
-    hdrs = ["console_output/console_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-        "//src/core:serialization",
-    ],
-)
-
-cc_library(
-    name = "file_export",
-    hdrs = ["file_export/file_export_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-        "//src/core:serialization",
-    ],
-)
-
-cc_library(
-    name = "local_storage",
-    hdrs = ["local_storage/local_storage_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-        "//src/server/storage:storage",
-        "//src/server/storage:sqlite_backend",
-    ],
-)
-
-cc_library(
-    name = "pprof_export",
-    hdrs = ["pprof_export/pprof_export_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
-    ],
-)
-
-cc_library(
-    name = "prometheus_exposition",
-    hdrs = ["prometheus_exposition/prometheus_sink.h"],
-    strip_include_prefix = "",
-    include_prefix = "plugin/sinks",
-    visibility = ["//visibility:public"],
-    alwayslink = True,
-    deps = [
-        "//src/plugin:api",
-        "//src/plugin:infra",
     ],
 )
 

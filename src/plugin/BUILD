@@ -98,20 +98,6 @@ cc_library(
     deps = [
         ":api",
         ":infra",
-        # All feature sources
-        "//src/plugin/features:all_sources",
-        # Processors
-        "//src/plugin/processors:passthrough",
-        "//src/plugin/processors:filter",
-        "//src/plugin/processors:stack_symbolizer",
-        "//src/plugin/processors:stack_merger",
-        # Sinks
-        "//src/plugin/sinks:console_output",
-        "//src/plugin/sinks:file_export",
-        "//src/plugin/sinks:local_storage",
-        "//src/plugin/sinks:pprof_export",
-        "//src/plugin/sinks:prometheus_exposition",
-        # Storage
-        "//src/server/storage:sqlite_backend",
+        # 添加新插件的 BUILD target 到这里
     ],
 )
