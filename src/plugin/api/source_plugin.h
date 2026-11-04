@@ -65,7 +65,7 @@ public:
         return Status::Ok();
     }
 
-    // 暂停/恢复接口 — FeatureDriver::Pause()/Resume() 调用。
+    // 暂停/恢复接口 — 由运行入口协调调度后调用。
     // eBPF 子类覆写：关闭 BPF gate 等。非 eBPF 源默认空操作。
     virtual Status PauseCollection() { return Status::Ok(); }
     virtual Status ResumeCollection() { return Status::Ok(); }

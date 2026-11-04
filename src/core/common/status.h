@@ -56,7 +56,7 @@ enum class StatusCode {
     kUnimplemented,           // 功能未实现
     kUnavailable,             // 服务不可用
     kDataLoss,                // 数据丢失/损坏
-    kRequiresRestart,         // 参数已保存，但需要重启 Feature 才能生效
+    kRequiresRestart,         // 参数已保存，但需要重启组件才能生效
 };
 
 // ---- Status: 错误状态封装 ----

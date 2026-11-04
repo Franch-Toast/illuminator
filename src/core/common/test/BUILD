@@ -17,3 +17,12 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_test(
+    name = "yaml_config_test",
+    srcs = ["yaml_config_test.cc"],
+    deps = [
+        "//src/core:yaml_config",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -1,352 +1,225 @@
-// ============================================================================
-// Illuminator CLI — 命令行入口
-// ============================================================================
-
-#include <csignal>
-#include <cstdlib>
-#include <cstring>
+// Minimal host for the core SDK. Pipeline assembly and scheduling live here.
 #include <atomic>
+#include <charconv>
+#include <chrono>
+#include <csignal>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
-#include <chrono>
 
-#include "core/common/logging.h"
 #include "core/common/config.h"
+#include "core/common/logging.h"
 #include "core/common/version_generated.h"
 #include "core/common/yaml_config_loader.h"
-#include "core/engine/feature_bus.h"
-#include "core/engine/feature_driver.h"
 #include "core/engine/infrastructure_manager.h"
 #include "core/engine/pipeline.h"
-#include "plugin/infra/feature_driver_factories.h"
-#include "plugin/infra/plugin_registry.h"
 #include "plugin/infra/builtin_plugins.h"
 #include "plugin/infra/plugin_manager.h"
-#include "server/http_server.h"
-#include "server/api_routes.h"
-#include "server/api_v2_routes.h"
-#include "server/sse_handler.h"
-#include "core/common/json_serializer.h"
-#include "server/storage/storage_backend.h"
+#include "plugin/sinks/recording_sink/recording_sink.h"
+#include "storage/sqlite_backend/sqlite_backend.h"
 
-static std::atomic<bool> g_running{true};
+namespace {
+using namespace illuminator;
+volatile std::sig_atomic_t interrupted = 0;
+void SignalHandler(int) { interrupted = 1; }
 
-static void SignalHandler(int) {
-    g_running.store(false, std::memory_order_release);
+// Synthetic example only: it observes no system resource and needs no privileges.
+class DemoSource : public SourcePlugin {
+public:
+    const char* Name() const override { return "demo_counter"; }
+    const char* Version() const override { return "0.1.0"; }
+    uint32_t IntervalMs() const override { return 50; }
+    StatusOr<DataBatchPtr> Collect() override {
+        auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
+        auto& record = batch->AddRecord();
+        record.timestamp = NowTimestamp();
+        record.SetField(batch->InternString("value"), ++count_);
+        return batch;
+    }
+private:
+    int64_t count_ = 0;
+};
+
+struct Options {
+    std::string command;
+    std::string config;
+    std::string source;
+    std::string sink = "recording";
+    std::string output_dir;
+    int duration = 1;
+};
+
+void Usage() {
+    std::cout << "Illuminator core runtime\n"
+              << "Usage: illuminator <demo|run|plugins|storage|version> [options]\n"
+              << "  demo                 Run a synthetic Source -> RecordingSink pipeline\n"
+              << "  run --source <name>  Run a registered source (including .so plugins)\n"
+              << "  --sink <name>        Registered output (default: recording)\n"
+              << "  --config <path>      Core YAML configuration\n"
+              << "  --duration <sec>     Run for 1..86400 seconds (default: 1)\n"
+              << "  --output-dir <path>  Recording directory (default: global.data_dir)\n";
 }
 
-static void PrintUsage(const char* prog) {
-    fprintf(stderr,
-        "Illuminator - Observability & Performance Analysis Platform v%s\n\n"
-        "Usage: %s <command> [options]\n\n"
-        "Commands:\n"
-        "  daemon     Start the Illuminator daemon\n"
-        "  collect    One-shot data collection\n"
-        "  top        Real-time system overview\n"
-        "  version    Show version\n"
-        "  plugins    List registered plugins\n"
-        "  storage    List storage backends\n\n"
-        "Options:\n"
-        "  --config <path>       Configuration file path\n"
-        "  --log-level <level>   Log level (trace/debug/info/warn/error)\n"
-        "  --duration <sec>      Collection duration (collect command)\n"
-        "  --port <port>         HTTP port override\n\n",
-        illuminator::kIlluminatorVersion, prog);
-}
-
-static void SetLogLevel(const std::string& level) {
-    using illuminator::LogLevel;
-    if (level == "trace") illuminator::SetLogLevel(LogLevel::kTrace);
-    else if (level == "debug") illuminator::SetLogLevel(LogLevel::kDebug);
-    else if (level == "info")  illuminator::SetLogLevel(LogLevel::kInfo);
-    else if (level == "warn")  illuminator::SetLogLevel(LogLevel::kWarn);
-    else if (level == "error") illuminator::SetLogLevel(LogLevel::kError);
-}
-
-static constexpr const char* kDefaultConfigYaml = R"yaml(
-global:
-  log_level: info
-  auto_start: false
-)yaml";
-
-static illuminator::GlobalConfig BuildDemoConfig() {
-    auto result = illuminator::YamlConfigLoader::LoadFromString(kDefaultConfigYaml);
-    if (!result.ok()) {
-        IL_FATAL("Failed to parse built-in config: {}", result.status().message());
+// Keep all producers alive until scheduling and outstanding collection are stopped.
+// Pipeline::Stop drains its processing channel and waits for its sink writes.
+struct RuntimeShutdown {
+    InfrastructureManager& infrastructure;
+    Pipeline& pipeline;
+    bool stopped = false;
+    void Stop() {
+        if (stopped) return;
+        infrastructure.GetTimerWheel().Stop();
+        infrastructure.GetCollectPool()->DrainAndStop();
+        pipeline.Stop();
+        infrastructure.Stop();
+        stopped = true;
     }
-    return result.value();
-}
+    ~RuntimeShutdown() { Stop(); }
+};
 
-// Parse "host:port" into (host, port); returns false on failure.
-static bool ParseListenAddr(const std::string& listen,
-                            std::string& host, int& port) {
-    auto colon = listen.rfind(':');
-    if (colon == std::string::npos) return false;
-    host = listen.substr(0, colon);
-    try { port = std::stoi(listen.substr(colon + 1)); }
-    catch (...) { return false; }
-    return port > 0 && port < 65536;
-}
-
-static int RunDaemon(const std::string& config_path, const std::string& log_level,
-                     int port_override) {
-    SetLogLevel(log_level);
-    IL_INFO("Illuminator v{} starting...", illuminator::kIlluminatorVersion);
-
-    illuminator::RegisterBuiltinPlugins();
-
-    illuminator::GlobalConfig config;
-    if (!config_path.empty()) {
-        IL_INFO("Loading configuration from: {}", config_path);
-        auto result = illuminator::YamlConfigLoader::LoadFromFile(config_path);
-        if (!result.ok()) {
-            IL_ERROR("Failed to load config: {}", result.status().message());
-            return 1;
-        }
-        config = result.value();
-        if (!config.log_level.empty()) SetLogLevel(config.log_level);
-        if (!config.log_file.empty())
-            illuminator::ConfigureFileLogging(
-                config.log_file, config.log_max_size, config.log_max_files);
-    } else {
-        IL_INFO("No config file specified, using built-in demo configuration");
-        config = BuildDemoConfig();
+int Run(const Options& options, const GlobalConfig& config) {
+    auto& registry = PluginRegistry::Instance();
+    if (options.command == "demo") {
+        registry.RegisterSource("demo_counter", [] { return std::make_unique<DemoSource>(); });
     }
-
-    if (!config.plugin_dirs.empty()) {
-        auto pm_status = illuminator::PluginManager::Instance()
-            .LoadPluginsFromDirs(config.plugin_dirs);
-        if (!pm_status.ok()) {
-            IL_WARN("Plugin loading issue: {}", pm_status.message());
-        }
-    }
-    illuminator::PluginManager::Instance().PrintRegisteredPlugins();
-
-    std::string http_host = "127.0.0.1";
-    int http_port = 9527;
-    ParseListenAddr(config.server.http_listen, http_host, http_port);
-    if (port_override > 0) http_port = port_override;
-
-    // ---- RFC v3: FeatureBus is the ONLY pipeline management path ----
-    // Start InfrastructureManager (TimerWheel + CollectPool + SinkPool)
-    {
-        auto status = illuminator::InfrastructureManager::Instance().Start(config.engine);
-        if (!status.ok()) {
-            IL_ERROR("Failed to start InfrastructureManager: {}", status.message());
-            return 1;
-        }
-    }
-
-    illuminator::FeatureDriver::SetDefaultDataDir(config.data_dir);
-
-    // Register all FeatureDrivers and probe when auto_start is enabled
-    illuminator::FeatureDriver::SetSsePublishCallback(
-        [](const std::string& feature, const std::string& data) {
-            illuminator::SseHandler::Instance().Publish(feature, data);
-        });
-    illuminator::FeatureDriver::SetSseSinkFactory(
-        [](const char* name) { return illuminator::MakeFeatureSseSink(name); });
-    illuminator::FeatureDriver::SetRecordingSinkFactory(
-        [](const std::string& feature, const std::string& dir) {
-            return illuminator::MakeFeatureRecordingSinkPair(feature, dir);
-        });
-    illuminator::PluginRegistry::Instance().RegisterAllDrivers();
-    if (config.auto_start) {
-        illuminator::FeatureBus::Instance().ProbeAll();
-        IL_INFO("FeatureBus: all registered drivers probed (auto_start=true)");
-    } else {
-        IL_INFO("FeatureBus: drivers registered but not probed (auto_start=false, awaiting frontend control)");
-    }
-
-    if (!config.server.http_enabled) {
-        IL_WARN("HTTP server disabled by config. No REST API or frontend will be served.");
-    }
-
-    illuminator::HttpServer http_server;
-    illuminator::RegisterApiRoutes(http_server.server());
-
-    // SSE data plane
-    illuminator::SseHandler::Instance().RegisterRoutes(http_server.server());
-
-    illuminator::RegisterApiV2Routes(http_server.server());
-
-    http_server.SetStaticDir("web/dist");
-    if (config.server.http_enabled) {
-        http_server.Start(http_host, http_port);
-    }
-
-    IL_INFO("Illuminator daemon running on {}:{} (HTTP + SSE). Ctrl+C to stop.",
-            http_host, http_port);
-
-    signal(SIGINT, SignalHandler);
-    signal(SIGTERM, SignalHandler);
-
-    while (g_running.load(std::memory_order_acquire)) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-
-    IL_INFO("Shutting down...");
-    auto& infra = illuminator::InfrastructureManager::Instance();
-    infra.GetTimerWheel().Stop();
-    illuminator::FeatureBus::Instance().RemoveAll();
-    infra.Stop();
-    illuminator::SseHandler::Instance().ShutdownAll();
-    if (config.server.http_enabled) http_server.Stop();
-    IL_INFO("Illuminator stopped.");
-    return 0;
-}
-
-static int RunCollect(int duration_sec, const std::string& log_level) {
-    SetLogLevel(log_level);
-    IL_INFO("Collecting for {} seconds...", duration_sec);
-
-    illuminator::RegisterBuiltinPlugins();
-
-    auto status = illuminator::InfrastructureManager::Instance().Start(
-        illuminator::EngineConfig{.collect_pool_threads = 2, .sink_pool_threads = 4});
-    if (!status.ok()) {
-        IL_ERROR("Failed to start InfrastructureManager: {}", status.message());
+    const std::string source_name = options.command == "demo" ? "demo_counter" : options.source;
+    auto source = registry.CreateSource(source_name);
+    auto sink = registry.CreateSink(options.sink);
+    if (!source || !sink) {
+        IL_ERROR("Unknown source '{}' or sink '{}'", source_name, options.sink);
         return 1;
     }
-
-    illuminator::PluginRegistry::Instance().RegisterAllDrivers();
-    illuminator::FeatureBus::Instance().ProbeAll();
-
-    std::this_thread::sleep_for(std::chrono::seconds(duration_sec));
-
-    illuminator::FeatureBus::Instance().RemoveAll();
-    illuminator::InfrastructureManager::Instance().Stop();
-    IL_INFO("Collection complete.");
-    return 0;
-}
-
-static int RunTop(const std::string& log_level) {
-    SetLogLevel(log_level);
-    illuminator::RegisterBuiltinPlugins();
-
-    fprintf(stdout, "Illuminator Top - Press Ctrl+C to exit\n\n");
-    signal(SIGINT, SignalHandler);
-    signal(SIGTERM, SignalHandler);
-
-    auto& registry = illuminator::PluginRegistry::Instance();
-    auto source = registry.CreateSource("proc_stat_reader");
-    if (!source) {
-        IL_ERROR("proc_stat_reader not available");
+    auto status = source->Init(ConfigValue{});
+    if (!status.ok()) { IL_ERROR("Source Init: {}", status.message()); return 1; }
+    if (source->IntervalMs() == 0) {
+        IL_ERROR("Source collection interval must be positive");
         return 1;
     }
+    ConfigValue sink_config;
+    sink_config.Set("feature_name", source_name); // .ilr v1 stream name
+    sink_config.Set("output_dir", options.output_dir.empty() ? config.data_dir : options.output_dir);
+    status = sink->Init(sink_config);
+    if (!status.ok()) { IL_ERROR("Sink Init: {}", status.message()); return 1; }
 
-    illuminator::ConfigValue cfg;
-    cfg.Set("interval_ms", int64_t{1000});
-    source->Init(cfg);
+    auto& infrastructure = InfrastructureManager::Instance();
+    status = infrastructure.Start(config.engine);
+    if (!status.ok()) { IL_ERROR("Infrastructure: {}", status.message()); return 1; }
+    const auto& channel = config.engine.channel;
+    Pipeline pipeline(source_name, ResolveChannelCapacity(channel.size),
+                      ResolveDropPolicy(channel.drop_policy),
+                      channel.backpressure_high, channel.backpressure_low);
+    RuntimeShutdown shutdown{infrastructure, pipeline};
+    auto* recording = dynamic_cast<RecordingSink*>(sink.get());
+    pipeline.SetSource(std::move(source));
+    pipeline.AddSink(std::move(sink));
+    pipeline.SetSinkPool(infrastructure.GetSinkPool());
+    status = pipeline.Start();
+    if (!status.ok()) { IL_ERROR("Pipeline Start: {}", status.message()); return 1; }
+    if (recording) {
+        status = recording->StartRecordingWithStatus();
+        if (!status.ok()) { IL_ERROR("Recording: {}", status.message()); return 1; }
+    }
 
-    while (g_running.load()) {
-        auto result = source->Collect();
-        if (!result.ok()) continue;
-
-        auto& batch = result.value();
-        fprintf(stdout, "\033[2J\033[H");
-        fprintf(stdout, "Illuminator Top - %s\n",
-                batch->GetMeta("_time", "").c_str());
-        fprintf(stdout, "%-10s %12s %12s %12s %12s\n",
-                "CPU", "User%", "System%", "Idle%", "IOWait%");
-        fprintf(stdout, "--------------------------------------------------------------\n");
-
-        for (auto& rec : batch->records()) {
-            bool is_cpu = false;
-            std::string cpu_name;
-            for (auto& l : rec.labels) {
-                if (l.key == "cpu") {
-                    is_cpu = true;
-                    cpu_name = std::string(l.value);
+    auto busy = std::make_shared<std::atomic<bool>>(false);
+    auto collect_errors = std::make_shared<std::atomic<uint64_t>>(0);
+    auto* collect_pool = infrastructure.GetCollectPool();
+    infrastructure.GetTimerWheel().AddRepeating(
+        std::chrono::milliseconds(pipeline.GetSource()->IntervalMs()),
+        [&pipeline, collect_pool, busy, collect_errors] {
+            if (busy->exchange(true)) return; // Never overlap Collect on one source.
+            collect_pool->Submit([&pipeline, busy, collect_errors] {
+                struct ClearBusy {
+                    std::atomic<bool>& busy;
+                    ~ClearBusy() { busy.store(false); }
+                } clear{*busy};
+                try {
+                    auto batch = pipeline.GetSource()->Collect();
+                    if (batch.ok()) pipeline.Enqueue(std::move(*batch));
+                    else {
+                        ++*collect_errors;
+                        IL_ERROR("Collect: {}", batch.status().message());
+                    }
+                } catch (const std::exception& error) {
+                    ++*collect_errors;
+                    IL_ERROR("Collect: {}", error.what());
                 }
-            }
-            if (!is_cpu) continue;
-
-            auto get = [&rec](const char* name) -> uint64_t {
-                auto it = rec.fields.find(name);
-                if (it == rec.fields.end()) return 0;
-                if (auto* v = std::get_if<uint64_t>(&it->second)) return *v;
-                return 0;
-            };
-
-            uint64_t user = get("user"), system = get("system");
-            uint64_t idle = get("idle"), iowait = get("iowait");
-            uint64_t total = user + system + idle + iowait + get("nice") +
-                           get("irq") + get("softirq") + get("steal");
-            if (total == 0) total = 1;
-
-            fprintf(stdout, "%-10s %11.1f%% %11.1f%% %11.1f%% %11.1f%%\n",
-                    cpu_name.c_str(),
-                    100.0 * user / total,
-                    100.0 * system / total,
-                    100.0 * idle / total,
-                    100.0 * iowait / total);
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+            });
+        });
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(options.duration);
+    while (!interrupted && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-
-    return 0;
+    shutdown.Stop();
+    std::cout << "batches=" << pipeline.BatchesProcessed()
+              << " records=" << pipeline.RecordsProcessed()
+              << " errors=" << pipeline.ErrorCount() + collect_errors->load() << '\n';
+    if (recording) {
+        auto session = recording->GetSession();
+        std::cout << "recorded_batches=" << session.batches_written
+                  << " recording=" << session.file_path << '\n';
+    }
+    return pipeline.ErrorCount() || collect_errors->load() ||
+           (options.command == "demo" && pipeline.BatchesProcessed() == 0) ? 1 : 0;
 }
-
-static int RunPluginList() {
-    illuminator::RegisterBuiltinPlugins();
-    auto& reg = illuminator::PluginRegistry::Instance();
-
-    std::cout << "=== Registered Plugins ===\n\n";
-    std::cout << "Sources:\n";
-    for (auto& n : reg.ListSources()) std::cout << "  - " << n << "\n";
-    std::cout << "\nProcessors:\n";
-    for (auto& n : reg.ListProcessors()) std::cout << "  - " << n << "\n";
-    std::cout << "\nAggregators:\n";
-    for (auto& n : reg.ListAggregators()) std::cout << "  - " << n << "\n";
-    std::cout << "\nSinks:\n";
-    for (auto& n : reg.ListSinks()) std::cout << "  - " << n << "\n";
-    return 0;
-}
-
-static int RunStorageList() {
-    illuminator::RegisterBuiltinPlugins();
-    auto names = illuminator::StorageFactory::Instance().Available();
-    std::cout << "=== Available Storage Backends ===\n";
-    for (auto& n : names) std::cout << "  - " << n << "\n";
-    return 0;
-}
+}  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        PrintUsage(argv[0]);
-        return 1;
-    }
-
-    std::string command = argv[1];
-    std::string config_path, log_level = "info";
-    int duration = 10;
-    int port_override = 0;
-
+    using namespace illuminator;
+    if (argc < 2) { Usage(); return 2; }
+    Options options;
+    options.command = argv[1];
+    if (options.command == "--help" || options.command == "help") { Usage(); return 0; }
+    if (options.command != "demo" && options.command != "run" &&
+        options.command != "plugins" && options.command != "storage" &&
+        options.command != "version") { Usage(); return 2; }
     for (int i = 2; i < argc; ++i) {
-        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
-            config_path = argv[++i];
-        else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc)
-            log_level = argv[++i];
-        else if (strcmp(argv[i], "--duration") == 0 && i + 1 < argc)
-            duration = std::atoi(argv[++i]);
-        else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
-            port_override = std::atoi(argv[++i]);
+        std::string option = argv[i];
+        if (option == "--help") { Usage(); return 0; }
+        if (i + 1 == argc) { std::cerr << "Missing value: " << option << '\n'; return 2; }
+        std::string value = argv[++i];
+        if (option == "--config") options.config = value;
+        else if (option == "--source") options.source = value;
+        else if (option == "--sink") options.sink = value;
+        else if (option == "--output-dir") options.output_dir = value;
+        else if (option == "--duration") {
+            auto result = std::from_chars(value.data(), value.data() + value.size(), options.duration);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+                options.duration < 1 || options.duration > 86400) {
+                std::cerr << "Invalid duration: " << value << '\n'; return 2;
+            }
+        } else { std::cerr << "Unknown option: " << option << '\n'; return 2; }
     }
-
-    if (command == "daemon") return RunDaemon(config_path, log_level, port_override);
-    if (command == "collect") return RunCollect(duration, log_level);
-    if (command == "top") return RunTop(log_level);
-    if (command == "version") {
-        std::cout << "Illuminator v" << illuminator::kBuildVersion << "\n"
-                  << "  commit: " << illuminator::kBuildCommit << "\n";
-        return 0;
+    if (options.command == "version") {
+        std::cout << kBuildVersion << '\n'; return 0;
     }
-    if (command == "plugins") return RunPluginList();
-    if (command == "storage") return RunStorageList();
-
-    PrintUsage(argv[0]);
-    return 1;
+    if (options.command == "run" && options.source.empty()) {
+        std::cerr << "run requires --source <name>\n"; return 2;
+    }
+    std::signal(SIGINT, SignalHandler);
+    std::signal(SIGTERM, SignalHandler);
+    try {
+        GlobalConfig config;
+        if (!options.config.empty()) {
+            auto loaded = YamlConfigLoader::LoadFromFile(options.config);
+            if (!loaded.ok()) { std::cerr << loaded.status().message() << '\n'; return 1; }
+            config = std::move(*loaded);
+        }
+        GetDefaultLogger();
+        spdlog::set_level(spdlog::level::from_str(config.log_level));
+        ConfigureFileLogging(config.log_file, config.log_max_size, config.log_max_files);
+        RegisterBuiltinPlugins();
+        auto& manager = PluginManager::Instance();
+        auto status = manager.LoadPluginsFromDirs(config.plugin_dirs);
+        if (!status.ok()) { IL_ERROR("Plugin loading: {}", status.message()); return 1; }
+        if (options.command == "plugins") { manager.PrintRegisteredPlugins(); return 0; }
+        if (options.command == "storage") {
+            for (const auto& name : StorageFactory::Instance().Available()) std::cout << name << '\n';
+            return 0;
+        }
+        return Run(options, config);
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n'; return 1;
+    }
 }

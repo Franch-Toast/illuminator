@@ -1,34 +1,7 @@
-# =============================================================================
-# Illuminator Multi-stage Dockerfile
-# =============================================================================
-# Stage 1: Frontend build (Node 20)
-# Stage 2: Backend build (Ubuntu 22.04 + Bazel 7.6.1 + GCC 11)
-# Stage 3: Runtime (Ubuntu 22.04 minimal)
-# =============================================================================
-# Build args: pass version info from CI or local build script
-#   docker build --build-arg GIT_VERSION=$(git describe --tags --always) ...
-# =============================================================================
-
+# Illuminator core CLI image
 ARG GIT_VERSION=dev
 ARG GIT_COMMIT=unknown
 
-# ---------------------------------------------------------------------------
-# Stage 1: Frontend Build
-# ---------------------------------------------------------------------------
-FROM node:20-slim AS frontend-builder
-
-ARG GIT_VERSION
-ENV VITE_APP_VERSION=${GIT_VERSION}
-
-WORKDIR /app/web
-COPY web/package.json web/package-lock.json ./
-RUN npm ci --ignore-scripts
-COPY web/ ./
-RUN npx tsc --noEmit && npx vite build
-
-# ---------------------------------------------------------------------------
-# Stage 2: Backend Build
-# ---------------------------------------------------------------------------
 FROM ubuntu:22.04 AS backend-builder
 
 ARG GIT_VERSION
@@ -62,7 +35,7 @@ RUN printf '#!/bin/bash\necho "STABLE_GIT_VERSION %s"\necho "STABLE_GIT_COMMIT %
     "${GIT_VERSION}" "${GIT_COMMIT}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > tools/workspace_status.sh && chmod +x tools/workspace_status.sh
 
-# Build the backend binary (BPF bytecode is embedded via skeleton)
+# Build the core runtime host
 RUN bazel build //src/cli:illuminator --config=opt \
     && cp bazel-bin/src/cli/illuminator /app/illuminator-bin
 
@@ -76,18 +49,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-0 \
     libbpf0 \
+    libstdc++6 \
     libelf1 \
     zlib1g \
     ca-certificates \
-    curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -s /usr/sbin/nologin illuminator
 
 WORKDIR /opt/illuminator
 
 COPY --from=backend-builder /app/illuminator-bin ./illuminator
-# BPF bytecode now embedded in binary via skeleton — no external .bpf.o files needed
-COPY --from=frontend-builder /app/web/dist ./web/dist
 COPY illuminator.yaml.example ./illuminator.yaml
 
 RUN mkdir -p /var/lib/illuminator \
@@ -97,10 +68,5 @@ USER illuminator
 
 VOLUME ["/var/lib/illuminator"]
 
-EXPOSE 9527
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://127.0.0.1:9527/healthz || exit 1
-
 ENTRYPOINT ["./illuminator"]
-CMD ["daemon", "--config", "illuminator.yaml"]
+CMD ["demo", "--config", "illuminator.yaml", "--output-dir", "/var/lib/illuminator"]

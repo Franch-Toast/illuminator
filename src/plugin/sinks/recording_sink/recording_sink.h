@@ -1,20 +1,10 @@
 // =============================================================================
 // RecordingSink — 按需录制落盘 Sink
 // =============================================================================
-// 通过 API 控制的数据录制功能：
-//   - 用户在前端点击"录制"开始，点击"停止"结束
-//   - 数据以 NDJSON（newline-delimited JSON）格式追加写入文件
-//   - 支持硬性大小限制，超限自动停止
-//   - 每个 Feature 独立录制文件
-//
-// 文件格式（.ilr — Illuminator Recording）:
-//   第一行: {"format":"ilr","version":1,"feature":"xxx","started_at":...}
-//   后续行: {"ts":..., "data": {...}} （每个 DataBatch 一行）
-//
-// 设计考虑:
-//   - 与 SseSink 并联，录制不影响实时流性能
-//   - 录制不影响实时流性能（独立文件 I/O）
-//   - 支持多次录制（同一 Feature 多个录制文件）
+// 独立的 Pipeline 输出插件，由调用方显式开始录制，Stop() 关闭文件。
+// .ilr v1 保留 feature / feature_name 命名以兼容已有文件和配置；
+// 它们仅表示流名称，不依赖已移除的应用编排框架。
+// 首行为元数据，后续每行一个 DataBatch（NDJSON），支持文件大小上限。
 // =============================================================================
 
 #pragma once
@@ -23,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -80,9 +71,25 @@ public:
         if (file_) {
             file_->write(line.data(), line.size());
             file_->flush();
+            if (!*file_) {
+                StopRecordingLocked();
+                return Status::Error(StatusCode::kInternal, "Recording write failed");
+            }
             session_.bytes_written += line.size();
             session_.batches_written++;
         }
+        return Status::Ok();
+    }
+
+    Status Flush() override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (file_) file_->flush();
+        return Status::Ok();
+    }
+
+    Status Stop() override {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (recording_) StopRecordingLocked();
         return Status::Ok();
     }
 
@@ -103,8 +110,12 @@ public:
         std::string path = output_dir_ + "/" + filename;
 
         // 确保输出目录存在
-        std::string mkdir_cmd = "mkdir -p " + output_dir_;
-        (void)std::system(mkdir_cmd.c_str());
+        std::error_code error;
+        std::filesystem::create_directories(output_dir_, error);
+        if (error) {
+            return Status::Error(StatusCode::kInternal,
+                                 "Cannot create recording directory: " + error.message());
+        }
 
         file_ = std::make_unique<std::ofstream>(path, std::ios::binary);
         if (!file_->is_open()) {

@@ -3,15 +3,8 @@
 // ============================================================================
 //
 // PluginRegistry 是 Illuminator 的插件工厂与内省（introspection）中心。
-// 主要服务于：
-//   - CLI `plugins` 命令（列举已注册插件）
-//   - REST API `/api/v1/plugins`（插件发现）
-//   - 外部 .so 插件加载后的实例化（CreateSource/Processor/Aggregator/Sink）
-//
-// 职责边界（设计意图，非 bug）：
-//   FeatureDriver **不** 通过 PluginRegistry 创建管道组件，而是在
-//   BuildPipeline() 中直接硬编码具体类型（如 CpuProfilerSource、FilterProcessor）。
-//   这样 FeatureDriver 在编译期获得类型安全，避免运行时字符串查找带来的错误延迟。
+// 提供组件工厂，供运行入口按名称组装 Pipeline，也供动态库加载器注册组件。
+// 注册表只管理 Source / Processor / Aggregator / Sink，不管理运行生命周期。
 //
 // 采用"注册表 + 工厂函数"模式，实现插件系统的解耦和扩展性。
 //
@@ -43,10 +36,10 @@
 //
 // 使用示例：
 // ==========
-// 在插件头文件末尾添加一行：
-//   IL_REGISTER_SOURCE("cpu_utilization", CpuUtilizationSource);
+// 在插件注册实现文件（.cc）中添加一行：
+//   IL_REGISTER_SOURCE("my_source", MySource);
 // 这会生成一个静态变量，其初始化 lambda 在程序启动时自动将
-// "cpu_utilization" 与 CpuUtilizationSource 的工厂函数关联。
+// "my_source" 与 MySource 的工厂函数关联。
 // ============================================================================
 
 #pragma once
@@ -59,8 +52,6 @@
 #include <vector>
 
 #include "core/common/logging.h"
-#include "core/engine/feature_bus.h"
-#include "core/engine/feature_driver.h"
 #include "plugin/api/plugin_api.h"
 #include "plugin/api/source_plugin.h"
 #include "plugin/api/processor_plugin.h"
@@ -164,32 +155,6 @@ public:
     }
 
     // ==================================================================
-    // FeatureDriver 注册（原 FeatureRegistry 功能，统一到此处）
-    // ==================================================================
-
-    using DriverFactory = std::function<std::unique_ptr<FeatureDriver>()>;
-
-    void AddDriver(DriverFactory factory) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        driver_factories_.push_back(std::move(factory));
-    }
-
-    void RegisterAllDrivers() {
-        auto& bus = FeatureBus::Instance();
-        std::vector<DriverFactory> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            snapshot = driver_factories_;
-        }
-        for (auto& factory : snapshot) {
-            auto driver = factory();
-            if (driver) bus.Register(std::move(driver));
-        }
-        IL_INFO("PluginRegistry: registered {} drivers to FeatureBus",
-                snapshot.size());
-    }
-
-    // ==================================================================
     // 列表方法：列出所有已注册的插件名称
     // ==================================================================
     std::vector<std::string> ListSources() const {
@@ -226,7 +191,6 @@ private:
     std::unordered_map<std::string, ProcessorFactory> processors_;
     std::unordered_map<std::string, AggregatorFactory> aggregators_;
     std::unordered_map<std::string, SinkFactory> sinks_;
-    std::vector<DriverFactory> driver_factories_;
 };
 
 // ==================================================================
@@ -242,7 +206,7 @@ private:
 //   4. 通过命名拼接（_il_reg_src_##cls）确保每个插件有唯一的变量名
 //
 // 使用方法：在插件类定义之后添加一行注册宏
-//   例：IL_REGISTER_SOURCE("cpu_utilization", CpuUtilizationSource);
+//   例：IL_REGISTER_SOURCE("my_source", MySource);
 
 #define IL_REGISTER_SOURCE(name, cls) \
     static bool _il_reg_src_##cls = [] { \
@@ -269,20 +233,6 @@ private:
     static bool _il_reg_sink_##cls = [] { \
         ::illuminator::PluginRegistry::Instance().RegisterSink( \
             name, [] { return std::make_unique<cls>(); }); \
-        return true; \
-    }()
-
-// ==================================================================
-// FeatureDriver 自动注册宏（原 REGISTER_FEATURE，统一到 PluginRegistry）
-// ==================================================================
-// 在 Driver 实现文件底部调用：
-//   REGISTER_FEATURE(CpuUtilizationDriver);
-// Driver 将在 PluginRegistry::RegisterAllDrivers() 时实例化并注册到 FeatureBus。
-
-#define REGISTER_FEATURE(DriverClass) \
-    static bool _il_reg_feat_##DriverClass = [] { \
-        ::illuminator::PluginRegistry::Instance().AddDriver( \
-            [] { return std::make_unique<DriverClass>(); }); \
         return true; \
     }()
 

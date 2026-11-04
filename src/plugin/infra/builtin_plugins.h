@@ -1,25 +1,8 @@
-// ============================================================================
-// Illuminator 内置插件注册入口 — 强制链接所有内置插件
-// ============================================================================
-//
-// RegisterBuiltinPlugins() 是通过 #include 强链接所有内置插件的入口函数。
-// C++ 链接器默认会丢弃未被引用的翻译单元（translation unit），
-// 但内置插件通过静态初始化器注册自己（IL_REGISTER_* 宏）。
-// 这个函数通过引用这些翻译单元中的符号，防止链接器将其丢弃。
-//
-// 调用约定：
-// ==========
-// main() 函数中必须在任何插件使用前调用 RegisterBuiltinPlugins()。
-// 实际上函数体为空 — 真正的注册在 #include 的各个头文件的静态初始化器中
-// 完成（在 main() 之前执行）。这里只起到"强链接"的作用。
-// ============================================================================
-
 #pragma once
 
 namespace illuminator {
 
-// 强制链接所有内置插件到最终二进制文件中。
-// 必须在 main() 中调用以防止链接器剥离未引用的翻译单元。
+// Register built-in component factories once; safe to call repeatedly.
 void RegisterBuiltinPlugins();
 
 }  // namespace illuminator

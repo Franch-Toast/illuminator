@@ -22,14 +22,6 @@ compile_commands.json
 .DS_Store
 Thumbs.db
 
-# Web frontend
-web/node_modules/
-web/dist/
-
-# npm
-*.tgz
-.npm/
-
 # Python
 __pycache__/
 *.pyc

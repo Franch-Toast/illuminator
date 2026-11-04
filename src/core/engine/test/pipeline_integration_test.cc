@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -828,42 +829,39 @@ TEST(PipelineIntegrationTest, SinkPoolOverloadDropsBatchesAndUpdatesMetrics) {
         std::string("pipeline_") + kPipeName + "_sink_drops_total";
     const std::string bp_gauge =
         std::string("pipeline_") + kPipeName + "_sink_pool_backpressure";
-
     const uint64_t drops_before =
         InternalMetrics::Instance().GetCounter(drops_counter);
 
     Pipeline pipe(kPipeName);
     pipe.SetSource(std::make_unique<MockSource>());
-
-    auto sink = std::make_unique<SlowSink>(200);
-    pipe.AddSink(std::move(sink));
-
+    pipe.AddSink(std::make_unique<MockSink>());
     auto sink_pool = std::make_shared<ThreadPool>(1, "test-sink-pool");
     pipe.SetSinkPool(sink_pool);
-
     ASSERT_TRUE(pipe.Start().ok());
 
+    // Block the sole worker so pending writes accumulate deterministically.
+    // This tests the overload threshold without relying on slow I/O or CPU speed.
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    sink_pool->Submit([gate] { gate.wait(); });
     for (int i = 0; i < 300; ++i) {
         auto batch = std::make_shared<DataBatch>(DataBatch::Type::kMetrics);
         batch->AddRecord();
         pipe.Enqueue(batch);
     }
-
-    // 等待 ProcessThread 将批次提交到 SinkPool
-    for (int i = 0; i < 50; ++i) {
-        if (pipe.ErrorCount() > 0 &&
-            InternalMetrics::Instance().GetGauge(bp_gauge) >= 1.0) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (pipe.BatchesProcessed() < 300 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    const auto processed = pipe.BatchesProcessed();
+    const auto drops = InternalMetrics::Instance().GetCounter(drops_counter);
+    const auto gauge = InternalMetrics::Instance().GetGauge(bp_gauge);
+    release.set_value(); // Always unblock before checking or stopping the pipeline.
 
+    EXPECT_EQ(processed, 300u);
     EXPECT_GT(pipe.ErrorCount(), 0u);
-    EXPECT_GT(InternalMetrics::Instance().GetCounter(drops_counter),
-              drops_before);
-    EXPECT_GE(InternalMetrics::Instance().GetGauge(bp_gauge), 1.0)
-        << "backpressure gauge should be 1.0 when pending > 128";
-
+    EXPECT_GT(drops, drops_before);
+    EXPECT_GE(gauge, 1.0);
     ASSERT_TRUE(pipe.Stop().ok());
 }
 

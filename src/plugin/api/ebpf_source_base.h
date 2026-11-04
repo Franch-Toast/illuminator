@@ -33,8 +33,7 @@
 #include <memory>
 #include <string>
 
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
+#include "ebpf_common/include/bpf_compat.h"
 
 #include "core/common/logging.h"
 #include "core/common/status.h"

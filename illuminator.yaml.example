@@ -1,42 +1,17 @@
-# ============================================================================
-# Illuminator — 配置文件示例
-# ============================================================================
-#
-# 架构: FeatureBus 事件驱动（Feature 由 REGISTER_FEATURE 宏注册）
-#   TimerWheel (1 thread)   → 全局定时调度 (timerfd + epoll)
-#   CollectPool (M threads) → 并行执行 Source::Collect()
-#   ProcessThread (1/pipe)  → 纯事件处理器 (variant dispatch)
-#   SinkPool (K threads)    → 并行执行 Sink::Write()
-#
-# Feature 的启停与参数通过 REST API (/api/v2/features) 管理，
-# 不再通过 YAML pipelines 节配置。
-# ============================================================================
-
-# ---- 全局设置 ----
+# Core runtime configuration. Pipeline assembly belongs to the caller.
 global:
-  log_level: info                     # trace | debug | info | warn | error
-  log_file: ""                        # 日志文件路径（空 = 仅控制台输出）
-  log_max_size: 10485760              # 单文件最大字节数（默认 10MB）
-  log_max_files: 3                    # 轮转保留文件数
-  data_dir: /var/lib/illuminator      # [已启用] 默认录制/持久化数据目录
-  auto_start: false                   # [已启用] true=启动时自动 ProbeAll；false=等待前端 API 控制
-  plugin_dirs:                        # 外部插件搜索路径
-    - /etc/illuminator/plugins
-    - ./plugins
+  log_level: info
+  log_file: ""
+  log_max_size: 10485760
+  log_max_files: 3
+  data_dir: ./data
+  plugin_dirs: []
 
-# ---- HTTP 服务器 ----
-server:
-  http:
-    enabled: true
-    listen: "127.0.0.1:9527"          # REST API + SSE + Prometheus /metrics (默认仅本机)
-    # listen: "0.0.0.0:9527"          # 如需外部访问取消此注释
-
-# ---- 管道引擎配置 ----
 engine:
-  collect_pool_threads: 2             # CollectPool 线程数 (0=auto: 2)
-  sink_pool_threads: 4                # SinkPool 线程数 (0=auto: CPU/2)
-  channel:                            # [已启用] 传递给 Pipeline AsyncChannel
-    size: medium                      # small(1024) | medium(4096) | large(16384)
+  collect_pool_threads: 2
+  sink_pool_threads: 4
+  channel:
+    size: medium                     # small(1024) | medium(4096) | large(16384)
     drop_policy: drop_newest          # drop_newest | drop_oldest
-    backpressure_high: 0.8            # 触发反压的水位线
-    backpressure_low: 0.2             # 解除反压的水位线
+    backpressure_high: 0.8
+    backpressure_low: 0.2

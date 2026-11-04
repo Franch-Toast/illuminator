@@ -38,24 +38,24 @@ TEST(ConfigValueTest, SetAndReadScalarKeys) {
     ConfigValue c;
     c.Set("name", std::string("illuminator"));
     c.Set("host", "127.0.0.1");
-    c.Set("port", static_cast<int64_t>(9527));
+    c.Set("threads", static_cast<int64_t>(4));
 
     EXPECT_EQ(c["name"].AsString(), "illuminator");
     EXPECT_EQ(c["host"].AsString(), "127.0.0.1");
-    EXPECT_EQ(c["port"].AsInt(), 9527);
+    EXPECT_EQ(c["threads"].AsInt(), 4);
 }
 
 // 嵌套语义：使用点号扁平键名时，多层 operator[] 应能定位到叶子值。
 TEST(ConfigValueTest, NestedKeysUseDotNotation) {
     ConfigValue c;
-    c.Set("server.http.listen", "0.0.0.0:9527");
+    c.Set("engine.channel.size", "small");
 
-    ConfigValue server = c["server"];
-    ConfigValue http = server["http"];
-    EXPECT_EQ(http["listen"].AsString(), "0.0.0.0:9527");
+    ConfigValue engine = c["engine"];
+    ConfigValue channel = engine["channel"];
+    EXPECT_EQ(channel["size"].AsString(), "small");
 
     // 亦可链式访问
-    EXPECT_EQ(c["server"]["http"]["listen"].AsString(), "0.0.0.0:9527");
+    EXPECT_EQ(c["engine"]["channel"]["size"].AsString(), "small");
 }
 
 // operator[]：既匹配精确键，也收集带前缀的子键，形成子 ConfigValue。

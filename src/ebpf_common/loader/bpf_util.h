@@ -24,8 +24,7 @@
 #include <linux/perf_event.h>
 #include <unistd.h>
 
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
+#include "ebpf_common/include/bpf_compat.h"
 
 #include "core/common/logging.h"
 #include "ebpf_common/include/event_types.h"

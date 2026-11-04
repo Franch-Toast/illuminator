@@ -16,8 +16,7 @@
 #include <unistd.h>
 #include <vector>
 
-#include <bpf/bpf.h>
-#include <bpf/libbpf.h>
+#include "ebpf_common/include/bpf_compat.h"
 
 #include "plugin/api/source_plugin.h"
 

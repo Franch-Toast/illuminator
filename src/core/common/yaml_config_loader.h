@@ -16,9 +16,6 @@
 //   global.log_level    -> GlobalConfig.log_level
 //   global.data_dir     -> GlobalConfig.data_dir
 //   global.plugin_dirs  -> GlobalConfig.plugin_dirs
-//   global.auto_start   -> GlobalConfig.auto_start
-//   server.http.enabled -> GlobalConfig.server.http_enabled
-//   server.http.listen  -> GlobalConfig.server.http_listen
 //   engine.*            -> GlobalConfig.engine
 // ============================================================================
 
@@ -128,19 +125,6 @@ private:
             if (global["plugin_dirs"]) {
                 for (const auto& dir : global["plugin_dirs"])
                     config.plugin_dirs.push_back(dir.as<std::string>());
-            }
-            if (global["auto_start"])
-                config.auto_start = global["auto_start"].as<bool>();
-        }
-
-        // 解析 [server] 节
-        if (auto server = root["server"]) {
-            // HTTP 子配置
-            if (auto http = server["http"]) {
-                if (http["enabled"])
-                    config.server.http_enabled = http["enabled"].as<bool>();
-                if (http["listen"])
-                    config.server.http_listen = http["listen"].as<std::string>();
             }
         }
 

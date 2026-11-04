@@ -31,29 +31,18 @@ cc_test(
     name = "pipeline_integration_test",
     srcs = ["pipeline_integration_test.cc"],
     deps = [
-        "//src/core:engine",
         "//src/core:common",
+        "//src/core:engine",
         "//src/plugin:api",
         "@googletest//:gtest_main",
     ],
 )
-
 
 cc_test(
     name = "infrastructure_manager_test",
     srcs = ["infrastructure_manager_test.cc"],
     deps = [
         "//src/core:engine",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_test(
-    name = "feature_bus_test",
-    srcs = ["feature_bus_test.cc"],
-    deps = [
-        "//src/core:engine",
-        "//src/plugin:api",
         "@googletest//:gtest_main",
     ],
 )
@@ -78,22 +67,20 @@ cc_test(
 )
 
 cc_test(
-    name = "recording_lifecycle_test",
-    srcs = ["recording_lifecycle_test.cc"],
-    deps = [
-        "//src/core:engine",
-        "//src/plugin:api",
-        "//src/plugin:feature_driver_factories",
-        "@googletest//:gtest_main",
-    ],
-)
-
-cc_test(
     name = "stress_test",
     srcs = ["stress_test.cc"],
     deps = [
         "//src/core:engine",
         "//src/plugin:api",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "pipeline_shutdown_test",
+    srcs = ["pipeline_shutdown_test.cc"],
+    deps = [
+        "//src/core:engine",
         "@googletest//:gtest_main",
     ],
 )

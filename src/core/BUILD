@@ -9,26 +9,26 @@ version_header(
 cc_library(
     name = "version",
     hdrs = ["common/version_generated.h"],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "common",
     hdrs = [
-        "common/status.h",
-        "common/logging.h",
         "common/config.h",
-        "common/string_util.h",
+        "common/logging.h",
         "common/proc_reader.h",
+        "common/status.h",
+        "common/string_util.h",
     ],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
     deps = [
-        "@spdlog",
         "@nlohmann_json//:json",
+        "@spdlog",
     ],
 )
 
@@ -38,19 +38,19 @@ cc_library(
         "memory/arena.h",
         "memory/lock_free_queue.h",
     ],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
 )
 
 cc_library(
     name = "threading",
     hdrs = [
-        "threading/thread_util.h",
         "threading/thread_pool.h",
+        "threading/thread_util.h",
     ],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
 )
 
@@ -59,8 +59,8 @@ cc_library(
     hdrs = [
         "common/data_batch.h",
     ],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
     deps = [
         ":common",
@@ -71,8 +71,8 @@ cc_library(
 cc_library(
     name = "serialization",
     hdrs = ["common/json_serializer.h"],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
     deps = [
         ":data",
@@ -82,23 +82,18 @@ cc_library(
 
 cc_library(
     name = "engine",
-    srcs = [
-        "engine/feature_driver.cc",
-    ],
     hdrs = [
         "engine/async_channel.h",
-        "engine/feature_bus.h",
-        "engine/feature_driver.h",
         "engine/infrastructure_manager.h",
         "engine/pid_manager.h",
         "engine/pipeline.h",
-        "engine/timer_wheel.h",
         "engine/self_observability.h",
+        "engine/timer_wheel.h",
     ],
-    strip_include_prefix = "",
     include_prefix = "core",
-    visibility = ["//visibility:public"],
     linkopts = ["-lbpf"],
+    strip_include_prefix = "",
+    visibility = ["//visibility:public"],
     deps = [
         ":common",
         ":data",
@@ -113,8 +108,8 @@ cc_library(
     hdrs = [
         "common/yaml_config_loader.h",
     ],
-    strip_include_prefix = "",
     include_prefix = "core",
+    strip_include_prefix = "",
     visibility = ["//visibility:public"],
     deps = [
         ":common",

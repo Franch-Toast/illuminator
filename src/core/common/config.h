@@ -5,7 +5,7 @@
 // 本文件定义了配置结构：
 // 1. ConfigValue — 扁平的键值对配置容器，支持嵌套 key 的点号表示法
 //    设计目标：避免递归类型问题，简化跨语言边界的配置传递
-// 2. GlobalConfig — 全局配置，包含日志、服务器和引擎设置
+// 2. GlobalConfig — 全局配置，包含日志、插件和引擎设置
 //
 // 设计理念：
 // - ConfigValue 使用扁平化存储（string->string map），嵌套通过 "parent.child" 键名实现
@@ -28,7 +28,7 @@ namespace illuminator {
 //
 // 核心设计：所有配置最终展开为 string → string 的映射表。
 // 嵌套配置通过点号（.）连接键名：
-//   server.http.listen → {"server.http.listen": "0.0.0.0:9527"}
+//   engine.channel.size → {"engine.channel.size": "medium"}
 //
 // 支持方便的读写操作：
 // - config.Set("key", value);               写入标量值
@@ -158,16 +158,8 @@ struct GlobalConfig {
     std::string log_file;                          // 日志文件路径（空 = 仅控制台）
     size_t log_max_size = 10 * 1024 * 1024;        // 单文件最大 10MB
     size_t log_max_files = 3;                      // 轮转文件数
-    std::string data_dir = "/var/lib/illuminator";
+    std::string data_dir = "./data";
     std::vector<std::string> plugin_dirs;
-    bool auto_start = false;                       // true=启动时全量运行pipeline; false=按需启动
-
-    // 服务器配置
-    struct ServerConfig {
-        bool http_enabled = true;
-        std::string http_listen = "127.0.0.1:9527";
-    } server;
-
     // 管道引擎配置
     EngineConfig engine;
 };

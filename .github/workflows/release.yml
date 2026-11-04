@@ -38,7 +38,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang python3
 
       - name: Build & Test
         run: |
@@ -140,9 +140,7 @@ jobs:
             ## Quick Start
 
             ```bash
-            docker run -d --name illuminator \
-              --cap-add CAP_BPF --cap-add CAP_PERFMON \
-              -p 9527:9527 \
+            docker run --rm \
               -v illuminator-data:/var/lib/illuminator \
               ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.docker.outputs.version }}
             ```

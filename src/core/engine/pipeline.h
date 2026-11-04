@@ -2,7 +2,7 @@
 // Illuminator Pipeline v3 — 事件驱动异步管道引擎
 // ============================================================================
 //
-// Pipeline 是数据处理的最小单元。每个 FeatureDriver 拥有一个 Pipeline。
+// Pipeline 是数据处理的最小单元，由运行入口持有并管理生命周期。
 //
 // 架构概览：
 //   TimerWheel (1 thread)  — 全局定时调度，触发 Collect 和 Flush 事件
@@ -35,6 +35,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <memory>
 #include <shared_mutex>
 #include <string>
@@ -76,7 +78,7 @@ inline DropPolicy ResolveDropPolicy(const std::string& policy) {
 // 每个 Pipeline 拥有独立的 AsyncChannel 和 ProcessThread。
 // 管道之间完全隔离，一个管道阻塞不影响其他管道。
 // 所有数据源统一通过 TimerWheel 定时调用 Collect() 采集。
-// SinkPool 由 FeatureDriver::Probe() 设置，Pipeline 通过 shared_ptr 持有。
+// SinkPool 由运行入口设置，Pipeline 通过 shared_ptr 持有。
 class Pipeline {
 public:
     explicit Pipeline(const std::string& name,
@@ -226,6 +228,15 @@ public:
         source_->Stop();
 
         if (process_thread_.joinable()) process_thread_.join();
+
+        // ProcessLoop has drained the channel and submitted its final batches.
+        // Wait only for this pipeline's writes; the shared pool remains usable.
+        {
+            std::unique_lock<std::mutex> lock(writes_mutex_);
+            writes_done_.wait(lock, [this] {
+                return pending_writes_.load(std::memory_order_acquire) == 0;
+            });
+        }
 
         for (auto& p : processors_) p->Stop();
         if (aggregator_) aggregator_->Stop();
@@ -514,8 +525,10 @@ private:
 
         std::shared_lock<std::shared_mutex> lock(sinks_mutex_);
         for (auto& sink : sinks_) {
+            pending_writes_.fetch_add(1, std::memory_order_relaxed);
             sink_pool_->Submit(
                 [sink, const_batch, this]() -> void {
+                    WriteCompletion completion{this};
                     auto status = sink->Write(const_batch);
                     if (!status.ok()) {
                         IL_WARN("Sink write error in pipeline '{}': {}",
@@ -568,6 +581,21 @@ private:
     AsyncChannel ingest_channel_;
     std::shared_ptr<ThreadPool> sink_pool_;
 
+    // Completion runs even when Write throws (packaged_task stores the exception).
+    struct WriteCompletion {
+        Pipeline* pipeline;
+        ~WriteCompletion() {
+            // The decrement and notification share the waiter's lock: a zero
+            // count must imply the completion no longer needs Pipeline state.
+            std::lock_guard<std::mutex> lock(pipeline->writes_mutex_);
+            if (pipeline->pending_writes_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                pipeline->writes_done_.notify_all();
+            }
+        }
+    };
+    std::atomic<size_t> pending_writes_{0};
+    std::mutex writes_mutex_;
+    std::condition_variable writes_done_;
     std::thread process_thread_;
 
     std::chrono::steady_clock::time_point last_flush_time_{};

@@ -12,7 +12,6 @@
 // - ConsoleSink     — 输出到 stdout（调试用）
 // - FileExportSink  — 写入 JSONL 文件
 // - LocalStorageSink — 写入本地 SQLite 存储
-// - SseSink       — SSE 实时数据推送
 // - PrometheusSink  — 暴露为 Prometheus 指标
 // - PprofExportSink — 导出为 pprof/折叠栈格式
 // - OtlpExportSink  — 导出到 OpenTelemetry Collector
@@ -20,21 +19,19 @@
 
 #pragma once
 
-#include <functional>
 #include <string>
 
 #include "plugin/api/plugin_api.h"
 
 namespace illuminator {
 
-using SsePublishCallback = std::function<void(const std::string& feature, const std::string& json_data)>;
-
 class SinkPlugin : public Plugin {
 public:
     PluginType Type() const override { return PluginType::kSink; }
 
     // ---- 写入数据 ----
-    // 将一批数据写入目标。ConstDataBatchPtr 保证 Sink 只读访问，避免并行 Write 数据竞争。
+    // 将一批数据写入目标。ConstDataBatchPtr 保证批次只读；使用 SinkPool 时，同一 Sink 可能并发 Write，
+    // 插件必须保护自身状态。Pipeline::Stop 会等待该管道的异步写入完成。
     virtual Status Write(ConstDataBatchPtr batch) = 0;
 
     // ---- 刷新缓冲 ----

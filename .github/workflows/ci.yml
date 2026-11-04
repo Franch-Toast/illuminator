@@ -34,7 +34,7 @@ jobs:
   # ===========================================================
 
   backend-build:
-    name: "C++ Backend Build"
+    name: "C++ Core Build"
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -53,7 +53,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang python3
 
       - name: Build all targets
         run: bazel build //src/...
@@ -79,7 +79,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang python3
 
       - name: Run all tests
         run: bazel test //src/... --test_output=errors --test_summary=detailed
@@ -93,69 +93,6 @@ jobs:
             bazel-testlogs/**/test.log
             bazel-testlogs/**/test.xml
           retention-days: 7
-
-  bpf-probes:
-    name: "eBPF Probe Compilation"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.14.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}-bpf
-          repository-cache: true
-
-      - name: Install clang and BPF headers
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
-            clang libbpf-dev
-
-      - name: Compile all BPF probes
-        run: bazel build //src/plugin/features:all_sources
-
-  frontend-build:
-    name: "Frontend Build + TypeCheck"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: web
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: TypeScript type check
-        run: npx tsc --noEmit
-
-      - name: ESLint
-        run: npx eslint src/ --max-warnings=100
-
-      - name: Vitest unit tests
-        run: npx vitest run
-
-      - name: Vite production build
-        run: npx vite build
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: web/dist/
-          retention-days: 3
 
   # ===========================================================
   # Layer 2 — Deep Checks (PR only)
@@ -181,7 +118,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang python3
 
       - name: Run tests with AddressSanitizer
         run: bazel test //src/... --config=asan --test_output=errors
@@ -216,7 +153,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends \
-            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang
+            libbpf-dev libelf-dev zlib1g-dev libsqlite3-dev clang python3
 
       - name: Run tests with ThreadSanitizer
         run: bazel test //src/... --config=tsan --test_output=errors
@@ -241,8 +178,6 @@ jobs:
     needs:
       - backend-build
       - backend-test
-      - bpf-probes
-      - frontend-build
       - sanitizer-asan
       - sanitizer-tsan
     runs-on: ubuntu-22.04
@@ -252,16 +187,12 @@ jobs:
           echo "=== Job Results ==="
           echo "backend-build:  ${{ needs.backend-build.result }}"
           echo "backend-test:   ${{ needs.backend-test.result }}"
-          echo "bpf-probes:     ${{ needs.bpf-probes.result }}"
-          echo "frontend-build: ${{ needs.frontend-build.result }}"
           echo "sanitizer-asan: ${{ needs.sanitizer-asan.result }}"
           echo "sanitizer-tsan: ${{ needs.sanitizer-tsan.result }}"
 
           # Layer-1 jobs must succeed
           if [[ "${{ needs.backend-build.result }}" != "success" ]] || \
-             [[ "${{ needs.backend-test.result }}" != "success" ]] || \
-             [[ "${{ needs.bpf-probes.result }}" != "success" ]] || \
-             [[ "${{ needs.frontend-build.result }}" != "success" ]]; then
+             [[ "${{ needs.backend-test.result }}" != "success" ]]; then
             echo "::error::One or more Layer-1 CI jobs failed"
             exit 1
           fi
@@ -333,4 +264,4 @@ jobs:
             --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}\t{{.CreatedAt}}"
           echo ""
           echo "Run locally:"
-          echo "  docker run --cap-add CAP_BPF --cap-add CAP_PERFMON -p 9527:9527 illuminator:${{ steps.tag.outputs.tag }}"
+          echo "  docker run --rm illuminator:${{ steps.tag.outputs.tag }}"
